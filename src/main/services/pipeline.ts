@@ -188,20 +188,65 @@ async function prepareNarration(options: {
   const srtPath = path.join(projectDir, 'subs.srt');
 
   const cache = readNarrationCache(projectDir);
+  const hasRaw =
+    fs.existsSync(rawPath) && fs.statSync(rawPath).size > 0;
+  const hasBuilt =
+    fs.existsSync(audioPath) && fs.statSync(audioPath).size > 0;
+  // Khi refresh=false: ưu tiên file narration đã có — không TTS lại chỉ vì hash
+  // lệch (voice setting resolve khác sau khi mở lại dự án).
   const canReuse =
     !options.refresh &&
     cache != null &&
-    cache.hash === hash &&
     cache.timings.length === scenes.length &&
-    fs.existsSync(rawPath) &&
-    fs.statSync(rawPath).size > 0;
+    (hasRaw || hasBuilt);
 
   let timings: SceneTiming[];
   let rawAudioDuration = 0;
   if (canReuse && cache) {
     timings = cache.timings;
-    rawAudioDuration = cache.audioDuration || (await getDurationSafe(rawPath, 0));
+    const reuseSource = hasRaw ? rawPath : audioPath;
+    rawAudioDuration = cache.audioDuration || (await getDurationSafe(reuseSource, 0));
     if (!fs.existsSync(srtPath)) fs.writeFileSync(srtPath, '', 'utf8');
+    if (!hasRaw && hasBuilt) {
+      // Chỉ có narration.mp3 — dùng luôn, bỏ bước rebuild track.
+      const durations = scenes.map((scene, index) => {
+        const timing = timings[index];
+        const spoken = timing?.hasSpeech ? timing.end - timing.start : 0;
+        const planned = Math.max(1, scene.duration_hint);
+        if (syncToSpeech) {
+          return Math.max(1, Math.round((spoken > 0 ? spoken : planned) * 1000) / 1000);
+        }
+        return Math.max(1, Math.round(Math.max(planned, spoken > 0 ? spoken : 0) * 1000) / 1000);
+      });
+      return {
+        audioPath,
+        srtPath,
+        script: {
+          ...options.script,
+          narration: text,
+          scenes: scenes.map((scene, index) => ({
+            ...scene,
+            duration_hint: durations[index],
+          })),
+        },
+        durations,
+        rawAudioDuration,
+      };
+    }
+  } else if (!options.refresh && (hasBuilt || hasRaw)) {
+    // Có file narration nhưng thiếu/không khớp timing cache → giữ audio, không TTS lại.
+    const source = hasBuilt ? audioPath : rawPath;
+    if (!hasBuilt && hasRaw) fs.copyFileSync(rawPath, audioPath);
+    if (!fs.existsSync(srtPath)) fs.writeFileSync(srtPath, '', 'utf8');
+    const durations = scenes.map((scene) => Math.max(1, scene.duration_hint));
+    const dur = await getDurationSafe(source, 0);
+    return {
+      audioPath,
+      srtPath,
+      script: { ...options.script, narration: text },
+      durations,
+      rawAudioDuration: dur,
+    };
   } else if (options.ttsProvider === 'elevenlabs') {
     const synthesized = await synthesizeWithElevenLabs({
       text,
@@ -643,7 +688,7 @@ export async function runGenerateJob(input: GenerateJobInput): Promise<GenerateJ
       phase: 'tts',
       message: refreshNarration
         ? `Bắt đầu vòng TTS fit duration (${ttsLabel}): ước lượng ~${formatDurationLabel(spokenEst)} → mục tiêu ${formatDurationLabel(targetRuntimeSec)}`
-        : 'Giữ voiceover hiện có — khớp lại mốc từng scene.',
+        : 'Giữ voiceover hiện có — không gọi TTS lại.',
       percent: 3,
     });
 

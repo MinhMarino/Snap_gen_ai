@@ -1776,6 +1776,7 @@ h2 {
   color: var(--text);
   background: transparent;
   text-align: left;
+  cursor: pointer;
 }
 
 .scene-list-item:hover {
@@ -1785,6 +1786,43 @@ h2 {
 .scene-list-item.active {
   border-color: rgba(37, 224, 208, 0.45);
   background: rgba(37, 224, 208, 0.06);
+}
+
+.scene-list-meta {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 4px;
+}
+
+.scene-regen-btn {
+  display: grid;
+  width: 24px;
+  height: 24px;
+  place-items: center;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--muted);
+  background: var(--surface-2);
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.scene-regen-btn:hover:not(:disabled) {
+  color: var(--text);
+  border-color: var(--accent);
+  background: rgba(37, 224, 208, 0.1);
+}
+
+.scene-regen-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.scene-regen-action {
+  margin-top: 12px;
+  gap: 8px;
 }
 
 .scene-thumb {
@@ -1864,11 +1902,50 @@ h2 {
   color: var(--text);
   background: #0d0f13;
   text-align: left;
+  display: flex;
+  flex-direction: column;
 }
 
 .media-card:hover,
 .media-card.active {
   border-color: var(--accent);
+}
+
+.media-card-select {
+  display: block;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  color: inherit;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+
+.media-card-select:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.media-card-regen {
+  width: 100%;
+  padding: 6px 8px;
+  border: 0;
+  border-top: 1px solid var(--line);
+  color: var(--muted);
+  background: #12151c;
+  font-size: 10px;
+  cursor: pointer;
+}
+
+.media-card-regen:hover:not(:disabled) {
+  color: var(--text);
+  background: rgba(37, 224, 208, 0.08);
+}
+
+.media-card-regen:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
 }
 
 .media-card-preview {
@@ -3035,6 +3112,18 @@ h2 {
   padding: 0;
   border: 0;
   background: transparent;
+}
+
+.narration-player {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.narration-player .hint {
+  margin: 0;
+  word-break: break-all;
 }
 
 .voiceover-toggle {

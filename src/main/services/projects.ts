@@ -201,7 +201,13 @@ export function getProject(id: string): ProjectDetail {
   }
 
   const srtPath = path.join(dir, 'subs.srt');
-  const audioPath = path.join(dir, 'narration.mp3');
+  const narrationMp3 = path.join(dir, 'narration.mp3');
+  const narrationRaw = path.join(dir, 'narration-raw.mp3');
+  const audioPath = fs.existsSync(narrationMp3)
+    ? narrationMp3
+    : fs.existsSync(narrationRaw)
+      ? narrationRaw
+      : null;
   const draft = readDraft(id);
   const mediaKind = draft?.mediaKind ?? 'video';
   const mediaDir = sceneMediaDir(dir, mediaKind);
@@ -227,7 +233,7 @@ export function getProject(id: string): ProjectDetail {
     draft,
     videoPath: hasVideo ? videoPath : null,
     srtPath: fs.existsSync(srtPath) ? srtPath : null,
-    audioPath: fs.existsSync(audioPath) ? audioPath : null,
+    audioPath,
     sceneMedia,
     projectDir: dir,
   };

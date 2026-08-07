@@ -71,7 +71,6 @@ export async function generateOneSceneMedia(
 ): Promise<string> {
   const prompt = buildSceneImagePrompt({
     visualPrompt: scene.visual_prompt,
-    narrationSegment: scene.narration_segment,
     language: ctx.language,
     stylePrompt: ctx.stylePrompt,
   });

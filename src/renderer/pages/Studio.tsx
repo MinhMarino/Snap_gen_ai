@@ -92,6 +92,7 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
   const [imageModels, setImageModels] = useState<ModelOption[]>([]);
   const [projectName, setProjectName] = useState('Untitled project');
   const [activeProjectId, setActiveProjectId] = useState<string | null>(projectId);
+  const [projectDir, setProjectDir] = useState<string | null>(null);
   const [mediaKind, setMediaKind] = useState<MediaKind>('video');
   const [family, setFamily] = useState<string>(defaultFamilyForKind('video'));
   const [modelId, setModelId] = useState(defaultModelIdForKind('video'));
@@ -124,12 +125,23 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
   const [exportOpen, setExportOpen] = useState(false);
   const [generateOpen, setGenerateOpen] = useState(false);
   const [hasNarration, setHasNarration] = useState(false);
+  const [narrationPath, setNarrationPath] = useState<string | null>(null);
+  const [narrationPlaying, setNarrationPlaying] = useState(false);
+  const narrationAudioRef = useRef<HTMLAudioElement | null>(null);
   const [voice, setVoice] = useState<ProjectVoiceSettings>({ ...DEFAULT_PROJECT_VOICE });
   const remuxTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const remuxRunning = useRef(false);
   const remuxPending = useRef<ScriptDraft | null>(null);
 
   const hasSceneMedia = sceneMedia.some((asset) => asset.exists);
+  const allScenesHaveMedia = useMemo(() => {
+    if (!script?.scenes.length) return false;
+    return script.scenes.every((scene, index) => {
+      const asset =
+        sceneMedia.find((item) => item.sceneId === scene.id) ?? sceneMedia[index];
+      return Boolean(asset?.exists);
+    });
+  }, [script, sceneMedia]);
   const canRemux = Boolean(activeProjectId && script?.scenes.length && hasSceneMedia);
 
   const models = mediaKind === 'image' ? imageModels : videoModels;
@@ -335,6 +347,7 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
           const refreshed = await window.studio.getProject(id);
           setSceneMedia(refreshed.sceneMedia);
           setHasNarration(Boolean(refreshed.audioPath));
+          setNarrationPath(refreshed.audioPath);
           if (refreshed.draft?.script) setScript(refreshed.draft.script);
           if (event.ok && event.result) {
             setResult(event.result);
@@ -365,6 +378,8 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
   useEffect(() => {
     return () => {
       if (remuxTimer.current) clearTimeout(remuxTimer.current);
+      narrationAudioRef.current?.pause();
+      narrationAudioRef.current = null;
     };
   }, []);
 
@@ -383,6 +398,13 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
         const detail = await window.studio.getProject(projectId);
         setSceneMedia(detail.sceneMedia);
         setHasNarration(Boolean(detail.audioPath));
+        setNarrationPath(detail.audioPath);
+        setProjectDir(detail.projectDir);
+        setNarrationPlaying(false);
+        if (narrationAudioRef.current) {
+          narrationAudioRef.current.pause();
+          narrationAudioRef.current = null;
+        }
         setActiveProjectId(detail.meta.id);
         setProjectName(detail.meta.name);
         const draft = detail.draft;
@@ -419,6 +441,8 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
             audioPath: detail.audioPath ?? '',
             title: draft?.script?.title ?? detail.meta.name,
           });
+        } else {
+          setResult(null);
         }
         const stillRunning = await attachRunningJob(detail.meta.id);
         if (!stillRunning) {
@@ -572,6 +596,8 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
     });
     setActiveProjectId(meta.id);
     onProjectReady(meta.id);
+    const created = await window.studio.getProject(meta.id);
+    setProjectDir(created.projectDir);
     return meta.id;
   };
 
@@ -603,6 +629,9 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
     });
     setActiveProjectId(meta.id);
     onProjectReady(meta.id);
+    void window.studio.getProject(meta.id).then((created) => {
+      setProjectDir(created.projectDir);
+    });
   };
 
   const onVoiceChange = (next: ProjectVoiceSettings) => {
@@ -645,6 +674,8 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
     });
     setActiveProjectId(meta.id);
     onProjectReady(meta.id);
+    const created = await window.studio.getProject(meta.id);
+    setProjectDir(created.projectDir);
     return meta.id;
   };
 
@@ -944,8 +975,12 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
       });
       setResult(generated);
       setHasNarration(Boolean(generated.audioPath));
+      setNarrationPath(generated.audioPath || null);
+      setProjectDir(generated.projectDir || null);
       const refreshed = await window.studio.getProject(id);
       setSceneMedia(refreshed.sceneMedia);
+      if (refreshed.audioPath) setNarrationPath(refreshed.audioPath);
+      if (refreshed.projectDir) setProjectDir(refreshed.projectDir);
       if (refreshed.draft?.script) {
         setScript(refreshed.draft.script);
         const totalSec =
@@ -963,7 +998,13 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
         type: 'ok',
         text: generated.stopped
           ? `Đã dừng. Xong ${generated.scenesCompleted ?? 0}/${generated.scenesTotal ?? '?'} scene — Generate lại scene còn thiếu khi sẵn sàng.`
-          : `Đã generate ${payload.regenerateSceneIds.length} scene và ghép Final (voiceover sync từng scene).`,
+          : payload.regenerateSceneIds.length === 0
+            ? payload.refreshNarration
+              ? 'Đã tạo lại voiceover và ghép Final.'
+              : 'Đã ghép lại Final với narration hiện có.'
+            : payload.regenerateSceneIds.length === 1
+              ? `Đã tạo lại ${mediaKind === 'image' ? 'ảnh' : 'video'} scene và ghép Final.`
+              : `Đã generate ${payload.regenerateSceneIds.length} scene và ghép Final.`,
       });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -972,6 +1013,51 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
       setToast({ type: 'error', text: message });
     } finally {
       setBusy(false);
+    }
+  };
+
+  const regenerateOneScene = (sceneId: string, sceneIndex: number) => {
+    if (!script || busy) return;
+    setSelectedScene(sceneIndex);
+    setPreviewMode('scene');
+    setActiveTool('script');
+    void confirmGenerate({
+      regenerateSceneIds: [sceneId],
+      refreshNarration: !(hasNarration || Boolean(narrationPath || result?.audioPath)),
+    });
+  };
+
+  const resolvedNarrationPath = narrationPath || result?.audioPath || null;
+  /** Đã xong video từng scene + voiceover → ẩn nút Generate chung (vẫn regen từng scene). */
+  const generationComplete =
+    allScenesHaveMedia && Boolean(hasNarration || resolvedNarrationPath);
+
+  const togglePlayNarration = async () => {
+    if (!resolvedNarrationPath) return;
+    const url = toFileUrl(resolvedNarrationPath);
+    let audio = narrationAudioRef.current;
+    if (!audio || audio.dataset.srcPath !== resolvedNarrationPath) {
+      audio?.pause();
+      audio = new Audio(url);
+      audio.dataset.srcPath = resolvedNarrationPath;
+      audio.onended = () => setNarrationPlaying(false);
+      audio.onpause = () => setNarrationPlaying(false);
+      audio.onplay = () => setNarrationPlaying(true);
+      narrationAudioRef.current = audio;
+    }
+    if (narrationPlaying && !audio.paused) {
+      audio.pause();
+      setNarrationPlaying(false);
+      return;
+    }
+    try {
+      await audio.play();
+      setNarrationPlaying(true);
+    } catch (err) {
+      setToast({
+        type: 'error',
+        text: err instanceof Error ? err.message : 'Không phát được narration.',
+      });
     }
   };
 
@@ -1170,14 +1256,23 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
                   sceneMedia.find((item) => item.sceneId === scene.id) ?? sceneMedia[index];
                 const thumbUrl =
                   asset?.exists && asset.kind === 'image' ? toFileUrl(asset.path) : null;
+                const mediaLabel = mediaKind === 'image' ? 'ảnh' : 'video';
                 return (
-                  <button
-                    type="button"
+                  <div
                     key={scene.id}
                     className={`scene-list-item ${selectedScene === index ? 'active' : ''}`}
+                    role="button"
+                    tabIndex={0}
                     onClick={() => {
                       setSelectedScene(index);
                       setPreviewMode('scene');
+                    }}
+                    onKeyDown={(event) => {
+                      if (event.key === 'Enter' || event.key === ' ') {
+                        event.preventDefault();
+                        setSelectedScene(index);
+                        setPreviewMode('scene');
+                      }
                     }}
                   >
                     <span className={`scene-thumb ${thumbUrl ? 'has-media' : ''}`}>
@@ -1201,8 +1296,22 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
                       </strong>
                       <small>{scene.visual_prompt || 'Empty visual prompt'}</small>
                     </span>
-                    <span className="scene-duration">{scene.duration_hint}s</span>
-                  </button>
+                    <span className="scene-list-meta">
+                      <span className="scene-duration">{scene.duration_hint}s</span>
+                      <button
+                        type="button"
+                        className="scene-regen-btn"
+                        title={`Tạo lại ${mediaLabel} scene ${index + 1}`}
+                        disabled={busy}
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          regenerateOneScene(scene.id, index);
+                        }}
+                      >
+                        ↻
+                      </button>
+                    </span>
+                  </div>
                 );
               })}
             </div>
@@ -1240,32 +1349,48 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
                 const scene = script?.scenes[index];
                 const thumbUrl =
                   asset.exists && asset.kind === 'image' ? toFileUrl(asset.path) : null;
+                const mediaLabel = mediaKind === 'image' ? 'ảnh' : 'video';
                 return (
-                  <button
-                    type="button"
+                  <div
                     key={asset.sceneId}
                     className={`media-card ${selectedScene === index ? 'active' : ''}`}
-                    disabled={!asset.exists}
-                    onClick={() => {
-                      setSelectedScene(index);
-                      setPreviewMode('scene');
-                    }}
                   >
-                    <span className={`media-card-preview ${thumbUrl ? 'has-media' : ''}`}>
-                      {thumbUrl ? (
-                        <img src={thumbUrl} alt="" />
-                      ) : (
-                        <span>{asset.kind === 'video' ? '▶' : '▧'}</span>
-                      )}
-                      <small>{String(index + 1).padStart(2, '0')}</small>
-                    </span>
-                    <span className="media-card-copy">
-                      <strong>Scene {index + 1}</strong>
-                      <small>
-                        {scene?.duration_hint ?? 0}s · {fileName(asset.path)}
-                      </small>
-                    </span>
-                  </button>
+                    <button
+                      type="button"
+                      className="media-card-select"
+                      disabled={!asset.exists}
+                      onClick={() => {
+                        setSelectedScene(index);
+                        setPreviewMode('scene');
+                      }}
+                    >
+                      <span className={`media-card-preview ${thumbUrl ? 'has-media' : ''}`}>
+                        {thumbUrl ? (
+                          <img src={thumbUrl} alt="" />
+                        ) : (
+                          <span>{asset.kind === 'video' ? '▶' : '▧'}</span>
+                        )}
+                        <small>{String(index + 1).padStart(2, '0')}</small>
+                      </span>
+                      <span className="media-card-copy">
+                        <strong>Scene {index + 1}</strong>
+                        <small>
+                          {scene?.duration_hint ?? 0}s · {fileName(asset.path)}
+                        </small>
+                      </span>
+                    </button>
+                    {scene && (
+                      <button
+                        type="button"
+                        className="media-card-regen"
+                        title={`Tạo lại ${mediaLabel} scene ${index + 1}`}
+                        disabled={busy}
+                        onClick={() => regenerateOneScene(scene.id, index)}
+                      >
+                        ↻ Tạo lại
+                      </button>
+                    )}
+                  </div>
                 );
               })}
             </div>
@@ -1302,16 +1427,29 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
             Mỗi dự án có giọng riêng — lưu trong draft, không dùng chung Settings toàn app.
           </p>
           <ProjectVoicePanel value={voice} disabled={busy} onChange={onVoiceChange} />
-          {result?.audioPath ? (
-            <button
-              type="button"
-              className="editor-secondary full-width media-folder-button"
-              onClick={() => void window.studio.showItemInFolder(result.audioPath)}
-            >
-              Mở file narration
-            </button>
+          {resolvedNarrationPath ? (
+            <div className="narration-player">
+              <button
+                type="button"
+                className="editor-primary full-width"
+                onClick={() => void togglePlayNarration()}
+              >
+                <span>{narrationPlaying ? 'Ⅱ' : '▶'}</span>
+                {narrationPlaying ? 'Tạm dừng narration' : 'Nghe lại toàn bộ narration'}
+              </button>
+              <button
+                type="button"
+                className="editor-secondary full-width media-folder-button"
+                onClick={() => void window.studio.showItemInFolder(resolvedNarrationPath)}
+              >
+                Mở file narration
+              </button>
+              <p className="hint">{fileName(resolvedNarrationPath)}</p>
+            </div>
           ) : (
-            <p className="hint">Narration sẽ được tạo khi Generate (có refresh voiceover).</p>
+            <p className="hint">
+              Chưa có narration. Bật “Tạo voiceover” khi Generate để tạo lần đầu.
+            </p>
           )}
         </>
       );
@@ -1362,6 +1500,21 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
           </button>
         </div>
         <div className="editor-command-right">
+          <button
+            type="button"
+            className="editor-secondary"
+            disabled={!projectDir && !result?.projectDir}
+            title={projectDir || result?.projectDir || 'Chưa có thư mục dự án'}
+            onClick={() => {
+              const dir = projectDir || result?.projectDir;
+              if (!dir) return;
+              void window.studio.openPath(dir).then((err) => {
+                if (err) setToast({ type: 'error', text: err });
+              });
+            }}
+          >
+            Mở folder
+          </button>
           {canRemux && (
             <button
               type="button"
@@ -1381,10 +1534,17 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
           >
             Lưu video...
           </button>
-          <button type="button" className="editor-primary" disabled={busy} onClick={() => void startJob()}>
-            <span>✦</span>
-            {busy ? 'Generating...' : result ? 'Regenerate' : 'Generate'}
-          </button>
+          {!generationComplete && (
+            <button
+              type="button"
+              className="editor-primary"
+              disabled={busy}
+              onClick={() => void startJob()}
+            >
+              <span>✦</span>
+              {busy ? 'Generating...' : hasSceneMedia || hasNarration ? 'Generate tiếp' : 'Generate'}
+            </button>
+          )}
         </div>
       </header>
 
@@ -1577,6 +1737,19 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
                     onChange={(event) => updateScene({ narration_segment: event.target.value })}
                   />
                 </div>
+                <button
+                  type="button"
+                  className="editor-secondary full-width scene-regen-action"
+                  disabled={busy}
+                  onClick={() => regenerateOneScene(currentScene.id, selectedScene)}
+                >
+                  <span>↻</span>
+                  {busy
+                    ? 'Đang tạo...'
+                    : currentAsset?.exists
+                      ? `Tạo lại ${mediaKind === 'image' ? 'ảnh' : 'video'} scene này`
+                      : `Tạo ${mediaKind === 'image' ? 'ảnh' : 'video'} scene này`}
+                </button>
               </div>
               <div className="inspector-section">
                 <div className="inspector-title">
@@ -1644,6 +1817,21 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
             <div className="timeline-tools">
               <button type="button" className="icon-button active" title="Select / kéo thả">
                 ↖
+              </button>
+              <button
+                type="button"
+                className="icon-button"
+                title={
+                  resolvedNarrationPath
+                    ? narrationPlaying
+                      ? 'Tạm dừng narration'
+                      : 'Nghe lại toàn bộ narration'
+                    : 'Chưa có narration'
+                }
+                disabled={!resolvedNarrationPath}
+                onClick={() => void togglePlayNarration()}
+              >
+                {narrationPlaying ? 'Ⅱ' : '♫'}
               </button>
               <span className="timeline-hint">
                 Kéo clip để đổi thứ tự · Kéo cạnh phải để đổi thời lượng · Thả ra sẽ ghép lại video (FFmpeg)
@@ -1721,7 +1909,7 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
           open={generateOpen}
           script={script}
           sceneMedia={sceneMedia}
-          hasNarration={hasNarration || Boolean(result?.audioPath)}
+          hasNarration={hasNarration || Boolean(resolvedNarrationPath)}
           busy={busy}
           progress={progress}
           onClose={() => setGenerateOpen(false)}

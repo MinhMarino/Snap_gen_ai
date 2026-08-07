@@ -457,12 +457,12 @@ export function resolveVisualLanguageLock(language?: string | null): string {
 }
 
 /**
- * Prompt gửi Snapgen: visual + style + locale + khóa language + trung thành lời thoại.
+ * Prompt gửi Snapgen: visual + style + locale + khóa language.
+ * Không gắn narration — lời thoại chỉ dùng cho TTS/subtitle, không đưa vào prompt gen media.
  * visual_prompt ưu tiên English mô tả hình; chữ trong ảnh chỉ theo Language đã chọn.
  */
 export function buildSceneImagePrompt(options: {
   visualPrompt: string;
-  narrationSegment?: string;
   language?: string | null;
   stylePrompt?: string;
 }): string {
@@ -483,16 +483,6 @@ export function buildSceneImagePrompt(options: {
 
   if (!lower.includes('language lock')) {
     prompt = `${prompt.trim()} ${languageLock}`;
-  }
-
-  const narration = String(options.narrationSegment || '').replace(/\s+/g, ' ').trim();
-  if (narration) {
-    const excerpt = narration.length > 280 ? `${narration.slice(0, 277)}…` : narration;
-    const fidelity =
-      'Match this narration exactly for who/what/where (age, gender, ethnicity, clothing, place, action) — do not swap characters or culture.';
-    if (!lower.includes('match this narration')) {
-      prompt = `${prompt.trim()} ${fidelity} Narration context: "${excerpt}"`;
-    }
   }
 
   return prompt.trim();

@@ -45,20 +45,22 @@ export default function GenerateScenesDialog({
   );
 
   const [selected, setSelected] = useState<Set<string>>(new Set());
-  const [refreshNarration, setRefreshNarration] = useState(true);
+  const [refreshNarration, setRefreshNarration] = useState(false);
 
   useEffect(() => {
     if (!open) return;
-    // Default: generate missing scenes; leave existing clips unchecked.
-    setSelected(new Set(missingIds.length ? missingIds : scenes.map((s) => s.id)));
+    // Default: chỉ scene thiếu. Đã có clip thì không auto chọn lại toàn bộ.
+    setSelected(new Set(missingIds));
     setRefreshNarration(!hasNarration);
   }, [open, missingIds, scenes, hasNarration]);
 
   if (!open) return null;
 
   const allSelected = scenes.length > 0 && selected.size === scenes.length;
-  // Cho phép 0 scene + chỉ refresh voiceover (không gọi Snapgen).
-  const canConfirm = selected.size > 0 || missingIds.length > 0 || refreshNarration;
+  const allHaveMedia = scenes.length > 0 && missingIds.length === 0;
+  // Cho phép: gen scene / chỉ refresh voiceover / chỉ ghép lại Final khi đã đủ clip.
+  const canConfirm =
+    selected.size > 0 || missingIds.length > 0 || refreshNarration || allHaveMedia;
 
   const toggle = (sceneId: string, locked: boolean) => {
     if (locked) return;
@@ -174,19 +176,24 @@ export default function GenerateScenesDialog({
               <input
                 type="checkbox"
                 checked={refreshNarration}
+                disabled={!hasNarration}
                 onChange={(event) => setRefreshNarration(event.target.checked)}
               />
               <span className="voiceover-switch" aria-hidden />
               <span className="voiceover-copy">
                 <strong>
-                  {refreshNarration ? 'Tạo lại voiceover + subtitle' : 'Giữ voiceover hiện có'}
+                  {!hasNarration
+                    ? 'Tạo voiceover + subtitle (lần đầu)'
+                    : refreshNarration
+                      ? 'Tạo lại voiceover + subtitle'
+                      : 'Giữ voiceover hiện có'}
                 </strong>
                 <small>
-                  {refreshNarration
-                    ? 'Đọc liền mạch cả kịch bản, Whisper chia mốc để scene khớp đúng lời của mình.'
-                    : hasNarration
-                      ? 'Không gọi TTS/Whisper lần này.'
-                      : 'Chưa có narration — sẽ tạo mới khi Generate.'}
+                  {!hasNarration
+                    ? 'Dự án chưa có narration — sẽ tạo mới khi Generate.'
+                    : refreshNarration
+                      ? 'Đọc liền mạch cả kịch bản, chia mốc để scene khớp đúng lời của mình.'
+                      : 'Dùng lại narration.mp3 đã có — không gọi TTS lần này.'}
                 </small>
               </span>
             </label>
@@ -194,6 +201,11 @@ export default function GenerateScenesDialog({
             {!allSelected && selected.size > 0 && (
               <p className="hint" style={{ padding: '0 18px' }}>
                 Scene không chọn sẽ giữ clip cũ (nếu có). Final vẫn ghép đủ tất cả scene.
+              </p>
+            )}
+            {allHaveMedia && selected.size === 0 && !refreshNarration && (
+              <p className="hint" style={{ padding: '0 18px' }}>
+                Đã đủ clip + narration. Bấm xác nhận để chỉ ghép lại Final (không gen lại).
               </p>
             )}
           </>
@@ -213,14 +225,14 @@ export default function GenerateScenesDialog({
                 for (const id of missingIds) ids.add(id);
                 onConfirm({
                   regenerateSceneIds: [...ids],
-                  refreshNarration: refreshNarration || !hasNarration,
+                  refreshNarration: hasNarration ? refreshNarration : true,
                 });
               }}
             >
               {selected.size === 0 && missingIds.length === 0
                 ? refreshNarration
                   ? 'Chỉ tạo lại voiceover'
-                  : 'Generate'
+                  : 'Ghép lại Final'
                 : `Generate ${Math.max(selected.size, missingIds.length)} scene`}
             </button>
           )}
