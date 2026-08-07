@@ -41,21 +41,52 @@ function resolveFfprobePath(): string {
 ffmpeg.setFfmpegPath(resolveFfmpegPath());
 ffmpeg.setFfprobePath(resolveFfprobePath());
 
-function run(cmd: ffmpeg.FfmpegCommand): Promise<void> {
+const DEFAULT_FFMPEG_TIMEOUT_MS = 10 * 60 * 1000;
+
+function run(
+  cmd: ffmpeg.FfmpegCommand,
+  options?: { timeoutMs?: number; label?: string }
+): Promise<void> {
+  const timeoutMs = options?.timeoutMs ?? DEFAULT_FFMPEG_TIMEOUT_MS;
+  const label = options?.label || 'ffmpeg';
   return new Promise((resolve, reject) => {
     const lines: string[] = [];
+    let settled = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+
+    const finish = (err?: Error) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      if (err) reject(err);
+      else resolve();
+    };
+
+    timer = setTimeout(() => {
+      try {
+        // fluent-ffmpeg exposes kill on the command instance.
+        (cmd as unknown as { kill?: (sig?: string) => void }).kill?.('SIGKILL');
+      } catch {
+        /* ignore */
+      }
+      finish(
+        new Error(
+          `${label} quá ${Math.round(timeoutMs / 1000)}s — đã dừng để tránh treo (thường do nối nhiều đoạn Veo).`
+        )
+      );
+    }, timeoutMs);
+
     cmd
       .on('stderr', (line: string) => {
-        if (lines.length < 40) lines.push(line);
+        if (lines.length < 60) lines.push(line);
       })
-      .on('end', () => resolve())
+      .on('end', () => finish())
       .on('error', (err: Error) => {
+        if (settled) return;
         const hint = lines.filter((l) => /error|invalid|failed|outside|unable/i.test(l)).slice(-6);
-        if (hint.length) {
-          reject(new Error(`${err.message}\n${hint.join('\n')}`));
-        } else {
-          reject(err);
-        }
+        finish(
+          hint.length ? new Error(`${err.message}\n${hint.join('\n')}`) : err
+        );
       })
       .run();
   });
@@ -234,6 +265,11 @@ export async function buildNarrationTrack(options: {
   return outputPath;
 }
 
+/**
+ * Nối nhiều đoạn video thành 1 file.
+ * Dùng filter_complex một lần (không normalize từng file rồi concat -c copy),
+ * vì Veo mp4 + concat demuxer dễ treo / rất chậm trên ổ ngoài.
+ */
 export async function concatClipFiles(
   clipPaths: string[],
   outputPath: string,
@@ -241,41 +277,60 @@ export async function concatClipFiles(
 ): Promise<string> {
   if (!clipPaths.length) throw new Error('No clips to concat.');
   if (clipPaths.length === 1) {
+    fs.mkdirSync(path.dirname(outputPath), { recursive: true });
     fs.copyFileSync(clipPaths[0], outputPath);
     return outputPath;
   }
 
   fs.mkdirSync(workDir, { recursive: true });
-  const normalized: string[] = [];
-  for (let i = 0; i < clipPaths.length; i++) {
-    const out = path.join(workDir, `seg-${i}.mp4`);
-    await run(
-      ffmpeg(clipPaths[i])
-        .videoFilters([
-          'scale=1280:720:force_original_aspect_ratio=decrease',
-          'pad=1280:720:(ow-iw)/2:(oh-ih)/2:black',
-          'fps=30',
-        ])
-        .outputOptions(['-an', '-c:v', 'libx264', '-preset', 'veryfast', '-pix_fmt', 'yuv420p', '-r', '30'])
-        .output(out)
-    );
-    normalized.push(out);
-  }
-
-  const listFile = path.join(workDir, 'seg-concat.txt');
-  fs.writeFileSync(
-    listFile,
-    normalized.map((p) => `file '${p.replace(/\\/g, '/')}'`).join('\n'),
-    'utf8'
-  );
   fs.mkdirSync(path.dirname(outputPath), { recursive: true });
+
+  const n = clipPaths.length;
+  const filterParts: string[] = [];
+  const concatInputs: string[] = [];
+  for (let i = 0; i < n; i++) {
+    filterParts.push(
+      `[${i}:v]scale=1280:720:force_original_aspect_ratio=decrease,` +
+        `pad=1280:720:(ow-iw)/2:(oh-ih)/2:black,fps=30,format=yuv420p,setsar=1[v${i}]`
+    );
+    concatInputs.push(`[v${i}]`);
+  }
+  filterParts.push(`${concatInputs.join('')}concat=n=${n}:v=1:a=0[vout]`);
+
+  const tmpOut = path.join(workDir, `concat-${Date.now()}.mp4`);
+  const cmd = ffmpeg();
+  for (const clip of clipPaths) {
+    cmd.input(clip);
+  }
   await run(
-    ffmpeg()
-      .input(listFile)
-      .inputOptions(['-f', 'concat', '-safe', '0'])
-      .outputOptions(['-c', 'copy'])
-      .output(outputPath)
+    cmd
+      .complexFilter(filterParts.join(';'))
+      .outputOptions([
+        '-map',
+        '[vout]',
+        '-an',
+        '-c:v',
+        'libx264',
+        '-preset',
+        'ultrafast',
+        '-crf',
+        '23',
+        '-pix_fmt',
+        'yuv420p',
+        '-movflags',
+        '+faststart',
+      ])
+      .output(tmpOut),
+    {
+      timeoutMs: 8 * 60 * 1000,
+      label: `Nối ${n} đoạn video`,
+    }
   );
+
+  if (!fs.existsSync(tmpOut) || fs.statSync(tmpOut).size < 1024) {
+    throw new Error(`Nối ${n} đoạn video thất bại — file output rỗng.`);
+  }
+  fs.renameSync(tmpOut, outputPath);
   return outputPath;
 }
 

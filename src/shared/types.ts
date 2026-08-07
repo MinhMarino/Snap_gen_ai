@@ -240,7 +240,11 @@ export interface GenerateJobInput {
   mediaKind: MediaKind;
   stylePrompt?: string;
   forceRegenerate?: boolean;
-  /** Scene ids to create or recreate. Missing scenes are always generated. */
+  /**
+   * Scene ids to create or recreate.
+   * - undefined: legacy — generate every scene that lacks a clip
+   * - string[] (including []): only these ids; never auto-pull other missing scenes
+   */
   regenerateSceneIds?: string[];
   /** When false and narration already exists, skip TTS + Whisper. Default true. */
   refreshNarration?: boolean;

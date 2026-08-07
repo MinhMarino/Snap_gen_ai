@@ -132,6 +132,7 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
   const remuxTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const remuxRunning = useRef(false);
   const remuxPending = useRef<ScriptDraft | null>(null);
+  const generateRunning = useRef(false);
 
   const hasSceneMedia = sceneMedia.some((asset) => asset.exists);
   const allScenesHaveMedia = useMemo(() => {
@@ -947,7 +948,8 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
     regenerateSceneIds: string[];
     refreshNarration: boolean;
   }) => {
-    if (!script) return;
+    if (!script || generateRunning.current) return;
+    generateRunning.current = true;
     setBusy(true);
     setError(null);
     setProgress({ phase: 'idle', message: 'Đang chuẩn bị pipeline...', percent: 0 });
@@ -1012,18 +1014,20 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
       setProgress({ phase: 'error', message: 'Generate thất bại', error: message });
       setToast({ type: 'error', text: message });
     } finally {
+      generateRunning.current = false;
       setBusy(false);
     }
   };
 
   const regenerateOneScene = (sceneId: string, sceneIndex: number) => {
-    if (!script || busy) return;
+    if (!script || busy || generateRunning.current) return;
     setSelectedScene(sceneIndex);
     setPreviewMode('scene');
     setActiveTool('script');
     void confirmGenerate({
       regenerateSceneIds: [sceneId],
-      refreshNarration: !(hasNarration || Boolean(narrationPath || result?.audioPath)),
+      // Regen 1 scene: giữ voiceover đã có; không TTS lại toàn bộ.
+      refreshNarration: false,
     });
   };
 

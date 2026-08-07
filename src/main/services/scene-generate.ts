@@ -223,7 +223,19 @@ export async function generateOneSceneMedia(
       }
 
       const clipPath = sceneMediaTarget(ctx.clipsDir, scene.id, 'mp4');
-      await concatClipFiles(segmentPaths, clipPath, path.join(segmentDir, 'merge'));
+      if (segmentPaths.length === 1) {
+        fs.copyFileSync(segmentPaths[0], clipPath);
+      } else {
+        onProgress?.({
+          state: 'generating',
+          attempt,
+          chunkIndex: plan.chunks.length - 1,
+          chunkTotal: plan.chunks.length,
+          detailPercent: 92,
+          local01: 0.92,
+        });
+        await concatClipFiles(segmentPaths, clipPath, path.join(segmentDir, 'merge'));
+      }
       onProgress?.({
         state: 'completed',
         attempt,

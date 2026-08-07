@@ -221,6 +221,7 @@ export default function GenerateScenesDialog({
               className="btn primary"
               disabled={!canConfirm}
               onClick={() => {
+                // Chỉ gen scene user chọn + scene thiếu (locked). Không tự chọn lại toàn bộ.
                 const ids = new Set(selected);
                 for (const id of missingIds) ids.add(id);
                 onConfirm({
@@ -233,7 +234,7 @@ export default function GenerateScenesDialog({
                 ? refreshNarration
                   ? 'Chỉ tạo lại voiceover'
                   : 'Ghép lại Final'
-                : `Generate ${Math.max(selected.size, missingIds.length)} scene`}
+                : `Generate ${new Set([...selected, ...missingIds]).size} scene`}
             </button>
           )}
         </footer>

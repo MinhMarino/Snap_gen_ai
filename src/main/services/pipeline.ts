@@ -773,9 +773,11 @@ export async function runGenerateJob(input: GenerateJobInput): Promise<GenerateJ
     // Give legacy filenames their canonical name first so the cache below hits.
     adoptSceneMedia(projectDir, script, mediaKind);
     const cachedPaths = resolveSceneMedia(projectDir, script, mediaKind);
-    const selectedIds = input.regenerateSceneIds
-      ? new Set(input.regenerateSceneIds)
-      : null;
+    // undefined = gen mọi scene thiếu (legacy).
+    // array (kể cả []) = CHỈ gen đúng id được chọn — không tự kéo scene thiếu khác vào
+    // (tránh loop gen hàng loạt khi remux / regen 1 scene).
+    const explicitSelection = Array.isArray(input.regenerateSceneIds);
+    const selectedIds = explicitSelection ? new Set(input.regenerateSceneIds) : null;
 
     const phase = mediaKind === 'image' ? 'image' : 'video';
     const label = mediaKind === 'image' ? 'ảnh' : 'video';
@@ -841,10 +843,10 @@ export async function runGenerateJob(input: GenerateJobInput): Promise<GenerateJ
     for (let i = 0; i < scenes.length; i++) {
       const scene = scenes[i];
       const cachedPath = cachedPaths[i];
-      const forceThis =
+      const selected =
         Boolean(input.forceRegenerate) ||
         (selectedIds != null && selectedIds.has(scene.id));
-      if (!forceThis && cachedPath) {
+      if (cachedPath && !selected) {
         mediaPaths[i] = cachedPath;
         localProgress[i] = 1;
         sceneStatuses[i] = {
@@ -852,9 +854,20 @@ export async function runGenerateJob(input: GenerateJobInput): Promise<GenerateJ
           state: 'cached',
           detailPercent: 100,
         };
-      } else {
-        workIndexes.push(i);
+        continue;
       }
+      if (selected || !explicitSelection) {
+        // Được chọn, hoặc chế độ legacy (không truyền regenerateSceneIds).
+        workIndexes.push(i);
+        continue;
+      }
+      // Explicit selection: scene không chọn và chưa có clip → bỏ qua, không tự gen.
+      sceneStatuses[i] = {
+        ...sceneStatuses[i],
+        state: 'skipped',
+        detailPercent: 0,
+        error: 'Bỏ qua — không nằm trong danh sách gen',
+      };
     }
     emitPoolProgress();
 
@@ -1019,12 +1032,9 @@ export async function runGenerateJob(input: GenerateJobInput): Promise<GenerateJ
       }
     }
 
-    // Đảm bảo mọi slot có path trước khi merge.
-    for (let i = 0; i < scenes.length; i++) {
-      if (!mediaPaths[i]) {
-        throw new Error(`Thiếu media cho scene ${i + 1} (${scenes[i].id}).`);
-      }
-    }
+    const missingIndexes = scenes
+      .map((_, index) => index)
+      .filter((index) => !mediaPaths[index]);
 
     fs.writeFileSync(
       path.join(projectDir, 'scene-manifest.json'),
@@ -1034,14 +1044,53 @@ export async function runGenerateJob(input: GenerateJobInput): Promise<GenerateJ
           sceneIndex: index,
           prompt: scene.visual_prompt,
           duration: scene.duration_hint,
-          mediaPath: mediaPaths[index],
+          mediaPath: mediaPaths[index] || null,
           mediaKind,
+          state: sceneStatuses[index]?.state,
         })),
         null,
         2
       ),
       'utf8'
     );
+
+    if (missingIndexes.length) {
+      const done = sceneStatuses.filter(
+        (s) => s.state === 'completed' || s.state === 'cached'
+      ).length;
+      const existingFinal = path.join(projectDir, 'final.mp4');
+      const hasFinal = fs.existsSync(existingFinal);
+      const sample = missingIndexes
+        .slice(0, 5)
+        .map((index) => `scene ${index + 1}`)
+        .join(', ');
+      updateProjectStatus(meta.id, hasFinal || done > 0 ? 'ready' : 'draft', {
+        hasVideo: hasFinal,
+        lastError: '',
+      });
+      emitProgress({
+        phase: 'done',
+        message:
+          `Đã xong ${done}/${scenes.length} scene. Còn thiếu ${missingIndexes.length} clip (${sample}` +
+          `${missingIndexes.length > 5 ? '…' : ''}) — chọn đúng scene thiếu để Generate, không tự gen lại toàn bộ.`,
+        percent: Math.max(lastOverallPercent, mediaOverallPercentFromPool(done, scenes.length)),
+        scenesCompleted: done,
+        sceneTotal: scenes.length,
+        sceneStatuses: sceneStatuses.map((s) => ({ ...s })),
+      });
+      return {
+        projectId: meta.id,
+        projectName: meta.name,
+        projectDir,
+        videoPath: hasFinal ? existingFinal : '',
+        srtPath,
+        audioPath,
+        title: script.title,
+        stopped: true,
+        scenesCompleted: done,
+        scenesTotal: scenes.length,
+      };
+    }
 
     emitProgress({
       phase: 'merge',

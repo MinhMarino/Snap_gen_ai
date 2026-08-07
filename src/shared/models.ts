@@ -356,19 +356,32 @@ export function planSceneChunks(
   family: string,
   desiredSeconds: number
 ): { mode: 'single' | 'extend' | 'multi-cut'; chunks: number[] } {
-  const max = maxSingleShotDuration(modelId);
-  const desired = Math.max(1, desiredSeconds);
+  const max = Math.max(1, maxSingleShotDuration(modelId));
+  // Chặn duration_hint lỗi / quá lớn — tránh vòng extend hàng trăm shot.
+  const desired = Math.min(Math.max(1, Number(desiredSeconds) || 1), max * 20);
 
   if (desired <= max + 0.25) {
     return { mode: 'single', chunks: [clampDuration(modelId, desired)] };
   }
 
+  // Scene chỉ dài hơn max một ít (vd. 11–12s với Veo 8s): gen 1 shot max
+  // thay vì 2 đoạn + FFmpeg concat (hay treo / rất chậm trên ổ ngoài).
+  if (desired <= max * 1.5) {
+    return { mode: 'single', chunks: [clampDuration(modelId, max)] };
+  }
+
   const chunks: number[] = [];
   let left = desired;
-  while (left > 0.4) {
+  const maxChunks = 20;
+  while (left > 0.4 && chunks.length < maxChunks) {
     const take = Math.min(left, max);
+    if (!(take > 0)) break;
     chunks.push(clampDuration(modelId, take));
     left -= take;
+  }
+
+  if (!chunks.length) {
+    return { mode: 'single', chunks: [clampDuration(modelId, Math.min(desired, max))] };
   }
 
   if (familySupportsExtend(family)) {
