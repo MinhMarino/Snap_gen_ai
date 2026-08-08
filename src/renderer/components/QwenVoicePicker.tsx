@@ -36,7 +36,7 @@ export default function QwenVoicePicker({
     [languageType]
   );
 
-  // Remap giọng Flash-only / Cherry+English → Vincent (giọng trầm).
+  // Remap speaker cũ / không khớp language → speaker Irodori phù hợp.
   useEffect(() => {
     const next = pickQwenVoiceForLanguage(languageType, value);
     if (next && next !== value) onChange(next);

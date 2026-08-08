@@ -13,6 +13,8 @@ export {
   qwenAgeLabel,
   qwenPurposeLabels,
   resolveQwenTtsVoice,
+  toIrodoriSpeakerId,
+  DEFAULT_RUNPOD_ENDPOINT_ID,
   QWEN_ENGLISH_DEEP_VOICE_IDS,
   QWEN_TTS_MODEL,
   QWEN_TTS_VOICE_CATALOG,
@@ -43,7 +45,7 @@ export const DEFAULT_PROJECT_VOICE: ProjectVoiceSettings = {
   elevenLabsVoiceId: '21m00Tcm4TlvDq8ikWAM',
   elevenLabsModelId: 'eleven_flash_v2_5',
   qwenTtsModel: DEFAULT_QWEN_TTS_MODEL,
-  qwenTtsVoice: 'Vincent',
+  qwenTtsVoice: 'Ryan',
   qwenLanguageType: 'English',
   qwenRegion: 'singapore',
 };

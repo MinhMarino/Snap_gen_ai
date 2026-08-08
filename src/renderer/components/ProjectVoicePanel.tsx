@@ -73,7 +73,7 @@ export default function ProjectVoicePanel({
 
   useEffect(() => {
     void window.studio.getElevenLabsSession().then(setElevenLabs);
-    void window.studio.getKeys().then((keys) => setQwenReady(Boolean(keys.dashscopeApiKey?.trim())));
+    void window.studio.getKeys().then((keys) => setQwenReady(Boolean(keys.runpodApiKey?.trim())));
     return window.studio.onElevenLabsSessionChange(setElevenLabs);
   }, []);
 
@@ -124,7 +124,7 @@ export default function ProjectVoicePanel({
             ElevenLabs {!elevenLabsReady ? '(cần API key ở Settings)' : ''}
           </option>
           <option value="qwen" disabled={!qwenReady}>
-            Qwen TTS {!qwenReady ? '(cần DashScope key ở Settings)' : ''}
+            Irodori TTS {!qwenReady ? '(cần RunPod key ở Settings)' : ''}
           </option>
         </select>
       </div>

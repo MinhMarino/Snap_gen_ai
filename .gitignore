@@ -8,3 +8,6 @@ projects/
 .idea/
 .vscode/
 *.local
+.env
+.env.*
+!.env.example

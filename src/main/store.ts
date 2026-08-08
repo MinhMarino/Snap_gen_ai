@@ -2,12 +2,12 @@ import { app, safeStorage } from 'electron';
 import fs from 'node:fs';
 import path from 'node:path';
 import type { ApiKeys, AppSettings } from '../shared/types';
-import { DEFAULT_QWEN_TTS_MODEL } from '../shared/types';
+import { DEFAULT_QWEN_TTS_MODEL, DEFAULT_RUNPOD_ENDPOINT_ID } from '../shared/types';
 
 const DEFAULT_KEYS: ApiKeys = {
   snapgenApiKey: '',
   openaiApiKey: '',
-  dashscopeApiKey: '',
+  runpodApiKey: '',
 };
 
 const DEFAULT_SETTINGS: AppSettings = {
@@ -18,9 +18,10 @@ const DEFAULT_SETTINGS: AppSettings = {
   elevenLabsVoiceId: '21m00Tcm4TlvDq8ikWAM',
   elevenLabsModelId: 'eleven_flash_v2_5',
   qwenTtsModel: DEFAULT_QWEN_TTS_MODEL,
-  qwenTtsVoice: 'Vincent',
+  qwenTtsVoice: 'Ryan',
   qwenLanguageType: 'English',
   qwenRegion: 'singapore',
+  runpodEndpointId: DEFAULT_RUNPOD_ENDPOINT_ID,
   burnSubtitles: false,
   maxConcurrentScenes: 5,
 };
@@ -51,7 +52,7 @@ export interface StoredElevenLabsKeyBlob {
 
 interface StoreFile {
   keysEnc?: string;
-  keysPlain?: ApiKeys & { elevenLabsApiKey?: string };
+  keysPlain?: ApiKeys & { elevenLabsApiKey?: string; dashscopeApiKey?: string };
   settings: AppSettings & { elevenLabsVoiceId?: string };
   elevenLabs?: ElevenLabsMeta;
   /** Auto-captured from in-app browser requests (encrypted when possible). */
@@ -89,27 +90,26 @@ export function writeStoreFile(data: StoreFile): void {
   writeFile(data);
 }
 
+function normalizeApiKeys(parsed: Partial<ApiKeys> & { dashscopeApiKey?: string }): ApiKeys {
+  return {
+    snapgenApiKey: parsed.snapgenApiKey ?? '',
+    openaiApiKey: parsed.openaiApiKey ?? '',
+    runpodApiKey: parsed.runpodApiKey || parsed.dashscopeApiKey || '',
+  };
+}
+
 export function getKeys(): ApiKeys {
   const data = readFile();
   if (data.keysEnc && safeStorage.isEncryptionAvailable()) {
     try {
       const raw = safeStorage.decryptString(Buffer.from(data.keysEnc, 'base64'));
-      const parsed = JSON.parse(raw) as ApiKeys & { elevenLabsApiKey?: string };
-      return {
-        snapgenApiKey: parsed.snapgenApiKey ?? '',
-        openaiApiKey: parsed.openaiApiKey ?? '',
-        dashscopeApiKey: parsed.dashscopeApiKey ?? '',
-      };
+      const parsed = JSON.parse(raw) as ApiKeys & { dashscopeApiKey?: string };
+      return normalizeApiKeys(parsed);
     } catch {
       return { ...DEFAULT_KEYS };
     }
   }
-  const plain = (data.keysPlain ?? {}) as Partial<ApiKeys>;
-  return {
-    snapgenApiKey: plain.snapgenApiKey ?? '',
-    openaiApiKey: plain.openaiApiKey ?? '',
-    dashscopeApiKey: plain.dashscopeApiKey ?? '',
-  };
+  return normalizeApiKeys((data.keysPlain ?? {}) as Partial<ApiKeys> & { dashscopeApiKey?: string });
 }
 
 export function saveKeys(keys: ApiKeys): void {
@@ -117,7 +117,7 @@ export function saveKeys(keys: ApiKeys): void {
   const clean: ApiKeys = {
     snapgenApiKey: keys.snapgenApiKey,
     openaiApiKey: keys.openaiApiKey,
-    dashscopeApiKey: keys.dashscopeApiKey ?? '',
+    runpodApiKey: keys.runpodApiKey ?? '',
   };
   if (safeStorage.isEncryptionAvailable()) {
     const enc = safeStorage.encryptString(JSON.stringify(clean)).toString('base64');
@@ -151,6 +151,8 @@ export function getSettings(): AppSettings {
     qwenTtsVoice: merged.qwenTtsVoice || DEFAULT_SETTINGS.qwenTtsVoice,
     qwenLanguageType: merged.qwenLanguageType || DEFAULT_SETTINGS.qwenLanguageType,
     qwenRegion,
+    runpodEndpointId:
+      String(merged.runpodEndpointId || '').trim() || DEFAULT_RUNPOD_ENDPOINT_ID,
     burnSubtitles: Boolean(merged.burnSubtitles),
     lastExportDir: merged.lastExportDir || '',
     maxConcurrentScenes: Math.max(
@@ -165,7 +167,12 @@ export function getSettings(): AppSettings {
 
 export function saveSettings(settings: AppSettings): void {
   const data = readFile();
-  data.settings = { ...DEFAULT_SETTINGS, ...settings };
+  data.settings = {
+    ...DEFAULT_SETTINGS,
+    ...settings,
+    runpodEndpointId:
+      String(settings.runpodEndpointId || '').trim() || DEFAULT_RUNPOD_ENDPOINT_ID,
+  };
   writeFile(data);
 }
 

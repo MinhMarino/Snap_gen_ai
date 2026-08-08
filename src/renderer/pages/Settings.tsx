@@ -8,6 +8,7 @@ import type {
 } from '../../shared/types';
 import {
   DEFAULT_QWEN_TTS_MODEL,
+  DEFAULT_RUNPOD_ENDPOINT_ID,
   ELEVENLABS_TTS_MODELS,
   OPENAI_CHAT_MODELS,
   OPENAI_TTS_MODELS,
@@ -31,7 +32,7 @@ export default function Settings() {
   const [keys, setKeys] = useState<ApiKeys>({
     snapgenApiKey: '',
     openaiApiKey: '',
-    dashscopeApiKey: '',
+    runpodApiKey: '',
   });
   const [settings, setSettings] = useState<AppSettings>({
     openaiModel: 'gpt-4o-mini',
@@ -41,9 +42,10 @@ export default function Settings() {
     elevenLabsVoiceId: '21m00Tcm4TlvDq8ikWAM',
     elevenLabsModelId: 'eleven_flash_v2_5',
     qwenTtsModel: DEFAULT_QWEN_TTS_MODEL,
-    qwenTtsVoice: 'Vincent',
+    qwenTtsVoice: 'Ryan',
     qwenLanguageType: 'English',
     qwenRegion: 'singapore',
+    runpodEndpointId: DEFAULT_RUNPOD_ENDPOINT_ID,
     burnSubtitles: false,
     maxConcurrentScenes: 5,
   });
@@ -167,10 +169,35 @@ export default function Settings() {
 
   const test = async (kind: 'snapgen' | 'openai' | 'elevenlabs' | 'qwen') => {
     setBusy(true);
-    setMsg(null);
+    setMsg(
+      kind === 'qwen'
+        ? {
+            type: 'ok',
+            text: 'Đang kiểm tra Irodori… (health + TTS ngắn, cold start có thể 30–180s)',
+          }
+        : null
+    );
     try {
-      if (kind !== 'elevenlabs') await window.studio.saveKeys(keys);
-      if (kind === 'qwen') await window.studio.saveSettings(settings);
+      if (kind !== 'elevenlabs') {
+        const keysToSave =
+          kind === 'qwen'
+            ? {
+                ...keys,
+                runpodApiKey: keys.runpodApiKey.replace(/^bearer\s+/i, '').trim(),
+              }
+            : keys;
+        if (kind === 'qwen' && keysToSave.runpodApiKey !== keys.runpodApiKey) {
+          setKeys(keysToSave);
+        }
+        await window.studio.saveKeys(keysToSave);
+      }
+      if (kind === 'qwen') {
+        await window.studio.saveSettings({
+          ...settings,
+          runpodEndpointId:
+            settings.runpodEndpointId?.trim() || DEFAULT_RUNPOD_ENDPOINT_ID,
+        });
+      }
       const res =
         kind === 'snapgen'
           ? await window.studio.testSnapgen()
@@ -293,24 +320,43 @@ export default function Settings() {
             onChange={(v) => setKeys({ ...keys, openaiApiKey: v })}
             placeholder="sk-..."
           />
-          <p className="hint">Vẫn cần OpenAI để viết kịch bản (ChatGPT), kể cả khi voice dùng ElevenLabs/Qwen.</p>
+          <p className="hint">Vẫn cần OpenAI để viết kịch bản (ChatGPT), kể cả khi voice dùng ElevenLabs/Irodori.</p>
         </div>
         <div className="field">
-          <label htmlFor="dashscope">DashScope API Key (Qwen TTS)</label>
+          <label htmlFor="runpod">RunPod API Key (Irodori TTS)</label>
           <SecretInput
-            id="dashscope"
-            value={keys.dashscopeApiKey}
-            onChange={(v) => setKeys({ ...keys, dashscopeApiKey: v })}
-            placeholder="sk-..."
+            id="runpod"
+            value={keys.runpodApiKey}
+            onChange={(v) => setKeys({ ...keys, runpodApiKey: v })}
+            placeholder="rp_..."
           />
           <p className="hint">
-            Key từ Alibaba Cloud Model Studio (Singapore / dashscope-intl).
+            Key từ{' '}
+            <a href="https://console.runpod.io/user/settings?tab=api-keys" target="_blank" rel="noreferrer">
+              RunPod Console → API Keys
+            </a>
+            . Dùng Bearer gọi endpoint Irodori (Qwen3-TTS 1.7B).
           </p>
+          <div className="field" style={{ marginTop: 12 }}>
+            <label htmlFor="runpod-endpoint">RunPod Endpoint ID</label>
+            <input
+              id="runpod-endpoint"
+              type="text"
+              value={settings.runpodEndpointId || DEFAULT_RUNPOD_ENDPOINT_ID}
+              onChange={(e) =>
+                setSettings({ ...settings, runpodEndpointId: e.target.value.trim() })
+              }
+              placeholder={DEFAULT_RUNPOD_ENDPOINT_ID}
+            />
+          </div>
           <div className="session-card-actions" style={{ marginTop: 8 }}>
             <button type="button" className="btn" disabled={busy} onClick={() => void test('qwen')}>
-              Kiểm tra Qwen TTS
+              {busy ? 'Đang kiểm tra…' : 'Kiểm tra Irodori TTS'}
             </button>
           </div>
+          <p className="hint" style={{ marginTop: 8 }}>
+            Cần key RunPod dạng <code>rp_…</code>. Key <code>IRODORI_API_KEYS</code> không dùng được ở đây.
+          </p>
         </div>
       </section>
 
@@ -498,8 +544,8 @@ export default function Settings() {
             <option value="elevenlabs" disabled={!elevenLabsReady}>
               ElevenLabs {!elevenLabsReady ? '(cần API key)' : ''}
             </option>
-            <option value="qwen" disabled={!keys.dashscopeApiKey?.trim()}>
-              Qwen TTS {!keys.dashscopeApiKey?.trim() ? '(cần DashScope key)' : ''}
+            <option value="qwen" disabled={!keys.runpodApiKey?.trim()}>
+              Irodori TTS (Qwen3) {!keys.runpodApiKey?.trim() ? '(cần RunPod key)' : ''}
             </option>
           </select>
         </div>

@@ -13,7 +13,6 @@ import type {
   LoadMoreUsageHistoryRequest,
   ProjectDraft,
 } from '../shared/types';
-import { DEFAULT_QWEN_TTS_MODEL } from '../shared/types';
 import { getKeys, getSettings, saveKeys, saveSettings } from './store';
 import { testAccount } from './services/snapgen';
 import { generateScript, testOpenAI } from './services/openai';
@@ -113,10 +112,10 @@ function registerIpc(): void {
     const keys = getKeys();
     const settings = getSettings();
     return testQwenTts({
-      apiKey: keys.dashscopeApiKey,
-      region: 'singapore',
+      apiKey: keys.runpodApiKey,
+      endpointId: settings.runpodEndpointId,
       voice: settings.qwenTtsVoice,
-      model: DEFAULT_QWEN_TTS_MODEL,
+      languageType: settings.qwenLanguageType,
     });
   });
   ipcMain.handle(IPC.getUsageQuotas, async () => getUsageSnapshot());

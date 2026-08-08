@@ -171,6 +171,8 @@ async function prepareNarration(options: {
   elevenLabsOriginalVoiceId?: string;
   elevenLabsVoiceName?: string;
   dashscopeApiKey?: string;
+  runpodApiKey?: string;
+  runpodEndpointId?: string;
   qwenTtsVoice?: string;
   qwenTtsModel?: string;
   qwenLanguageType?: string;
@@ -283,17 +285,18 @@ async function prepareNarration(options: {
       'utf8'
     );
   } else if (options.ttsProvider === 'qwen') {
-    if (!options.dashscopeApiKey?.trim()) {
-      throw new Error('Thiếu DashScope API key. Vào Settings để cấu hình Qwen TTS.');
+    const runpodKey = options.runpodApiKey?.trim() || options.dashscopeApiKey?.trim();
+    if (!runpodKey) {
+      throw new Error('Thiếu RunPod API key. Vào Settings để cấu hình Irodori TTS.');
     }
     const synthesized = await synthesizeContinuousNarrationWithQwen({
-      dashscopeApiKey: options.dashscopeApiKey,
+      runpodApiKey: runpodKey,
       openaiApiKey: apiKey,
       scenes,
-      voice: options.qwenTtsVoice || 'Vincent',
+      voice: options.qwenTtsVoice || 'Ryan',
       model: DEFAULT_QWEN_TTS_MODEL,
       languageType: options.qwenLanguageType,
-      region: 'singapore',
+      endpointId: options.runpodEndpointId,
       language: options.language,
       outDir: projectDir,
       fileName: RAW_NARRATION_FILE,
@@ -403,6 +406,8 @@ async function prepareNarrationFittingTarget(options: {
   elevenLabsOriginalVoiceId?: string;
   elevenLabsVoiceName?: string;
   dashscopeApiKey?: string;
+  runpodApiKey?: string;
+  runpodEndpointId?: string;
   qwenTtsVoice?: string;
   qwenTtsModel?: string;
   qwenLanguageType?: string;
@@ -422,6 +427,8 @@ async function prepareNarrationFittingTarget(options: {
     elevenLabsOriginalVoiceId: options.elevenLabsOriginalVoiceId,
     elevenLabsVoiceName: options.elevenLabsVoiceName,
     dashscopeApiKey: options.dashscopeApiKey,
+    runpodApiKey: options.runpodApiKey,
+    runpodEndpointId: options.runpodEndpointId,
     qwenTtsVoice: options.qwenTtsVoice,
     qwenTtsModel: options.qwenTtsModel,
     qwenLanguageType: options.qwenLanguageType,
@@ -434,7 +441,7 @@ async function prepareNarrationFittingTarget(options: {
       options.ttsProvider === 'elevenlabs'
         ? 'ElevenLabs'
         : options.ttsProvider === 'qwen'
-          ? 'Qwen TTS'
+          ? 'Irodori TTS'
           : 'OpenAI TTS';
     emitProgress({
       phase: 'tts',
@@ -588,7 +595,9 @@ export async function remuxProject(projectId: string): Promise<GenerateJobResult
         elevenLabsPublicOwnerId: voice.elevenLabsPublicOwnerId,
         elevenLabsOriginalVoiceId: voice.elevenLabsOriginalVoiceId,
         elevenLabsVoiceName: voice.elevenLabsVoiceName,
-        dashscopeApiKey: keys.dashscopeApiKey,
+        dashscopeApiKey: keys.runpodApiKey,
+        runpodApiKey: keys.runpodApiKey,
+        runpodEndpointId: settings.runpodEndpointId,
         qwenTtsVoice: voice.qwenTtsVoice,
         qwenTtsModel: voice.qwenTtsModel,
         qwenLanguageType: voice.qwenLanguageType,
@@ -667,8 +676,8 @@ export async function runGenerateJob(input: GenerateJobInput): Promise<GenerateJ
   if (voice.ttsProvider === 'openai' && !keys.openaiApiKey) {
     throw new Error('Thiếu OpenAI API key. Vào Settings để cấu hình.');
   }
-  if (voice.ttsProvider === 'qwen' && !keys.dashscopeApiKey?.trim()) {
-    throw new Error('Thiếu DashScope API key. Vào Settings để cấu hình Qwen TTS.');
+  if (voice.ttsProvider === 'qwen' && !keys.runpodApiKey?.trim()) {
+    throw new Error('Thiếu RunPod API key. Vào Settings để cấu hình Irodori TTS.');
   }
   if (voice.ttsProvider === 'elevenlabs') {
     if (!hasElevenLabsApiAccess()) {
@@ -748,7 +757,7 @@ export async function runGenerateJob(input: GenerateJobInput): Promise<GenerateJ
       voice.ttsProvider === 'elevenlabs'
         ? 'ElevenLabs'
         : voice.ttsProvider === 'qwen'
-          ? 'Qwen TTS'
+          ? 'Irodori TTS'
           : 'OpenAI TTS';
     emitProgress({
       phase: 'tts',
@@ -777,7 +786,9 @@ export async function runGenerateJob(input: GenerateJobInput): Promise<GenerateJ
           elevenLabsPublicOwnerId: voice.elevenLabsPublicOwnerId,
           elevenLabsOriginalVoiceId: voice.elevenLabsOriginalVoiceId,
           elevenLabsVoiceName: voice.elevenLabsVoiceName,
-          dashscopeApiKey: keys.dashscopeApiKey,
+          dashscopeApiKey: keys.runpodApiKey,
+          runpodApiKey: keys.runpodApiKey,
+          runpodEndpointId: settings.runpodEndpointId,
           qwenTtsVoice: voice.qwenTtsVoice,
           qwenTtsModel: voice.qwenTtsModel,
           qwenLanguageType: voice.qwenLanguageType,
@@ -799,7 +810,9 @@ export async function runGenerateJob(input: GenerateJobInput): Promise<GenerateJ
           elevenLabsPublicOwnerId: voice.elevenLabsPublicOwnerId,
           elevenLabsOriginalVoiceId: voice.elevenLabsOriginalVoiceId,
           elevenLabsVoiceName: voice.elevenLabsVoiceName,
-          dashscopeApiKey: keys.dashscopeApiKey,
+          dashscopeApiKey: keys.runpodApiKey,
+          runpodApiKey: keys.runpodApiKey,
+          runpodEndpointId: settings.runpodEndpointId,
           qwenTtsVoice: voice.qwenTtsVoice,
           qwenTtsModel: voice.qwenTtsModel,
           qwenLanguageType: voice.qwenLanguageType,

@@ -1,10 +1,12 @@
 import type { QwenTtsVoiceOption } from './types';
 
-/** Model Qwen TTS cloud (DashScope Singapore). Giữ ở đây để tránh circular import với types.ts. */
-export const DEFAULT_QWEN_TTS_MODEL = 'qwen3-tts-instruct-flash';
+/** Model hiển thị — backend thực tế là Irodori Qwen3-TTS 1.7B trên RunPod. */
+export const DEFAULT_QWEN_TTS_MODEL = 'irodori-qwen3-tts-1.7b';
 
 /** @deprecated Dùng DEFAULT_QWEN_TTS_MODEL — giữ alias tương thích. */
 export const QWEN_TTS_MODEL = DEFAULT_QWEN_TTS_MODEL;
+
+export const DEFAULT_RUNPOD_ENDPOINT_ID = '3gq6tivo3ms4ls';
 
 export const QWEN_VOICE_AGES = [
   { id: 'child' as const, label: 'Trẻ em' },
@@ -33,516 +35,140 @@ export type QwenVoiceFilter = {
   purpose?: NonNullable<QwenTtsVoiceOption['purposes']>[number] | '';
 };
 
-/**
- * Voice được DashScope hỗ trợ trên qwen3-tts-instruct-flash (model mặc định của app).
- * Các giọng còn lại trong catalog chỉ dùng được với qwen3-tts-flash (Flash thuần).
- * Nguồn: https://help.aliyun.com/en/model-studio/qwen-tts-voice-list
- */
-export const QWEN_INSTRUCT_FLASH_VOICE_IDS = new Set<string>([
-  'Cherry',
-  'Serena',
-  'Ethan',
-  'Chelsie',
-  'Momo',
+/** 9 speaker CustomVoice của Irodori (ID API đúng underscore). */
+export const IRODORI_SPEAKER_IDS = [
   'Vivian',
-  'Moon',
-  'Maia',
-  'Kai',
-  'Nofish',
-  'Bella',
-  'Eldric Sage',
-  'Mia',
-  'Mochi',
-  'Bellona',
-  'Vincent',
-  'Bunny',
-  'Neil',
-  'Elias',
-  'Arthur',
-  'Nini',
-  'Seren',
-  'Pip',
-  'Stella',
-]);
+  'Serena',
+  'Uncle_Fu',
+  'Dylan',
+  'Eric',
+  'Ryan',
+  'Aiden',
+  'Ono_Anna',
+  'Sohee',
+] as const;
 
-export function isQwenInstructFlashModel(model?: string | null): boolean {
-  return String(model || DEFAULT_QWEN_TTS_MODEL)
-    .toLowerCase()
-    .includes('instruct-flash');
+export type IrodoriSpeakerId = (typeof IRODORI_SPEAKER_IDS)[number];
+
+/** Chuẩn hóa voice ID → speaker API (vd. "Ono Anna" → "Ono_Anna"). */
+export function toIrodoriSpeakerId(voiceId?: string | null): string {
+  const raw = String(voiceId || '')
+    .trim()
+    .replace(/\s+/g, '_');
+  if (!raw) return 'Vivian';
+  const hit = IRODORI_SPEAKER_IDS.find((id) => id.toLowerCase() === raw.toLowerCase());
+  return hit || raw;
 }
 
-/** Voice có dùng được với model đang chọn không. */
-export function isQwenVoiceSupportedByModel(
-  voiceId?: string | null,
-  model?: string | null
-): boolean {
-  const id = String(voiceId || '').trim();
-  if (!id) return false;
-  if (!isQwenInstructFlashModel(model)) return QWEN_TTS_VOICE_CATALOG.some((v) => v.id === id);
-  return QWEN_INSTRUCT_FLASH_VOICE_IDS.has(id);
+export function isQwenInstructFlashModel(_model?: string | null): boolean {
+  // Irodori custom_voice luôn nhận `instruct` tùy chọn — không còn DashScope Instruct-Flash.
+  return true;
+}
+
+export function isQwenVoiceSupportedByModel(voiceId?: string | null, _model?: string | null): boolean {
+  const id = toIrodoriSpeakerId(voiceId);
+  return IRODORI_SPEAKER_IDS.some((s) => s === id);
 }
 
 /**
- * Catalog voice Qwen3-TTS (+ Instruct-Flash subset) + tag lọc (giới tính, tuổi, mục đích).
+ * Catalog 9 voice Irodori Qwen3-TTS CustomVoice (RunPod).
+ * Nguồn: API.md §5
  */
 export const QWEN_TTS_VOICE_CATALOG: readonly QwenTtsVoiceOption[] = [
   {
-    id: 'Ono Anna',
-    label: 'Ono Anna',
-    description:
-      'Nữ — childhood friend thông minh, nhanh nhẹn. Tone thân mật, gần gũi, hợp narration tiếng Nhật nhẹ nhàng / slice-of-life.',
+    id: 'Vivian',
+    label: 'Vivian',
+    description: 'Nữ trẻ sáng, hơi sắc — host năng động, product pitch, Chinese / English.',
     gender: 'female',
     age: 'young',
-    purposes: ['narration', 'anime', 'entertainment'],
-    presetFor: ['Japanese'],
-  },
-  {
-    id: 'Cherry',
-    label: 'Cherry',
-    description:
-      'Nữ trẻ — nắng, tích cực, thân thiện và tự nhiên. Giọng đa ngôn ngữ ổn định, phù hợp explainer và voiceover chung.',
-    gender: 'female',
-    age: 'young',
-    purposes: ['narration', 'explainer', 'entertainment'],
-    presetFor: ['Japanese', 'Chinese', 'Auto'],
-  },
-  {
-    id: 'Ethan',
-    label: 'Ethan',
-    description:
-      'Nam — Mandarin chuẩn hơi Bắc; ấm, năng lượng, sống động. Hợp storytelling năng động, trailer ngắn, tiếng Nhật/Anh/Trung.',
-    gender: 'male',
-    age: 'young',
-    purposes: ['narration', 'documentary', 'entertainment'],
-    presetFor: ['Japanese', 'Chinese', 'Auto'],
-  },
-  {
-    id: 'Mochi',
-    label: 'Mochi',
-    description:
-      'Nam trẻ — thông minh, nhanh trí, vừa ngây thơ vừa có chiều sâu. Vibe anime / youthful, hợp kịch bản tiếng Nhật vui, nhẹ.',
-    gender: 'male',
-    age: 'young',
-    purposes: ['anime', 'entertainment', 'comedy'],
-    presetFor: ['Japanese'],
-  },
-  {
-    id: 'Stella',
-    label: 'Stella',
-    description:
-      'Nữ teen — ngọt, hơi “mơ”; khi cần có thể chuyển sang tone quyết liệt (anime heroine). Hợp JP narration phong cách anime.',
-    gender: 'female',
-    age: 'young',
-    purposes: ['anime', 'entertainment', 'narration'],
-    presetFor: ['Japanese'],
-  },
-  {
-    id: 'Ryan',
-    label: 'Ryan',
-    description:
-      'Nam — đầy nhịp điệu, kịch tính, cân bằng chân thật và căng thẳng. Hợp documentary / trailer / narration drama. (Chỉ qwen3-tts-flash — không dùng với Instruct-Flash.)',
-    gender: 'male',
-    age: 'adult',
-    purposes: ['documentary', 'narration', 'brand'],
-    presetFor: ['Japanese', 'English'],
+    purposes: ['entertainment', 'brand', 'narration'],
+    presetFor: ['Chinese', 'English', 'Auto'],
   },
   {
     id: 'Serena',
     label: 'Serena',
-    description:
-      'Nữ trẻ — dịu dàng, êm. Phù hợp storytelling chậm, meditation-adjacent, hoặc nội dung cần cảm giác ấm áp.',
+    description: 'Nữ trẻ ấm, dịu — storytelling chậm, narration ấm áp, Chinese / English.',
     gender: 'female',
     age: 'young',
     purposes: ['narration', 'sleep', 'explainer'],
-    presetFor: ['Japanese', 'Chinese'],
+    presetFor: ['Chinese', 'English'],
   },
   {
-    id: 'Chelsie',
-    label: 'Chelsie',
-    description:
-      'Nữ — vibe “virtual girlfriend” 2D, dễ thương, gần gũi. Hợp nội dung giải trí, character-style, JP/CN casual.',
-    gender: 'female',
-    age: 'young',
-    purposes: ['anime', 'entertainment'],
-    presetFor: ['Japanese', 'Chinese'],
+    id: 'Uncle_Fu',
+    label: 'Uncle Fu',
+    description: 'Nam trung niên trầm ấm — kể chuyện Chinese, lore, narration chín chắn.',
+    gender: 'male',
+    age: 'elder',
+    purposes: ['narration', 'documentary'],
+    presetFor: ['Chinese'],
   },
   {
-    id: 'Momo',
-    label: 'Momo',
-    description: 'Nữ — tinh nghịch, vui vẻ, mang cảm giác cổ vũ / cheer-up. Hợp short-form vui tươi.',
-    gender: 'female',
-    age: 'young',
-    purposes: ['entertainment', 'comedy'],
-  },
-  {
-    id: 'Vivian',
-    label: 'Vivian',
-    description: 'Nữ — tự tin, dễ thương, hơi “cay” nhẹ. Hợp product pitch hoặc host năng động.',
-    gender: 'female',
-    age: 'young',
-    purposes: ['entertainment', 'brand', 'narration'],
-  },
-  {
-    id: 'Moon',
-    label: 'Moon',
-    description: 'Nam (Yuebai) — mạnh mẽ, đẹp trai, rõ ràng. Hợp narration anh hùng / fantasy / epic nhẹ.',
+    id: 'Dylan',
+    label: 'Dylan',
+    description: 'Nam trẻ Bắc Kinh — rõ, tự nhiên; Mandarin Bắc Kinh + English.',
     gender: 'male',
     age: 'young',
-    purposes: ['narration', 'documentary', 'anime'],
+    purposes: ['narration', 'entertainment'],
+    presetFor: ['Chinese', 'English'],
   },
   {
-    id: 'Maia',
-    label: 'Maia',
-    description: 'Nữ — trí tuệ kết hợp dịu dàng. Hợp giáo dục, explain phức tạp nhưng vẫn ấm.',
-    gender: 'female',
-    age: 'adult',
-    purposes: ['explainer', 'narration'],
-  },
-  {
-    id: 'Kai',
-    label: 'Kai',
-    description: 'Nam — êm, thư giãn như “audio spa”. Hợp ASMR-adjacent, wellness, sleep intro.',
-    gender: 'male',
-    age: 'adult',
-    purposes: ['sleep', 'narration'],
-  },
-  {
-    id: 'Nofish',
-    label: 'Nofish',
-    description: 'Nam — designer; không phát âm retroflex chuẩn (đặc trưng). Giọng đặc biệt, mang cá tính.',
+    id: 'Eric',
+    label: 'Eric',
+    description: 'Nam Thành Đô / Tứ Xuyên — hơi khàn sáng, sinh động.',
     gender: 'male',
     age: 'adult',
     purposes: ['entertainment', 'narration'],
+    presetFor: ['Chinese'],
   },
   {
-    id: 'Bella',
-    label: 'Bella',
-    description: 'Nữ trẻ — sôi nổi, tinh nghịch, bubbly. Hợp nội dung vui, social, character trẻ.',
-    gender: 'female',
-    age: 'young',
-    purposes: ['entertainment', 'comedy', 'anime'],
-  },
-  {
-    id: 'Jennifer',
-    label: 'Jennifer',
-    description:
-      'Nữ — American English cinematic, chất lượng premium. Rất hợp tiếng Anh narration / brand film.',
-    gender: 'female',
+    id: 'Ryan',
+    label: 'Ryan',
+    description: 'Nam năng động, nhịp mạnh — podcast / documentary / trailer English.',
+    gender: 'male',
     age: 'adult',
-    purposes: ['brand', 'narration', 'documentary'],
-    presetFor: ['English'],
-  },
-  {
-    id: 'Katerina',
-    label: 'Katerina',
-    description: 'Nữ trưởng thành — nhịp điệu giàu, đáng nhớ. Hợp storytelling chín chắn, documentary.',
-    gender: 'female',
-    age: 'adult',
-    purposes: ['documentary', 'narration'],
+    purposes: ['documentary', 'narration', 'brand'],
+    presetFor: ['English', 'Chinese', 'Auto'],
   },
   {
     id: 'Aiden',
     label: 'Aiden',
-    description: 'Nam trẻ Mỹ — thân thiện, đời thường (cooking vibe). Hợp English casual / howto.',
+    description: 'Nam Mỹ sunny, trung âm rõ — English casual / howto / friendly host.',
     gender: 'male',
     age: 'young',
     purposes: ['explainer', 'entertainment', 'narration'],
     presetFor: ['English'],
   },
   {
-    id: 'Eldric Sage',
-    label: 'Eldric Sage',
-    description:
-      'Nam lớn tuổi — điềm đạm, khôn ngoan; “weathered like pine, clear as a mirror”. Giọng trầm, hợp English documentary / lore.',
-    gender: 'male',
-    age: 'elder',
-    purposes: ['narration', 'documentary', 'anime'],
-    presetFor: ['English'],
-  },
-  {
-    id: 'Mia',
-    label: 'Mia',
-    description: 'Nữ — dịu như suối xuân, mềm mại. Hợp fairy-tale, lullaby-like, soft narration.',
+    id: 'Ono_Anna',
+    label: 'Ono Anna',
+    description: 'Nữ Nhật vui, linh hoạt — anime / VTuber / narration tiếng Nhật (best JP).',
     gender: 'female',
     age: 'young',
-    purposes: ['narration', 'sleep', 'kids'],
-  },
-  {
-    id: 'Bellona',
-    label: 'Bellona',
-    description:
-      'Giọng mạnh, rõ, mang tính biểu diễn nhân vật — hùng tráng, đầy cảm xúc. Hợp epic / trailer / drama lớn.',
-    gender: 'female',
-    age: 'adult',
-    purposes: ['documentary', 'brand', 'anime'],
-  },
-  {
-    id: 'Vincent',
-    label: 'Vincent',
-    description:
-      'Nam trầm — khàn, “smoky”, ngực vang; mặc định tốt nhất cho English narration / documentary giọng thấp.',
-    gender: 'male',
-    age: 'adult',
-    purposes: ['documentary', 'anime', 'narration', 'brand'],
-    presetFor: ['English', 'Auto'],
-  },
-  {
-    id: 'Bunny',
-    label: 'Bunny',
-    description: 'Nữ bé — tràn “cuteness”. Dùng có chọn lọc (kids / character); tránh narration dài trang trọng.',
-    gender: 'female',
-    age: 'child',
-    purposes: ['kids', 'anime', 'comedy'],
-  },
-  {
-    id: 'Neil',
-    label: 'Neil',
-    description:
-      'Nam — intonation phẳng, phát âm chính xác như news anchor chuyên nghiệp. Hợp English news / report.',
-    gender: 'male',
-    age: 'adult',
-    purposes: ['news', 'explainer', 'narration'],
-    presetFor: ['English'],
-  },
-  {
-    id: 'Elias',
-    label: 'Elias',
-    description:
-      'Giọng học thuật nhưng kể chuyện được — biến kiến thức phức tạp thành module dễ nuốt. Hợp education.',
-    gender: 'female',
-    age: 'adult',
-    purposes: ['explainer', 'narration'],
-  },
-  {
-    id: 'Arthur',
-    label: 'Arthur',
-    description:
-      'Nam già — mộc mạc, hơi “khói thuốc”, trầm chậm; hợp English storytelling / folklore.',
-    gender: 'male',
-    age: 'elder',
-    purposes: ['narration', 'documentary'],
-    presetFor: ['English'],
-  },
-  {
-    id: 'Nini',
-    label: 'Nini',
-    description: 'Nữ — mềm, “clingy”, ngọt như bánh nếp. Hợp character ngọt / romance nhẹ; không hợp hard news.',
-    gender: 'female',
-    age: 'young',
-    purposes: ['anime', 'entertainment'],
-  },
-  {
-    id: 'Seren',
-    label: 'Seren',
-    description: 'Nữ — êm, ru ngủ; “good night, sweet dreams”. Hợp sleep / calm outro.',
-    gender: 'female',
-    age: 'adult',
-    purposes: ['sleep', 'narration'],
-  },
-  {
-    id: 'Pip',
-    label: 'Pip',
-    description: 'Nam bé — tinh nghịch, đầy tò mò trẻ thơ (Shin-chan vibe). Hợp kids / comedy character.',
-    gender: 'male',
-    age: 'child',
-    purposes: ['kids', 'comedy', 'anime'],
-  },
-  {
-    id: 'Bodega',
-    label: 'Bodega',
-    description: 'Nam Tây Ban Nha — nhiệt huyết, đam mê. Hợp Spanish narration năng lượng cao.',
-    gender: 'male',
-    age: 'adult',
-    purposes: ['narration', 'entertainment'],
-    presetFor: ['Spanish'],
-  },
-  {
-    id: 'Sonrisa',
-    label: 'Sonrisa',
-    description: 'Nữ Latin — vui vẻ, hướng ngoại. Hợp Spanish / LATAM friendly host.',
-    gender: 'female',
-    age: 'young',
-    purposes: ['entertainment', 'narration'],
-    presetFor: ['Spanish'],
-  },
-  {
-    id: 'Alek',
-    label: 'Alek',
-    description: 'Nam — lạnh như tinh thần Nga nhưng ấm như lớp lót áo len. Hợp Russian / cinematic cold-warm.',
-    gender: 'male',
-    age: 'adult',
-    purposes: ['narration', 'brand', 'documentary'],
-    presetFor: ['Russian'],
-  },
-  {
-    id: 'Dolce',
-    label: 'Dolce',
-    description: 'Nam Ý — thong thả, laid-back. Hợp Italian casual / lifestyle.',
-    gender: 'male',
-    age: 'adult',
-    purposes: ['entertainment', 'narration'],
-    presetFor: ['Italian'],
+    purposes: ['narration', 'anime', 'entertainment'],
+    presetFor: ['Japanese', 'English'],
   },
   {
     id: 'Sohee',
     label: 'Sohee',
-    description: 'Nữ Hàn — ấm, vui, biểu cảm (unnie). Hợp Korean friendly / vlog-style.',
+    description: 'Nữ Hàn ấm, giàu cảm xúc — Korean narration / ballad-style.',
     gender: 'female',
     age: 'young',
     purposes: ['entertainment', 'narration'],
-    presetFor: ['Korean'],
-  },
-  {
-    id: 'Lenn',
-    label: 'Lenn',
-    description: 'Nam Đức trẻ — lý trí nhưng có nét nổi loạn; suit + post-punk vibe. Hợp German modern.',
-    gender: 'male',
-    age: 'young',
-    purposes: ['entertainment', 'narration'],
-    presetFor: ['German'],
-  },
-  {
-    id: 'Emilien',
-    label: 'Emilien',
-    description: 'Nam Pháp — lãng mạn, “big brother”. Hợp French storytelling / lifestyle.',
-    gender: 'male',
-    age: 'adult',
-    purposes: ['narration', 'entertainment'],
-    presetFor: ['French'],
-  },
-  {
-    id: 'Andre',
-    label: 'Andre',
-    description: 'Nam — hút, tự nhiên, vững. Hợp narration trung tính đa mục đích.',
-    gender: 'male',
-    age: 'adult',
-    purposes: ['narration', 'explainer', 'brand'],
-  },
-  {
-    id: 'Radio Gol',
-    label: 'Radio Gol',
-    description: 'Nam — bình luận bóng đá đầy chất thơ. Hợp sports / hype commentary (không phải narration trung tính).',
-    gender: 'male',
-    age: 'adult',
-    purposes: ['entertainment', 'comedy'],
-  },
-  {
-    id: 'Jada',
-    label: 'Jada',
-    description: 'Nữ Thượng Hải — nhanh, năng lượng (“Shanghai auntie”). Hợp Chinese dialect flavor / lively host.',
-    gender: 'female',
-    age: 'adult',
-    purposes: ['entertainment', 'comedy', 'narration'],
-    presetFor: ['Chinese'],
-  },
-  {
-    id: 'Dylan',
-    label: 'Dylan',
-    description: 'Nam Bắc Kinh — trẻ, lớn lên trong hutong. Hợp Mandarin Bắc Kinh đời thường.',
-    gender: 'male',
-    age: 'young',
-    purposes: ['narration', 'entertainment'],
-    presetFor: ['Chinese'],
-  },
-  {
-    id: 'Li',
-    label: 'Li',
-    description: 'Nam Nam Kinh — kiên nhẫn, giáo viên yoga. Hợp Mandarin dịu / wellness CN.',
-    gender: 'male',
-    age: 'adult',
-    purposes: ['sleep', 'explainer', 'narration'],
-    presetFor: ['Chinese'],
-  },
-  {
-    id: 'Marcus',
-    label: 'Marcus',
-    description: 'Nam Shaanxi — ít lời, chân thành, giọng sâu, đậm chất địa phương. Hợp storytelling CN nặng chất.',
-    gender: 'male',
-    age: 'adult',
-    purposes: ['narration', 'documentary'],
-    presetFor: ['Chinese'],
-  },
-  {
-    id: 'Roy',
-    label: 'Roy',
-    description: 'Nam Minnan / Đài — hài hước, thẳng, sống động. Hợp Southern Min flavored Chinese.',
-    gender: 'male',
-    age: 'young',
-    purposes: ['comedy', 'entertainment'],
-    presetFor: ['Chinese'],
-  },
-  {
-    id: 'Peter',
-    label: 'Peter',
-    description: 'Nam Thiên Tân — crosstalk / foil chuyên nghiệp. Hợp comedy / dialogue-style CN.',
-    gender: 'male',
-    age: 'adult',
-    purposes: ['comedy', 'entertainment'],
-    presetFor: ['Chinese'],
-  },
-  {
-    id: 'Sunny',
-    label: 'Sunny',
-    description: 'Nữ Tứ Xuyên — ngọt đến tan chảy. Hợp Sichuan dialect / sweet CN host.',
-    gender: 'female',
-    age: 'young',
-    purposes: ['entertainment', 'narration'],
-    presetFor: ['Chinese'],
-  },
-  {
-    id: 'Eric',
-    label: 'Eric',
-    description: 'Nam Thành Đô / Tứ Xuyên — nổi bật trong đời thường. Hợp Sichuan male casual.',
-    gender: 'male',
-    age: 'adult',
-    purposes: ['entertainment', 'narration'],
-    presetFor: ['Chinese'],
-  },
-  {
-    id: 'Rocky',
-    label: 'Rocky',
-    description: 'Nam Quảng Đông — hài hước, nhanh trí (A Qiang live-chat vibe). Hợp Cantonese witty.',
-    gender: 'male',
-    age: 'young',
-    purposes: ['comedy', 'entertainment'],
-    presetFor: ['Chinese'],
-  },
-  {
-    id: 'Kiki',
-    label: 'Kiki',
-    description: 'Nữ Hồng Kông — ngọt, best-friend vibe. Hợp Cantonese thân mật / friendly.',
-    gender: 'female',
-    age: 'young',
-    purposes: ['entertainment', 'narration'],
-    presetFor: ['Chinese'],
+    presetFor: ['Korean', 'English'],
   },
 ] as const;
 
 export const QWEN_TTS_VOICES = QWEN_TTS_VOICE_CATALOG.map((v) => v.id);
 
-export const QWEN_JAPANESE_PRESET_VOICES = QWEN_TTS_VOICE_CATALOG.filter(
-  (v) => v.presetFor?.includes('Japanese') && QWEN_INSTRUCT_FLASH_VOICE_IDS.has(v.id)
+export const QWEN_JAPANESE_PRESET_VOICES = QWEN_TTS_VOICE_CATALOG.filter((v) =>
+  v.presetFor?.includes('Japanese')
 ).map((v) => v.id);
 
-function catalogForModel(model?: string | null): readonly QwenTtsVoiceOption[] {
-  if (!isQwenInstructFlashModel(model)) return QWEN_TTS_VOICE_CATALOG;
-  return QWEN_TTS_VOICE_CATALOG.filter((v) => QWEN_INSTRUCT_FLASH_VOICE_IDS.has(v.id));
-}
-
-/** Ưu tiên giọng nam trầm khi language = English. */
-export const QWEN_ENGLISH_DEEP_VOICE_IDS = [
-  'Vincent',
-  'Eldric Sage',
-  'Arthur',
-  'Neil',
-  'Kai',
-  'Moon',
-] as const;
+/** Ưu tiên giọng nam trầm / mạnh khi language = English. */
+export const QWEN_ENGLISH_DEEP_VOICE_IDS = ['Ryan', 'Aiden', 'Uncle_Fu', 'Dylan'] as const;
 
 function sortEnglishDeepFirst(voices: QwenTtsVoiceOption[]): QwenTtsVoiceOption[] {
-  const rank = new Map<string, number>(
-    QWEN_ENGLISH_DEEP_VOICE_IDS.map((id, index) => [id, index])
-  );
+  const rank = new Map<string, number>(QWEN_ENGLISH_DEEP_VOICE_IDS.map((id, index) => [id, index]));
   return [...voices].sort((a, b) => {
     const ra = rank.has(a.id) ? rank.get(a.id)! : 1000;
     const rb = rank.has(b.id) ? rank.get(b.id)! : 1000;
@@ -552,7 +178,7 @@ function sortEnglishDeepFirst(voices: QwenTtsVoiceOption[]): QwenTtsVoiceOption[
 
 export function listQwenVoicesForLanguage(
   languageType?: string | null,
-  model: string | null = DEFAULT_QWEN_TTS_MODEL
+  _model?: string | null
 ): {
   presets: QwenTtsVoiceOption[];
   others: QwenTtsVoiceOption[];
@@ -560,7 +186,7 @@ export function listQwenVoicesForLanguage(
   const lang = String(languageType || 'Auto').trim() || 'Auto';
   const presets: QwenTtsVoiceOption[] = [];
   const others: QwenTtsVoiceOption[] = [];
-  for (const voice of catalogForModel(model)) {
+  for (const voice of QWEN_TTS_VOICE_CATALOG) {
     if (voice.presetFor?.includes(lang)) presets.push(voice);
     else others.push(voice);
   }
@@ -599,61 +225,58 @@ export function filterQwenVoices(
 export function pickQwenVoiceForLanguage(
   languageType: string,
   currentVoice?: string | null,
-  model: string | null = DEFAULT_QWEN_TTS_MODEL
+  _model?: string | null
 ): string {
   const lang = String(languageType || 'Auto').trim() || 'Auto';
-  const { presets, others } = listQwenVoicesForLanguage(lang, model);
+  const { presets, others } = listQwenVoicesForLanguage(lang);
   const available = [...presets, ...others];
-  const current = String(currentVoice || '').trim();
-  // Cherry/Serena là giọng nữ trẻ — khi chọn English thì chuyển sang giọng trầm mặc định.
+  const current = toIrodoriSpeakerId(currentVoice);
   const keepCurrent =
     current &&
     available.some((v) => v.id === current) &&
-    !(lang === 'English' && (current === 'Cherry' || current === 'Serena'));
+    !(lang === 'English' && (current === 'Vivian' || current === 'Serena' || current === 'Ono_Anna'));
   if (keepCurrent) return current;
   if (lang === 'English') {
     for (const id of QWEN_ENGLISH_DEEP_VOICE_IDS) {
       if (available.some((v) => v.id === id)) return id;
     }
   }
-  return presets[0]?.id || others[0]?.id || 'Vincent';
+  if (lang === 'Japanese') return 'Ono_Anna';
+  if (lang === 'Korean') return 'Sohee';
+  return presets[0]?.id || others[0]?.id || 'Ryan';
 }
 
-/** Instruction control (Instruct-Flash) — ép giọng trầm / English documentary. */
+/** Optional instruct cho custom_voice — ép tone khi English / giọng trầm. */
 export function buildQwenTtsInstructions(
   voiceId?: string | null,
   languageType?: string | null
 ): string | undefined {
   const lang = String(languageType || 'Auto').trim() || 'Auto';
-  const voice = String(voiceId || '').trim();
+  const voice = toIrodoriSpeakerId(voiceId);
   const deep =
     lang === 'English' ||
     (QWEN_ENGLISH_DEEP_VOICE_IDS as readonly string[]).includes(voice) ||
-    voice === 'Vincent';
+    voice === 'Uncle_Fu';
 
   if (!deep) return undefined;
 
   return (
-    'A mature man speaking natural English with a deep, low, resonant chest voice. ' +
+    'Speak with a deep, low, resonant chest voice. ' +
     'Calm documentary narrator: steady pace, clear diction, warm and authoritative. ' +
-    'Avoid bright, youthful, nasal, or high-pitched tone. Slight gravel is welcome.'
+    'Avoid bright, youthful, nasal, or high-pitched tone.'
   );
 }
 
-/**
- * Chuẩn hóa voice trước khi gọi API — remap giọng Flash-only (vd. Ryan) sang giọng Instruct-Flash.
- */
 export function resolveQwenTtsVoice(
   voiceId?: string | null,
   languageType?: string | null,
-  model: string | null = DEFAULT_QWEN_TTS_MODEL
+  _model?: string | null
 ): string {
-  return pickQwenVoiceForLanguage(languageType || 'Auto', voiceId, model);
+  return pickQwenVoiceForLanguage(languageType || 'Auto', voiceId);
 }
 
 export function getQwenVoiceOption(voiceId?: string | null): QwenTtsVoiceOption | undefined {
-  const id = String(voiceId || '').trim();
-  if (!id) return undefined;
+  const id = toIrodoriSpeakerId(voiceId);
   return QWEN_TTS_VOICE_CATALOG.find((v) => v.id === id);
 }
 

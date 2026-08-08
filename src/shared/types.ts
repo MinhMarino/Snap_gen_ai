@@ -22,8 +22,15 @@ export type QwenDashScopeRegion = 'singapore' | 'beijing';
 export interface ApiKeys {
   snapgenApiKey: string;
   openaiApiKey: string;
-  /** DashScope / Alibaba Model Studio — Qwen TTS cloud. */
-  dashscopeApiKey: string;
+  /**
+   * RunPod API key — Bearer cho Irodori TTS (Qwen3-TTS trên RunPod Serverless).
+   * Tạo tại https://console.runpod.io/user/settings?tab=api-keys
+   */
+  runpodApiKey: string;
+  /**
+   * @deprecated Đổi sang runpodApiKey. Giữ để migrate store cũ.
+   */
+  dashscopeApiKey?: string;
 }
 
 export interface AppSettings {
@@ -38,7 +45,10 @@ export interface AppSettings {
   qwenTtsModel: string;
   qwenTtsVoice: string;
   qwenLanguageType: string;
+  /** @deprecated Irodori không dùng region DashScope. */
   qwenRegion: QwenDashScopeRegion;
+  /** RunPod endpoint ID cho Irodori TTS. */
+  runpodEndpointId: string;
   burnSubtitles: boolean;
   lastExportDir?: string;
   /** Số scene Snapgen generate song song (worker pool). Mặc định 5. */
@@ -547,6 +557,7 @@ export type QwenTtsVoiceOption = {
 
 export {
   DEFAULT_QWEN_TTS_MODEL,
+  DEFAULT_RUNPOD_ENDPOINT_ID,
   QWEN_TTS_VOICE_CATALOG,
   QWEN_TTS_VOICES,
   QWEN_JAPANESE_PRESET_VOICES,

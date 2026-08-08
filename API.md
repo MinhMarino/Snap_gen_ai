@@ -632,7 +632,7 @@ curl -sS "https://api.runpod.ai/v2/${RUNPOD_ENDPOINT_ID}/health" \
 
 ## 10. Latency & timeout
 
-Endpoint hiện cấu hình tiết kiệm: **`workersMin=0`** (scale-to-zero).
+Endpoint hiện cấu hình tiết kiệm: **`workersMin=0`** (scale-to-zero). Idle mặc định RunPod thường **5 giây**.
 
 | Tình huống | Kỳ vọng |
 |---|---|
@@ -640,11 +640,34 @@ Endpoint hiện cấu hình tiết kiệm: **`workersMin=0`** (scale-to-zero).
 | Cold start (scale từ 0) | Thường 10–60s+ |
 | Lần đầu tải weights (chưa cache) | Có thể lâu hơn nữa |
 
-Khuyến nghị client:
+### 10.1. Session — gộp request liên tiếp (khuyến nghị)
 
-- Timeout **≥ 300 giây**
+Khi user **generate nhiều câu liên tiếp** (chunk dài, hoặc nhiều lần bấm Generate trong ~1–2 phút):
+
+1. **Serialize** mọi job TTS trên cùng client (không fire song song) — tránh N cold start cùng lúc.
+2. **Tăng `idleTimeout` endpoint ~60–120s** (vd. 90s) trong cửa sổ session — worker giữ ấm giữa các câu.
+3. Với use case “nhiều câu liên tiếp”, **idle 60–120s thường rẻ hơn** idle=5 (vì 1 cold start + vài giây idle GPU rẻ hơn 5 lần cold start).
+4. Mỗi job vẫn gửi `policy.executionTimeout` / `policy.ttl` đủ dài (xem §6.1).
+
+Cập nhật idleTimeout (owner endpoint) qua REST:
+
+```bash
+curl -X PATCH "https://rest.runpod.io/v1/endpoints/${RUNPOD_ENDPOINT_ID}" \
+  -H "Authorization: Bearer ${RUNPOD_API_KEY}" \
+  -H "Content-Type: application/json" \
+  -d '{"idleTimeout": 90}'
+```
+
+Hoặc Console → Serverless endpoint → Edit → **Idle Timeout** = `90` (hoặc `60`–`120`).
+
+Client Snap Gen AI đã tích hợp: hàng đợi session toàn cục + cố gắng `PATCH idleTimeout=90` khi session có ≥2 job / generate trong cửa sổ 90s (best-effort nếu key là owner).
+
+Khuyến nghị client khác:
+
+- Timeout poll **≥ 300 giây**
 - Ưu tiên `/run` + poll thay vì dựa hoàn toàn vào một lần `/runsync` khi cold start
 - UI: hiện trạng thái “đang xếp hàng / đang tạo giọng…”
+- **Không** gọi song song nhiều `/run` cho cùng user session
 
 ---
 
@@ -718,6 +741,7 @@ Chi tiết source: [`api/main.py`](../api/main.py), quickstart [`api/README.md`]
 7. [ ] Decode `output.audio_base64` → WAV
 8. [ ] Timeout / poll ≥ 300s khi cold start
 9. [ ] Không lộ key ra frontend
+10. [ ] Session: serialize job + idleTimeout 60–120s khi generate nhiều câu liên tiếp ([§10.1](#101-session--gộp-request-liên-tiếp-khuyến-nghị))
 
 ---
 
