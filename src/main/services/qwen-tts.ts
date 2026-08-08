@@ -16,10 +16,14 @@ import {
   transcribeWithWords,
 } from './openai-audio';
 
-/** Irodori worker ổn với đoạn dài; chia để tránh timeout cold start. */
-const MAX_CHARS_PER_REQUEST = 1200;
-const POLL_INTERVAL_MS = 1500;
-const DEFAULT_TIMEOUT_MS = 300_000;
+/** Irodori: ưu tiên ít request — text dài 1 job thường ổn định hơn nhiều chunk + cold start. */
+const MAX_CHARS_PER_REQUEST = 4000;
+const POLL_INTERVAL_MS = 2000;
+/** Cold start Qwen3 1.7B có thể >5 phút khi workersMin=0. */
+const DEFAULT_TIMEOUT_MS = 600_000;
+/** Retry 1 lần nếu job kẹt IN_QUEUE quá lâu / timeout. */
+const MAX_SUBMIT_ATTEMPTS = 2;
+const STUCK_IN_QUEUE_MS = 240_000;
 
 /**
  * Session TTS liên tiếp: giữ worker ấm 60–120s thay vì idle mặc định 5s.
@@ -28,7 +32,7 @@ const DEFAULT_TIMEOUT_MS = 300_000;
 const SESSION_IDLE_TIMEOUT_SEC = 90;
 const SESSION_WINDOW_MS = SESSION_IDLE_TIMEOUT_SEC * 1000;
 const JOB_POLICY = {
-  executionTimeout: 600_000,
+  executionTimeout: 900_000,
   ttl: 3_600_000,
 } as const;
 
@@ -209,19 +213,43 @@ async function runpodFetchJson(
   return body;
 }
 
+async function cancelRunPodJob(
+  baseUrl: string,
+  apiKey: string,
+  jobId: string
+): Promise<void> {
+  try {
+    await fetch(`${baseUrl}/cancel/${jobId}`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        'Content-Type': 'application/json',
+      },
+    });
+  } catch {
+    /* ignore */
+  }
+}
+
 async function waitForRunPodJob(options: {
   apiKey: string;
   baseUrl: string;
   jobId: string;
   timeoutMs?: number;
 }): Promise<RunPodJobResponse> {
-  const deadline = Date.now() + (options.timeoutMs ?? DEFAULT_TIMEOUT_MS);
+  const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const deadline = Date.now() + timeoutMs;
+  const startedAt = Date.now();
+  let lastStatus = '';
+
   while (Date.now() < deadline) {
     const data = await runpodFetchJson(
       `${options.baseUrl}/status/${options.jobId}`,
       options.apiKey
     );
     const status = data.status || '';
+    lastStatus = status;
+
     if (status === 'COMPLETED') {
       if (data.output?.error) {
         throw new Error(`Irodori TTS: ${data.output.error}`);
@@ -238,9 +266,65 @@ async function waitForRunPodJob(options: {
         `Irodori TTS job ${status}: ${data.error || data.output?.error || JSON.stringify(data).slice(0, 300)}`
       );
     }
+
+    // Kẹt IN_QUEUE quá lâu (worker không lên) → abort sớm để retry submit.
+    if (status === 'IN_QUEUE' && Date.now() - startedAt > STUCK_IN_QUEUE_MS) {
+      await cancelRunPodJob(options.baseUrl, options.apiKey, options.jobId);
+      throw new Error(
+        `Irodori TTS: job ${options.jobId} kẹt IN_QUEUE >${Math.round(STUCK_IN_QUEUE_MS / 1000)}s (worker chưa nhận). Thử submit lại.`
+      );
+    }
+
     await sleep(POLL_INTERVAL_MS);
   }
-  throw new Error(`Irodori TTS: timeout chờ job ${options.jobId} (>${(options.timeoutMs ?? DEFAULT_TIMEOUT_MS) / 1000}s)`);
+
+  await cancelRunPodJob(options.baseUrl, options.apiKey, options.jobId);
+  throw new Error(
+    `Irodori TTS: timeout chờ job ${options.jobId} (>${Math.round(timeoutMs / 1000)}s, status cuối: ${lastStatus || 'unknown'}). Endpoint đang cold start / hết worker — Generate lại sau 30–60s.`
+  );
+}
+
+async function submitAndWaitTts(options: {
+  apiKey: string;
+  baseUrl: string;
+  input: Record<string, unknown>;
+  timeoutMs?: number;
+}): Promise<RunPodJobResponse> {
+  let lastError: Error | null = null;
+
+  for (let attempt = 1; attempt <= MAX_SUBMIT_ATTEMPTS; attempt++) {
+    try {
+      const submitted = await runpodFetchJson(`${options.baseUrl}/run`, options.apiKey, {
+        method: 'POST',
+        body: JSON.stringify({ input: options.input, policy: { ...JOB_POLICY } }),
+      });
+
+      if (submitted.status === 'COMPLETED' && submitted.output?.audio_base64) {
+        if (submitted.output.error) throw new Error(`Irodori TTS: ${submitted.output.error}`);
+        return submitted;
+      }
+      if (!submitted.id) {
+        throw new Error(
+          `Irodori TTS: không nhận được job id (${JSON.stringify(submitted).slice(0, 300)})`
+        );
+      }
+
+      // Lần đầu cold: cho full timeout; lần retry cũng full (worker có thể đã warm hơn).
+      return await waitForRunPodJob({
+        apiKey: options.apiKey,
+        baseUrl: options.baseUrl,
+        jobId: submitted.id,
+        timeoutMs: options.timeoutMs,
+      });
+    } catch (err) {
+      lastError = err instanceof Error ? err : new Error(String(err));
+      const retryable = /timeout|IN_QUEUE|kẹt IN_QUEUE/i.test(lastError.message);
+      if (!retryable || attempt >= MAX_SUBMIT_ATTEMPTS) break;
+      await sleep(3000 * attempt);
+    }
+  }
+
+  throw lastError || new Error('Irodori TTS: thất bại không rõ nguyên nhân');
 }
 
 async function synthesizeOneChunk(options: {
@@ -265,29 +349,12 @@ async function synthesizeOneChunk(options: {
       input.instruct = options.instruct.trim();
     }
 
-    // Ưu tiên async + poll — ổn định hơn khi cold start (workersMin=0).
-    // policy.ttl dài hơn để job không bị xoá giữa lúc queue khi worker đang warm lên.
-    const submitted = await runpodFetchJson(`${baseUrl}/run`, options.apiKey, {
-      method: 'POST',
-      body: JSON.stringify({ input, policy: { ...JOB_POLICY } }),
+    const completed = await submitAndWaitTts({
+      apiKey: options.apiKey,
+      baseUrl,
+      input,
+      timeoutMs: options.timeoutMs ?? DEFAULT_TIMEOUT_MS,
     });
-
-    let completed: RunPodJobResponse;
-    if (submitted.status === 'COMPLETED' && submitted.output?.audio_base64) {
-      if (submitted.output.error) throw new Error(`Irodori TTS: ${submitted.output.error}`);
-      completed = submitted;
-    } else if (submitted.id) {
-      completed = await waitForRunPodJob({
-        apiKey: options.apiKey,
-        baseUrl,
-        jobId: submitted.id,
-        timeoutMs: options.timeoutMs,
-      });
-    } else {
-      throw new Error(
-        `Irodori TTS: không nhận được job id (${JSON.stringify(submitted).slice(0, 300)})`
-      );
-    }
 
     const audioB64 = completed.output?.audio_base64;
     if (!audioB64?.trim()) {
@@ -325,11 +392,11 @@ export async function synthesizeWithQwen(options: {
   const chunks = chunkTextForQwenTts(trimmed);
   const chunkPaths: string[] = [];
 
-  // Session: nhiều chunk / generate liên tiếp → idleTimeout ~90s, chạy tuần tự.
+  // Luôn thử bump idle khi bắt đầu TTS (kể cả 1 chunk) — giảm cold start lần sau.
   await irodoriSession.prepareSession({
     apiKey,
     endpointId,
-    jobCount: chunks.length,
+    jobCount: Math.max(2, chunks.length),
   });
 
   try {
@@ -451,7 +518,7 @@ export async function testQwenTts(options: {
         speaker,
         language,
         outPath: wavPath,
-        timeoutMs: 180_000,
+        timeoutMs: 420_000,
       });
       const size = fs.statSync(wavPath).size;
       if (size < 100) {
