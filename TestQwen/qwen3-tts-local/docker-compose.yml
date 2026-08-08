@@ -1,0 +1,32 @@
+services:
+  qwen3-tts:
+    build: .
+    image: qwen3-tts-local:1.7b
+    container_name: qwen3-tts-local
+    ports:
+      - "${DEMO_PORT:-8000}:8000"   # Gradio UI
+      - "${API_PORT:-8080}:8080"     # FastAPI
+    env_file:
+      - .env
+    environment:
+      MODEL_ID: ${MODEL_ID:-Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice}
+      DEVICE: ${DEVICE:-cpu}
+      DTYPE: ${DTYPE:-float32}
+      MODE: ${MODE:-both}
+      DEMO_PORT: "8000"
+      API_PORT: "8080"
+      WARMUP: ${WARMUP:-0}
+      HF_HOME: /data/hf
+      # Optional HuggingFace token for gated/rate-limited downloads
+      HF_TOKEN: ${HF_TOKEN:-}
+      HUGGING_FACE_HUB_TOKEN: ${HF_TOKEN:-}
+    volumes:
+      - hf-cache:/data/hf
+      - ./outputs:/app/outputs
+      - ./models:/models:ro
+    # 1.7B on CPU needs headroom — raise Docker Desktop memory to >= 12GB
+    shm_size: "2gb"
+    restart: unless-stopped
+
+volumes:
+  hf-cache:

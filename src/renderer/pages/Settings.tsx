@@ -6,24 +6,44 @@ import type {
   UsageHistorySnapshot,
   UsageSnapshot,
 } from '../../shared/types';
-import { ELEVENLABS_TTS_MODELS, OPENAI_CHAT_MODELS, OPENAI_TTS_MODELS, OPENAI_TTS_VOICES } from '../../shared/types';
+import {
+  DEFAULT_QWEN_TTS_MODEL,
+  ELEVENLABS_TTS_MODELS,
+  OPENAI_CHAT_MODELS,
+  OPENAI_TTS_MODELS,
+  OPENAI_TTS_VOICES,
+  QWEN_TTS_LANGUAGE_TYPES,
+} from '../../shared/types';
+import type { TtsProvider } from '../../shared/types';
+import { pickQwenVoiceForLanguage } from '../../shared/voice';
 import UsageQuotaPanel from '../components/UsageQuotaPanel';
 import UsageHistoryPanel from '../components/UsageHistoryPanel';
 import ElevenLabsApiKeysPanel from '../components/ElevenLabsApiKeysPanel';
+import QwenVoicePicker from '../components/QwenVoicePicker';
 import SecretInput from '../components/SecretInput';
+
+function parseTtsProvider(value: string): TtsProvider {
+  if (value === 'elevenlabs' || value === 'qwen') return value;
+  return 'openai';
+}
 
 export default function Settings() {
   const [keys, setKeys] = useState<ApiKeys>({
     snapgenApiKey: '',
     openaiApiKey: '',
+    dashscopeApiKey: '',
   });
   const [settings, setSettings] = useState<AppSettings>({
     openaiModel: 'gpt-4o-mini',
     openaiTtsModel: 'gpt-4o-mini-tts',
-    openaiTtsVoice: 'nova',
+    openaiTtsVoice: 'onyx',
     ttsProvider: 'openai',
     elevenLabsVoiceId: '21m00Tcm4TlvDq8ikWAM',
     elevenLabsModelId: 'eleven_flash_v2_5',
+    qwenTtsModel: DEFAULT_QWEN_TTS_MODEL,
+    qwenTtsVoice: 'Vincent',
+    qwenLanguageType: 'English',
+    qwenRegion: 'singapore',
     burnSubtitles: false,
     maxConcurrentScenes: 5,
   });
@@ -145,17 +165,20 @@ export default function Settings() {
     }
   };
 
-  const test = async (kind: 'snapgen' | 'openai' | 'elevenlabs') => {
+  const test = async (kind: 'snapgen' | 'openai' | 'elevenlabs' | 'qwen') => {
     setBusy(true);
     setMsg(null);
     try {
       if (kind !== 'elevenlabs') await window.studio.saveKeys(keys);
+      if (kind === 'qwen') await window.studio.saveSettings(settings);
       const res =
         kind === 'snapgen'
           ? await window.studio.testSnapgen()
           : kind === 'openai'
             ? await window.studio.testOpenAI()
-            : await window.studio.testElevenLabs();
+            : kind === 'qwen'
+              ? await window.studio.testQwen()
+              : await window.studio.testElevenLabs();
       if (kind === 'elevenlabs') {
         setElevenLabs(await window.studio.getElevenLabsSession());
         if (res.ok) await loadVoices(true);
@@ -270,7 +293,24 @@ export default function Settings() {
             onChange={(v) => setKeys({ ...keys, openaiApiKey: v })}
             placeholder="sk-..."
           />
-          <p className="hint">Vẫn cần OpenAI để viết kịch bản (ChatGPT), kể cả khi voice dùng ElevenLabs.</p>
+          <p className="hint">Vẫn cần OpenAI để viết kịch bản (ChatGPT), kể cả khi voice dùng ElevenLabs/Qwen.</p>
+        </div>
+        <div className="field">
+          <label htmlFor="dashscope">DashScope API Key (Qwen TTS)</label>
+          <SecretInput
+            id="dashscope"
+            value={keys.dashscopeApiKey}
+            onChange={(v) => setKeys({ ...keys, dashscopeApiKey: v })}
+            placeholder="sk-..."
+          />
+          <p className="hint">
+            Key từ Alibaba Cloud Model Studio (Singapore / dashscope-intl).
+          </p>
+          <div className="session-card-actions" style={{ marginTop: 8 }}>
+            <button type="button" className="btn" disabled={busy} onClick={() => void test('qwen')}>
+              Kiểm tra Qwen TTS
+            </button>
+          </div>
         </div>
       </section>
 
@@ -450,13 +490,16 @@ export default function Settings() {
             onChange={(e) =>
               setSettings({
                 ...settings,
-                ttsProvider: e.target.value === 'elevenlabs' ? 'elevenlabs' : 'openai',
+                ttsProvider: parseTtsProvider(e.target.value),
               })
             }
           >
             <option value="openai">OpenAI TTS</option>
             <option value="elevenlabs" disabled={!elevenLabsReady}>
               ElevenLabs {!elevenLabsReady ? '(cần API key)' : ''}
+            </option>
+            <option value="qwen" disabled={!keys.dashscopeApiKey?.trim()}>
+              Qwen TTS {!keys.dashscopeApiKey?.trim() ? '(cần DashScope key)' : ''}
             </option>
           </select>
         </div>
@@ -477,6 +520,40 @@ export default function Settings() {
               ))}
             </select>
           </div>
+        ) : settings.ttsProvider === 'qwen' ? (
+          <>
+            <div className="field">
+              <label htmlFor="qwen-lang">Language type mặc định</label>
+              <select
+                id="qwen-lang"
+                value={settings.qwenLanguageType}
+                onChange={(e) => {
+                  const qwenLanguageType = e.target.value;
+                  setSettings({
+                    ...settings,
+                    qwenLanguageType,
+                    qwenTtsVoice: pickQwenVoiceForLanguage(
+                      qwenLanguageType,
+                      settings.qwenTtsVoice
+                    ),
+                  });
+                }}
+              >
+                {QWEN_TTS_LANGUAGE_TYPES.map((lang) => (
+                  <option key={lang} value={lang}>
+                    {lang}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <QwenVoicePicker
+              languageType={settings.qwenLanguageType || 'Auto'}
+              value={settings.qwenTtsVoice}
+              selectId="qwen-voice"
+              label="Voice mặc định"
+              onChange={(qwenTtsVoice) => setSettings({ ...settings, qwenTtsVoice })}
+            />
+          </>
         ) : (
           <div className="grid-2">
             <div className="field">

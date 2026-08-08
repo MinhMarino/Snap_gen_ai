@@ -13,10 +13,11 @@ import type {
   LoadMoreUsageHistoryRequest,
   ProjectDraft,
 } from '../shared/types';
+import { DEFAULT_QWEN_TTS_MODEL } from '../shared/types';
 import { getKeys, getSettings, saveKeys, saveSettings } from './store';
 import { testAccount } from './services/snapgen';
 import { generateScript, testOpenAI } from './services/openai';
-import { remuxProject, runGenerateJob } from './services/pipeline';
+import { importExternalNarration, remuxProject, runGenerateJob } from './services/pipeline';
 import {
   clearElevenLabsSession,
   getElevenLabsSessionStatus,
@@ -28,6 +29,7 @@ import {
   testElevenLabsSession,
 } from './services/elevenlabs-auth';
 import { listElevenLabsVoices, previewElevenLabsVoice, addElevenLabsLibraryVoice } from './services/elevenlabs-tts';
+import { testQwenTts } from './services/qwen-tts';
 import { ElevenLabsKeyManager } from './services/api-keys/elevenlabs-key-manager';
 import { listElevenLabsKeysPublic, getElevenLabsApiKeyPlain } from './services/api-keys/elevenlabs-keys-store';
 import { getUsageSnapshot, getUsageHistory, loadMoreUsageHistory } from './services/usage';
@@ -107,6 +109,16 @@ function registerIpc(): void {
   ipcMain.handle(IPC.testSnapgen, async () => testAccount(getKeys().snapgenApiKey));
   ipcMain.handle(IPC.testOpenAI, async () => testOpenAI(getKeys().openaiApiKey));
   ipcMain.handle(IPC.testElevenLabs, async () => testElevenLabsSession());
+  ipcMain.handle(IPC.testQwen, async () => {
+    const keys = getKeys();
+    const settings = getSettings();
+    return testQwenTts({
+      apiKey: keys.dashscopeApiKey,
+      region: 'singapore',
+      voice: settings.qwenTtsVoice,
+      model: DEFAULT_QWEN_TTS_MODEL,
+    });
+  });
   ipcMain.handle(IPC.getUsageQuotas, async () => getUsageSnapshot());
   ipcMain.handle(IPC.getUsageHistory, async () => getUsageHistory());
   ipcMain.handle(IPC.loadMoreUsageHistory, async (_e, request: LoadMoreUsageHistoryRequest) =>
@@ -222,6 +234,19 @@ function registerIpc(): void {
     } finally {
       endJob();
     }
+  });
+
+  ipcMain.handle(IPC.importNarrationAudio, async (_e, projectId: string) => {
+    const pick = await dialog.showOpenDialog(mainWindow!, {
+      title: 'Chọn file audio narration tự tạo',
+      properties: ['openFile'],
+      filters: [
+        { name: 'Audio', extensions: ['mp3', 'wav', 'm4a', 'aac', 'ogg', 'flac', 'webm'] },
+        { name: 'All files', extensions: ['*'] },
+      ],
+    });
+    if (pick.canceled || !pick.filePaths[0]) return null;
+    return importExternalNarration({ projectId, sourcePath: pick.filePaths[0] });
   });
 
   ipcMain.handle(IPC.remuxProject, async (_e, projectId: string) => {

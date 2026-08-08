@@ -1,0 +1,14 @@
+{
+  "name": "test-qwen-tts",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Test Qwen / DashScope TTS API key",
+  "type": "module",
+  "scripts": {
+    "test:key": "node test-qwen-tts.js",
+    "test:realtime": "node test-qwen-tts-realtime.js"
+  },
+  "dependencies": {
+    "ws": "^8.18.3"
+  }
+}

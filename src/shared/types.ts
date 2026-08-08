@@ -16,9 +16,14 @@ export interface ModelOption {
   extraFields?: Record<string, string[]>;
 }
 
+export type TtsProvider = 'openai' | 'elevenlabs' | 'qwen';
+export type QwenDashScopeRegion = 'singapore' | 'beijing';
+
 export interface ApiKeys {
   snapgenApiKey: string;
   openaiApiKey: string;
+  /** DashScope / Alibaba Model Studio — Qwen TTS cloud. */
+  dashscopeApiKey: string;
 }
 
 export interface AppSettings {
@@ -27,9 +32,13 @@ export interface AppSettings {
   /** Default TTS cho dự án mới (fallback khi draft cũ thiếu). */
   openaiTtsModel: string;
   openaiTtsVoice: string;
-  ttsProvider: 'openai' | 'elevenlabs';
+  ttsProvider: TtsProvider;
   elevenLabsVoiceId: string;
   elevenLabsModelId: string;
+  qwenTtsModel: string;
+  qwenTtsVoice: string;
+  qwenLanguageType: string;
+  qwenRegion: QwenDashScopeRegion;
   burnSubtitles: boolean;
   lastExportDir?: string;
   /** Số scene Snapgen generate song song (worker pool). Mặc định 5. */
@@ -38,7 +47,7 @@ export interface AppSettings {
 
 /** Voiceover gắn theo từng dự án (lưu trong draft.json). */
 export interface ProjectVoiceSettings {
-  ttsProvider: 'openai' | 'elevenlabs';
+  ttsProvider: TtsProvider;
   openaiTtsModel: string;
   openaiTtsVoice: string;
   elevenLabsVoiceId: string;
@@ -47,6 +56,10 @@ export interface ProjectVoiceSettings {
   elevenLabsPublicOwnerId?: string;
   elevenLabsOriginalVoiceId?: string;
   elevenLabsVoiceName?: string;
+  qwenTtsModel: string;
+  qwenTtsVoice: string;
+  qwenLanguageType: string;
+  qwenRegion: QwenDashScopeRegion;
 }
 
 export interface ElevenLabsVoice {
@@ -176,7 +189,7 @@ export interface ProjectDraft {
    */
   outputFormat?: string;
   /** Voiceover theo dự án. */
-  ttsProvider: 'openai' | 'elevenlabs';
+  ttsProvider: TtsProvider;
   openaiTtsModel: string;
   openaiTtsVoice: string;
   elevenLabsVoiceId: string;
@@ -184,6 +197,10 @@ export interface ProjectDraft {
   elevenLabsPublicOwnerId?: string;
   elevenLabsOriginalVoiceId?: string;
   elevenLabsVoiceName?: string;
+  qwenTtsModel: string;
+  qwenTtsVoice: string;
+  qwenLanguageType: string;
+  qwenRegion: QwenDashScopeRegion;
 }
 
 export interface SceneMediaAsset {
@@ -218,11 +235,15 @@ export interface CreateProjectInput {
   mediaKind?: MediaKind;
   stylePrompt?: string;
   openaiChatModel?: string;
-  ttsProvider?: 'openai' | 'elevenlabs';
+  ttsProvider?: TtsProvider;
   openaiTtsModel?: string;
   openaiTtsVoice?: string;
   elevenLabsVoiceId?: string;
   elevenLabsModelId?: string;
+  qwenTtsModel?: string;
+  qwenTtsVoice?: string;
+  qwenLanguageType?: string;
+  qwenRegion?: QwenDashScopeRegion;
 }
 
 export interface GenerateJobInput {
@@ -248,10 +269,15 @@ export interface GenerateJobInput {
   regenerateSceneIds?: string[];
   /** When false and narration already exists, skip TTS + Whisper. Default true. */
   refreshNarration?: boolean;
+  /**
+   * Khi true: dừng sau TTS / gen scene, không ghép final.mp4.
+   * Dùng cho bước tách riêng (audio-only / media-only).
+   */
+  skipMerge?: boolean;
   /** Override số worker song song (mặc định lấy từ Settings). */
   maxConcurrentScenes?: number;
   /** Voiceover theo dự án (ưu tiên hơn AppSettings). */
-  ttsProvider?: 'openai' | 'elevenlabs';
+  ttsProvider?: TtsProvider;
   openaiTtsModel?: string;
   openaiTtsVoice?: string;
   elevenLabsVoiceId?: string;
@@ -259,6 +285,10 @@ export interface GenerateJobInput {
   elevenLabsPublicOwnerId?: string;
   elevenLabsOriginalVoiceId?: string;
   elevenLabsVoiceName?: string;
+  qwenTtsModel?: string;
+  qwenTtsVoice?: string;
+  qwenLanguageType?: string;
+  qwenRegion?: QwenDashScopeRegion;
 }
 
 export type JobPhase =
@@ -471,3 +501,53 @@ export const ELEVENLABS_TTS_MODELS = [
   'eleven_v3',
   'eleven_multilingual_v2',
 ] as const;
+
+export const QWEN_TTS_LANGUAGE_TYPES = [
+  'Auto',
+  'Chinese',
+  'English',
+  'Japanese',
+  'Korean',
+  'French',
+  'German',
+  'Spanish',
+  'Portuguese',
+  'Italian',
+  'Russian',
+] as const;
+
+export type QwenTtsVoiceAge = 'child' | 'young' | 'adult' | 'elder';
+export type QwenTtsVoicePurpose =
+  | 'narration'
+  | 'explainer'
+  | 'anime'
+  | 'documentary'
+  | 'news'
+  | 'entertainment'
+  | 'brand'
+  | 'sleep'
+  | 'comedy'
+  | 'kids';
+
+export type QwenTtsVoiceOption = {
+  id: string;
+  /** Tên ngắn trong dropdown. */
+  label: string;
+  /** Mô tả chi tiết hiển thị dưới dropdown khi chọn. */
+  description: string;
+  gender?: 'female' | 'male';
+  age?: QwenTtsVoiceAge;
+  purposes?: readonly QwenTtsVoicePurpose[];
+  /**
+   * Language type được ưu tiên / preset sẵn.
+   * Khi chọn language này, voice hiện ở nhóm đầu dropdown.
+   */
+  presetFor?: readonly string[];
+};
+
+export {
+  DEFAULT_QWEN_TTS_MODEL,
+  QWEN_TTS_VOICE_CATALOG,
+  QWEN_TTS_VOICES,
+  QWEN_JAPANESE_PRESET_VOICES,
+} from './qwen-voices';

@@ -350,9 +350,13 @@ function splitNarrationFallback(
   const locale = resolveVisualLocaleHint(language);
   const languageLock = resolveVisualLanguageLock(language);
   return merged.map((segment, index) => {
-    const excerpt = segment.replace(/\s+/g, ' ').trim().slice(0, 160);
-    const base = `Cinematic still for chapter "${chapter.name}", beat ${index + 1}: illustrate this spoken idea — "${excerpt}"`;
-    const withLocale = locale ? `${base}. ${locale}.` : base;
+    const excerpt = segment.replace(/\s+/g, ' ').trim().slice(0, 200);
+    const base =
+      `Detailed cinematic still for chapter "${chapter.name}", beat ${index + 1}: ` +
+      `illustrate this spoken idea — "${excerpt}". ` +
+      `Show a specific subject with clear age, expression, and clothing; a concrete location and time of day; ` +
+      `motivated lighting; medium or wide framing with intentional camera angle; cohesive color mood.`;
+    const withLocale = locale ? `${base} ${locale}.` : base;
     return {
       id: `scene-tmp-${index + 1}`,
       visual_prompt: `${withLocale} ${languageLock}`,
@@ -391,8 +395,8 @@ export async function generateScript(
   const localeHint = resolveVisualLocaleHint(input.language);
   const languageLock = resolveVisualLanguageLock(input.language);
   const visualRule = isImage
-    ? '- visual_prompt: one clear still composition. One idea per image.'
-    : '- visual_prompt: one primary action/image per scene. Hard cut between scenes.';
+    ? '- visual_prompt: ONE detailed still frame (not a collage). Rich enough for an image model to render without guessing.'
+    : '- visual_prompt: ONE detailed primary shot/action per scene. Hard cut between scenes. Rich enough for image/video models.';
 
   const sharedRules = `Language for narration: ${input.language}
 ${visualRule}
@@ -405,6 +409,13 @@ VISUAL FIDELITY (critical — image/video must match the script AND the selected
 - Every visual_prompt must explicitly mention the selected language/culture (e.g. Japanese setting / Vietnamese characters) so image models cannot drift to another language.
 - Example: narration about an elderly Japanese person → "Elderly Japanese man/woman …" in a Japanese setting with Japanese-only text if any — NEVER a young Western character or English/Chinese signs.
 - Do NOT invent a different character, age, or culture than the spoken content.
+VISUAL DETAIL (mandatory — avoid short vague prompts like "a person in a city"):
+- Length: about 45–90 English words (2–4 concrete sentences). Pack specifics, not fluff.
+- Subject: exact age range, gender, ethnicity matching Language, facial expression, pose/gesture, clothing materials/colors, hair.
+- Environment: specific place (street type, room, landscape), time of day, weather if relevant, background props tied to the narration.
+- Light & camera: lighting direction/quality (soft window light, neon night, overcast…), camera framing (extreme close-up / medium / wide), angle (eye-level, low, high), shallow or deep depth of field.
+- Mood & palette: atmosphere + dominant colors that fit the beat (warm amber, cool steel, muted earth…).
+- Keep ONE coherent composition; no multi-panel, no text dump of the full narration.
 - Each scene = ONE main idea OR ONE primary visual (~${MIN_SCENE_BEAT_SEC}–${MAX_SCENE_BEAT_SEC}s spoken, ideal ~${plan.typicalBeatSec}s).
 - duration_hint ≈ spoken length of narration_segment (~${WORDS_PER_SECOND} words/sec).
 - Narration is continuous voiceover across scenes; write full host sentences, not captions.
@@ -567,7 +578,7 @@ Language lock: ${languageLock}
 Full narration to split (preserve EVERY word across segments):
 """${narration}"""
 
-For EACH scene: write visual_prompt that mirrors THAT narration_segment (same age/person/culture/setting) AND stays inside Language "${input.language}" only (no other-language text in the image). All scenes.chapter="${chapter.name}", scenes.section="${chapter.section}".`,
+For EACH scene: write a DETAILED visual_prompt (45–90 English words) that mirrors THAT narration_segment — subject (age/gender/expression/clothing), environment, lighting, camera framing/angle, mood/palette — AND stays inside Language "${input.language}" only (no other-language text in the image). Do NOT write short one-liners. All scenes.chapter="${chapter.name}", scenes.section="${chapter.section}".`,
         temperature: 0.4,
       });
       chapterScenes = mapRawScenes(parsed.scenes || []).map((s) => ({
@@ -694,6 +705,7 @@ Rules:
 - Narration must naturally fill each scene duration (~${WORDS_PER_SECOND} words/sec).
 - One idea / one visual per scene. Continuous voiceover across scenes.
 - visual_prompt MUST stay faithful to narration_segment (same age, person, culture, setting) AND Language "${language}" only.${localeHint ? ` ${localeHint}.` : ''}
+- When rewriting, KEEP or IMPROVE visual_prompt detail (subject, environment, lighting, camera, mood) — about 45–90 English words; never collapse into a vague one-liner.
 - ${languageLock}`;
 
   const sceneLines = script.scenes

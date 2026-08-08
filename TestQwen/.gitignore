@@ -1,0 +1,31 @@
+# dependencies
+node_modules/
+
+# secrets
+.env
+.env.*
+!.env.example
+**/.env
+**/.env.*
+!**/.env.example
+
+# generated audio / outputs
+outputs/
+*.wav
+*.mp3
+*.flac
+*.ogg
+
+# local models / caches
+qwen3-tts-local/models/**
+!qwen3-tts-local/models/.gitkeep
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# OS / editor
+.DS_Store
+*.swp
+.idea/
+.vscode/

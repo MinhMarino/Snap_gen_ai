@@ -3,9 +3,22 @@ import type {
   ElevenLabsSessionStatus,
   ElevenLabsVoice,
   ProjectVoiceSettings,
+  TtsProvider,
 } from '../../shared/types';
-import { ELEVENLABS_TTS_MODELS, OPENAI_TTS_MODELS, OPENAI_TTS_VOICES } from '../../shared/types';
+import {
+  ELEVENLABS_TTS_MODELS,
+  OPENAI_TTS_MODELS,
+  OPENAI_TTS_VOICES,
+  QWEN_TTS_LANGUAGE_TYPES,
+} from '../../shared/types';
+import { pickQwenVoiceForLanguage } from '../../shared/voice';
 import ElevenLabsVoicePicker from './ElevenLabsVoicePicker';
+import QwenVoicePicker from './QwenVoicePicker';
+
+function parseTtsProvider(value: string): TtsProvider {
+  if (value === 'elevenlabs' || value === 'qwen') return value;
+  return 'openai';
+}
 
 export default function ProjectVoicePanel({
   value,
@@ -28,6 +41,7 @@ export default function ProjectVoicePanel({
     cookieCount: 0,
     hasApiCredential: false,
   });
+  const [qwenReady, setQwenReady] = useState(false);
 
   const elevenLabsReady = elevenLabs.loggedIn || elevenLabs.hasApiCredential;
 
@@ -59,6 +73,7 @@ export default function ProjectVoicePanel({
 
   useEffect(() => {
     void window.studio.getElevenLabsSession().then(setElevenLabs);
+    void window.studio.getKeys().then((keys) => setQwenReady(Boolean(keys.dashscopeApiKey?.trim())));
     return window.studio.onElevenLabsSessionChange(setElevenLabs);
   }, []);
 
@@ -102,15 +117,14 @@ export default function ProjectVoicePanel({
           id="project-tts-provider"
           value={value.ttsProvider}
           disabled={disabled}
-          onChange={(e) =>
-            patch({
-              ttsProvider: e.target.value === 'elevenlabs' ? 'elevenlabs' : 'openai',
-            })
-          }
+          onChange={(e) => patch({ ttsProvider: parseTtsProvider(e.target.value) })}
         >
           <option value="openai">OpenAI TTS</option>
           <option value="elevenlabs" disabled={!elevenLabsReady}>
             ElevenLabs {!elevenLabsReady ? '(cần API key ở Settings)' : ''}
+          </option>
+          <option value="qwen" disabled={!qwenReady}>
+            Qwen TTS {!qwenReady ? '(cần DashScope key ở Settings)' : ''}
           </option>
         </select>
       </div>
@@ -205,6 +219,37 @@ export default function ProjectVoicePanel({
             </select>
           </div>
         </>
+      ) : value.ttsProvider === 'qwen' ? (
+        <>
+          <div className="field">
+            <label htmlFor="project-qwen-lang">Language type</label>
+            <select
+              id="project-qwen-lang"
+              value={value.qwenLanguageType || 'Auto'}
+              disabled={disabled}
+              onChange={(e) => {
+                const qwenLanguageType = e.target.value;
+                patch({
+                  qwenLanguageType,
+                  qwenTtsVoice: pickQwenVoiceForLanguage(qwenLanguageType, value.qwenTtsVoice),
+                });
+              }}
+            >
+              {QWEN_TTS_LANGUAGE_TYPES.map((lang) => (
+                <option key={lang} value={lang}>
+                  {lang}
+                </option>
+              ))}
+            </select>
+          </div>
+          <QwenVoicePicker
+            languageType={value.qwenLanguageType || 'Auto'}
+            value={value.qwenTtsVoice}
+            disabled={disabled}
+            selectId="project-qwen-voice"
+            onChange={(qwenTtsVoice) => patch({ qwenTtsVoice })}
+          />
+        </>
       ) : (
         <div className="grid-2">
           <div className="field">
@@ -239,9 +284,6 @@ export default function ProjectVoicePanel({
           </div>
         </div>
       )}
-      <p className="hint voice-save-hint">
-        Giọng được lưu riêng trong dự án này. Đổi dự án = dùng đúng giọng đã chọn của dự án đó.
-      </p>
     </div>
   );
 }

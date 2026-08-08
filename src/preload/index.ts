@@ -46,6 +46,7 @@ const api = {
   testSnapgen: (): Promise<ConnectionTestResult> => ipcRenderer.invoke(IPC.testSnapgen),
   testOpenAI: (): Promise<ConnectionTestResult> => ipcRenderer.invoke(IPC.testOpenAI),
   testElevenLabs: (): Promise<ConnectionTestResult> => ipcRenderer.invoke(IPC.testElevenLabs),
+  testQwen: (): Promise<ConnectionTestResult> => ipcRenderer.invoke(IPC.testQwen),
   getUsageQuotas: (): Promise<UsageSnapshot> => ipcRenderer.invoke(IPC.getUsageQuotas),
   getUsageHistory: (): Promise<UsageHistorySnapshot> => ipcRenderer.invoke(IPC.getUsageHistory),
   loadMoreUsageHistory: (
@@ -136,6 +137,14 @@ const api = {
     ipcRenderer.invoke(IPC.exportMedia, request),
   remuxProject: (projectId: string): Promise<GenerateJobResult> =>
     ipcRenderer.invoke(IPC.remuxProject, projectId),
+  importNarrationAudio: (
+    projectId: string
+  ): Promise<{
+    audioPath: string;
+    script: ScriptDraft;
+    alignedWithWhisper: boolean;
+    durationSec: number;
+  } | null> => ipcRenderer.invoke(IPC.importNarrationAudio, projectId),
 
   listProjects: (): Promise<ProjectMeta[]> => ipcRenderer.invoke(IPC.listProjects),
   getProject: (id: string): Promise<ProjectDetail> => ipcRenderer.invoke(IPC.getProject, id),

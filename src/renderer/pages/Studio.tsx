@@ -947,6 +947,7 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
   const confirmGenerate = async (payload: {
     regenerateSceneIds: string[];
     refreshNarration: boolean;
+    step?: 'audio' | 'media' | 'remux';
   }) => {
     if (!script || generateRunning.current) return;
     generateRunning.current = true;
@@ -973,6 +974,8 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
         stylePrompt: stylePrompt.trim() || undefined,
         regenerateSceneIds: payload.regenerateSceneIds,
         refreshNarration: payload.refreshNarration,
+        // Bước 1/2 tách riêng — không tự ghép Final (bước 3 hoặc nút Ghép lại).
+        skipMerge: payload.step === 'audio' || payload.step === 'media',
         ...voice,
       });
       setResult(generated);
@@ -996,17 +999,30 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
       setPreviewKey((value) => value + 1);
       setProgress(null);
       setGenerateOpen(false);
+      const mediaLabel = mediaKind === 'image' ? 'ảnh' : 'video';
+      const stepToast =
+        payload.step === 'audio'
+          ? 'Đã xong bước 1 (audio). Sang bước 2 để tạo ảnh/video.'
+          : payload.step === 'remux'
+            ? 'Đã ghép lại Final.'
+            : payload.step === 'media'
+              ? generated.stopped
+                ? `Đã dừng. Xong ${generated.scenesCompleted ?? 0}/${generated.scenesTotal ?? '?'} ${mediaLabel} — tiếp tục bước 2 khi sẵn sàng.`
+                : `Đã xong bước 2 (${payload.regenerateSceneIds.length} ${mediaLabel}). Sang bước 3 để ghép Final.`
+              : null;
       setToast({
         type: 'ok',
-        text: generated.stopped
-          ? `Đã dừng. Xong ${generated.scenesCompleted ?? 0}/${generated.scenesTotal ?? '?'} scene — Generate lại scene còn thiếu khi sẵn sàng.`
-          : payload.regenerateSceneIds.length === 0
-            ? payload.refreshNarration
-              ? 'Đã tạo lại voiceover và ghép Final.'
-              : 'Đã ghép lại Final với narration hiện có.'
-            : payload.regenerateSceneIds.length === 1
-              ? `Đã tạo lại ${mediaKind === 'image' ? 'ảnh' : 'video'} scene và ghép Final.`
-              : `Đã generate ${payload.regenerateSceneIds.length} scene và ghép Final.`,
+        text:
+          stepToast ||
+          (generated.stopped
+            ? `Đã dừng. Xong ${generated.scenesCompleted ?? 0}/${generated.scenesTotal ?? '?'} scene — Generate lại scene còn thiếu khi sẵn sàng.`
+            : payload.regenerateSceneIds.length === 0
+              ? payload.refreshNarration
+                ? 'Đã tạo lại voiceover.'
+                : 'Đã ghép lại Final với narration hiện có.'
+              : payload.regenerateSceneIds.length === 1
+                ? `Đã tạo lại ${mediaLabel} scene.`
+                : `Đã generate ${payload.regenerateSceneIds.length} scene.`),
       });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -1026,9 +1042,46 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
     setActiveTool('script');
     void confirmGenerate({
       regenerateSceneIds: [sceneId],
-      // Regen 1 scene: giữ voiceover đã có; không TTS lại toàn bộ.
+      // Regen 1 scene: giữ VO; ghép Final lại nếu đã đủ clip (không skipMerge).
       refreshNarration: false,
     });
+  };
+
+  const importNarrationFromFile = async () => {
+    if (!script || busy || generateRunning.current) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const id = await ensureProject();
+      await window.studio.saveProjectDraft(id, draftPayload(script), {
+        name: projectName.trim() || 'Untitled project',
+      });
+      const imported = await window.studio.importNarrationAudio(id);
+      if (!imported) {
+        setBusy(false);
+        return;
+      }
+      setScript(imported.script);
+      setHasNarration(true);
+      setNarrationPath(imported.audioPath);
+      const refreshed = await window.studio.getProject(id);
+      setSceneMedia(refreshed.sceneMedia);
+      if (refreshed.audioPath) setNarrationPath(refreshed.audioPath);
+      setPreviewKey((value) => value + 1);
+      setGenerateOpen(false);
+      setToast({
+        type: 'ok',
+        text: imported.alignedWithWhisper
+          ? `Đã import audio (~${Math.round(imported.durationSec)}s) và căn timeline bằng Whisper.`
+          : `Đã import audio (~${Math.round(imported.durationSec)}s). Timeline chia theo tỉ lệ chữ (chưa Whisper).`,
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      setError(message);
+      setToast({ type: 'error', text: message });
+    } finally {
+      setBusy(false);
+    }
   };
 
   const resolvedNarrationPath = narrationPath || result?.audioPath || null;
@@ -1431,6 +1484,46 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
             Mỗi dự án có giọng riêng — lưu trong draft, không dùng chung Settings toàn app.
           </p>
           <ProjectVoicePanel value={voice} disabled={busy} onChange={onVoiceChange} />
+          <div className="external-narration-box">
+            <p className="media-note">
+              Muốn tự TTS ngoài app? Copy narration → tạo audio → import lại vào dự án.
+            </p>
+            <div className="row-actions">
+              <button
+                type="button"
+                className="btn"
+                disabled={busy || !script?.scenes.length}
+                onClick={() => {
+                  const text = (script?.scenes || [])
+                    .map((s) => (s.narration_segment || '').replace(/\s+/g, ' ').trim())
+                    .filter(Boolean)
+                    .join(' ');
+                  if (!text) {
+                    setToast({ type: 'error', text: 'Kịch bản chưa có narration.' });
+                    return;
+                  }
+                  void navigator.clipboard.writeText(text).then(
+                    () =>
+                      setToast({
+                        type: 'ok',
+                        text: `Đã copy ${text.length.toLocaleString()} ký tự narration.`,
+                      }),
+                    () => setToast({ type: 'error', text: 'Không copy được clipboard.' })
+                  );
+                }}
+              >
+                Copy narration
+              </button>
+              <button
+                type="button"
+                className="btn primary"
+                disabled={busy || !script?.scenes.length}
+                onClick={() => void importNarrationFromFile()}
+              >
+                Import audio...
+              </button>
+            </div>
+          </div>
           {resolvedNarrationPath ? (
             <div className="narration-player">
               <button
@@ -1452,7 +1545,7 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
             </div>
           ) : (
             <p className="hint">
-              Chưa có narration. Bật “Tạo voiceover” khi Generate để tạo lần đầu.
+              Chưa có narration — dùng TTS trong Generate, hoặc Copy + Import audio ở trên.
             </p>
           )}
         </>
@@ -1538,17 +1631,22 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
           >
             Lưu video...
           </button>
-          {!generationComplete && (
-            <button
-              type="button"
-              className="editor-primary"
-              disabled={busy}
-              onClick={() => void startJob()}
-            >
-              <span>✦</span>
-              {busy ? 'Generating...' : hasSceneMedia || hasNarration ? 'Generate tiếp' : 'Generate'}
-            </button>
-          )}
+          <button
+            type="button"
+            className="editor-primary"
+            disabled={busy || !script}
+            onClick={() => void startJob()}
+            title="Tách bước: audio → ảnh/video → ghép Final"
+          >
+            <span>✦</span>
+            {busy
+              ? 'Generating...'
+              : generationComplete
+                ? 'Tạo lại...'
+                : hasSceneMedia || hasNarration
+                  ? 'Generate tiếp'
+                  : 'Generate'}
+          </button>
         </div>
       </header>
 
@@ -1914,10 +2012,12 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
           script={script}
           sceneMedia={sceneMedia}
           hasNarration={hasNarration || Boolean(resolvedNarrationPath)}
+          mediaKind={mediaKind}
           busy={busy}
           progress={progress}
           onClose={() => setGenerateOpen(false)}
           onConfirm={(payload) => void confirmGenerate(payload)}
+          onImportNarration={() => importNarrationFromFile()}
         />
       )}
     </div>

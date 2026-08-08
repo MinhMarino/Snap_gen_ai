@@ -181,6 +181,53 @@ export async function getDurationSafe(filePath: string, fallback: number): Promi
   }
 }
 
+/** Convert any ffmpeg-readable audio (wav/… ) → mp3 mono 44.1k. */
+export async function convertAudioToMp3(inputPath: string, outputPath: string): Promise<string> {
+  fs.mkdirSync(path.dirname(outputPath), { recursive: true });
+  await run(
+    ffmpeg()
+      .input(inputPath)
+      .outputOptions(['-c:a', 'libmp3lame', '-q:a', '4', '-ar', '44100', '-ac', '1'])
+      .output(outputPath),
+    { timeoutMs: 5 * 60 * 1000, label: 'convert-mp3' }
+  );
+  return outputPath;
+}
+
+/** Nối nhiều file audio thành 1 mp3 (re-encode để tránh lệch codec). */
+export async function concatAudioFiles(
+  inputPaths: string[],
+  outputPath: string,
+  workDir: string
+): Promise<string> {
+  if (!inputPaths.length) throw new Error('No audio files to concat.');
+  fs.mkdirSync(path.dirname(outputPath), { recursive: true });
+  fs.mkdirSync(workDir, { recursive: true });
+  if (inputPaths.length === 1) {
+    if (path.extname(inputPaths[0]).toLowerCase() === '.mp3') {
+      fs.copyFileSync(inputPaths[0], outputPath);
+      return outputPath;
+    }
+    return convertAudioToMp3(inputPaths[0], outputPath);
+  }
+
+  const listFile = path.join(workDir, `audio-concat-${Date.now()}.txt`);
+  fs.writeFileSync(
+    listFile,
+    inputPaths.map((p) => `file '${p.replace(/\\/g, '/')}'`).join('\n'),
+    'utf8'
+  );
+  await run(
+    ffmpeg()
+      .input(listFile)
+      .inputOptions(['-f', 'concat', '-safe', '0'])
+      .outputOptions(['-c:a', 'libmp3lame', '-q:a', '4', '-ar', '44100', '-ac', '1'])
+      .output(outputPath),
+    { timeoutMs: 10 * 60 * 1000, label: 'concat-audio' }
+  );
+  return outputPath;
+}
+
 export type NarrationTrackItem =
   | { kind: 'slice'; start: number; end: number }
   | { kind: 'silence'; duration: number };
@@ -478,24 +525,26 @@ export async function assembleFinalVideo(options: {
 }
 
 /**
- * Ken Burns — zoom-in only, smooth push-in then hold.
- * Target ~115% (within 110–120%). Ease-in-out so motion feels like a
- * gentle camera move, not a linear crawl. High-res source + zoompan to
- * 1080p then lanczos down to 720p reduces sub-pixel shake.
+ * Ken Burns — slow zoom-in then hold.
+ * Small push (~6–9%) over ~80% of the clip with smootherstep easing so
+ * motion feels cinematic, not a quick linear punch. High-res source +
+ * zoompan @ 60fps → 1080p → lanczos 720p reduces sub-pixel shake.
  */
 function kenBurnsFilters(durationSec: number): string[] {
   const renderFps = 60;
   const outFps = 30;
   const frames = Math.max(Math.round(durationSec * renderFps), renderFps);
   const last = Math.max(frames - 1, 1);
-  // 115% final scale — enough “push in”, stops instead of zooming forever.
-  const zMax = 1.15;
-  const delta = zMax - 1;
+  // Shorter clips zoom less so they don't feel rushed.
+  const delta = Math.min(0.09, Math.max(0.055, durationSec * 0.011));
+  // Finish the push early, then hold — avoids constant motion to the last frame.
+  const moveFrames = Math.max(Math.round(last * 0.82), 1);
 
-  // Smoothstep ease-in-out: t²(3−2t), t = clamp(on/last, 0..1)
+  // Smootherstep: t³(t(6t−15)+10) — softer accel/decel than smoothstep.
   // Commas must be escaped for filtergraph.
-  const t = `min(1\\,on/${last})`;
-  const zExpr = `1+${delta.toFixed(8)}*((${t})*(${t})*(3-2*(${t})))`;
+  const t = `min(1\\,on/${moveFrames})`;
+  const zExpr =
+    `1+${delta.toFixed(8)}*((${t})*(${t})*(${t})*((${t})*((${t})*6-15)+10))`;
 
   // Watermark strip is done separately (stripNanoBananaWatermark) — do NOT
   // put delogo in this chain: expression-based delogo often fails with

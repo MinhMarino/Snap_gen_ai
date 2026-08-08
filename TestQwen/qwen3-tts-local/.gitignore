@@ -1,0 +1,8 @@
+.env
+outputs/*.wav
+outputs/*.mp3
+models/**
+!models/.gitkeep
+__pycache__/
+*.pyc
+.DS_Store

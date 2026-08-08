@@ -2,19 +2,25 @@ import { app, safeStorage } from 'electron';
 import fs from 'node:fs';
 import path from 'node:path';
 import type { ApiKeys, AppSettings } from '../shared/types';
+import { DEFAULT_QWEN_TTS_MODEL } from '../shared/types';
 
 const DEFAULT_KEYS: ApiKeys = {
   snapgenApiKey: '',
   openaiApiKey: '',
+  dashscopeApiKey: '',
 };
 
 const DEFAULT_SETTINGS: AppSettings = {
   openaiModel: 'gpt-4o-mini',
   openaiTtsModel: 'gpt-4o-mini-tts',
-  openaiTtsVoice: 'nova',
+  openaiTtsVoice: 'onyx',
   ttsProvider: 'openai',
   elevenLabsVoiceId: '21m00Tcm4TlvDq8ikWAM',
   elevenLabsModelId: 'eleven_flash_v2_5',
+  qwenTtsModel: DEFAULT_QWEN_TTS_MODEL,
+  qwenTtsVoice: 'Vincent',
+  qwenLanguageType: 'English',
+  qwenRegion: 'singapore',
   burnSubtitles: false,
   maxConcurrentScenes: 5,
 };
@@ -92,6 +98,7 @@ export function getKeys(): ApiKeys {
       return {
         snapgenApiKey: parsed.snapgenApiKey ?? '',
         openaiApiKey: parsed.openaiApiKey ?? '',
+        dashscopeApiKey: parsed.dashscopeApiKey ?? '',
       };
     } catch {
       return { ...DEFAULT_KEYS };
@@ -101,6 +108,7 @@ export function getKeys(): ApiKeys {
   return {
     snapgenApiKey: plain.snapgenApiKey ?? '',
     openaiApiKey: plain.openaiApiKey ?? '',
+    dashscopeApiKey: plain.dashscopeApiKey ?? '',
   };
 }
 
@@ -109,6 +117,7 @@ export function saveKeys(keys: ApiKeys): void {
   const clean: ApiKeys = {
     snapgenApiKey: keys.snapgenApiKey,
     openaiApiKey: keys.openaiApiKey,
+    dashscopeApiKey: keys.dashscopeApiKey ?? '',
   };
   if (safeStorage.isEncryptionAvailable()) {
     const enc = safeStorage.encryptString(JSON.stringify(clean)).toString('base64');
@@ -125,9 +134,12 @@ export function getSettings(): AppSettings {
   const data = readFile();
   const merged = { ...DEFAULT_SETTINGS, ...data.settings };
   const provider =
-    merged.ttsProvider === 'elevenlabs' || merged.ttsProvider === 'openai'
+    merged.ttsProvider === 'elevenlabs' ||
+    merged.ttsProvider === 'openai' ||
+    merged.ttsProvider === 'qwen'
       ? merged.ttsProvider
       : DEFAULT_SETTINGS.ttsProvider;
+  const qwenRegion = 'singapore' as const;
   return {
     openaiModel: merged.openaiModel || DEFAULT_SETTINGS.openaiModel,
     openaiTtsModel: merged.openaiTtsModel || DEFAULT_SETTINGS.openaiTtsModel,
@@ -135,6 +147,10 @@ export function getSettings(): AppSettings {
     ttsProvider: provider,
     elevenLabsVoiceId: merged.elevenLabsVoiceId || DEFAULT_SETTINGS.elevenLabsVoiceId,
     elevenLabsModelId: merged.elevenLabsModelId || DEFAULT_SETTINGS.elevenLabsModelId,
+    qwenTtsModel: DEFAULT_QWEN_TTS_MODEL,
+    qwenTtsVoice: merged.qwenTtsVoice || DEFAULT_SETTINGS.qwenTtsVoice,
+    qwenLanguageType: merged.qwenLanguageType || DEFAULT_SETTINGS.qwenLanguageType,
+    qwenRegion,
     burnSubtitles: Boolean(merged.burnSubtitles),
     lastExportDir: merged.lastExportDir || '',
     maxConcurrentScenes: Math.max(
