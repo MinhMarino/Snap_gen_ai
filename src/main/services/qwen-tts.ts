@@ -3,7 +3,6 @@ import os from 'node:os';
 import path from 'node:path';
 import { DEFAULT_QWEN_TTS_MODEL, DEFAULT_RUNPOD_ENDPOINT_ID } from '../../shared/types';
 import {
-  buildQwenTtsInstructions,
   resolveQwenLanguageType,
   resolveQwenTtsVoice,
   toIrodoriSpeakerId,
@@ -16,24 +15,32 @@ import {
   transcribeWithWords,
 } from './openai-audio';
 
-/** Irodori: ưu tiên ít request — text dài 1 job thường ổn định hơn nhiều chunk + cold start. */
-const MAX_CHARS_PER_REQUEST = 4000;
-const POLL_INTERVAL_MS = 2000;
-/** Cold start Qwen3 1.7B có thể >5 phút khi workersMin=0. */
-const DEFAULT_TIMEOUT_MS = 600_000;
-/** Retry 1 lần nếu job kẹt IN_QUEUE quá lâu / timeout. */
-const MAX_SUBMIT_ATTEMPTS = 2;
-const STUCK_IN_QUEUE_MS = 240_000;
+/**
+ * Chunk vừa phải: text quá dài dễ làm worker treo IN_PROGRESS (OOM / hang inference).
+ * Nhiều chunk ngắn + worker ấm thường ổn định hơn 1 job 6000 ký tự.
+ */
+const MAX_CHARS_PER_REQUEST = 1400;
+/** Poll nhanh hơn khi job đang chạy. */
+const POLL_QUEUE_MS = 1000;
+const POLL_PROGRESS_MS = 500;
+/** Timeout tổng mỗi job (queue + inference). */
+const DEFAULT_TIMEOUT_MS = 360_000;
+/** Retry nếu kẹt queue / treo progress / timeout. */
+const MAX_SUBMIT_ATTEMPTS = 3;
+const STUCK_IN_QUEUE_MS = 120_000;
+/** Inference TTS bình thường không nên > ~2.5 phút khi đã IN_PROGRESS. */
+const STUCK_IN_PROGRESS_MS = 150_000;
+/** runsync chỉ khi có worker idle thật (không dùng "running" — có thể đang treo). */
+const RUNSYNC_WARM_TIMEOUT_MS = 75_000;
 
 /**
  * Session TTS liên tiếp: giữ worker ấm 60–120s thay vì idle mặc định 5s.
- * Nhiều câu liên tiếp → 1 cold start thay vì N lần (thường rẻ hơn idle=5).
  */
-const SESSION_IDLE_TIMEOUT_SEC = 90;
+const SESSION_IDLE_TIMEOUT_SEC = 120;
 const SESSION_WINDOW_MS = SESSION_IDLE_TIMEOUT_SEC * 1000;
 const JOB_POLICY = {
-  executionTimeout: 900_000,
-  ttl: 3_600_000,
+  executionTimeout: 300_000,
+  ttl: 1_800_000,
 } as const;
 
 type RunPodStatus =
@@ -131,23 +138,22 @@ class IrodoriSessionQueue {
   }
 
   /**
-   * Khi session có ≥2 job (chunk dài / generate liên tiếp),
-   * cố gắng đẩy idleTimeout endpoint lên ~90s (best-effort).
+   * Bump idleTimeout best-effort — không chặn TTS (fire-and-forget).
    */
-  async prepareSession(options: {
+  prepareSession(options: {
     apiKey: string;
     endpointId: string;
     jobCount: number;
-  }): Promise<void> {
+  }): void {
     const { apiKey, endpointId, jobCount } = options;
-    const multi = jobCount >= 2 || this.isWarmSession;
+    const multi = jobCount >= 1 || this.isWarmSession;
     if (!multi) return;
 
     const until = this.idleEnsuredUntil.get(endpointId) || 0;
     if (Date.now() < until) return;
 
-    await ensureEndpointIdleTimeout(apiKey, endpointId, SESSION_IDLE_TIMEOUT_SEC);
     this.idleEnsuredUntil.set(endpointId, Date.now() + SESSION_WINDOW_MS);
+    void ensureEndpointIdleTimeout(apiKey, endpointId, SESSION_IDLE_TIMEOUT_SEC);
   }
 }
 
@@ -240,6 +246,7 @@ async function waitForRunPodJob(options: {
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const deadline = Date.now() + timeoutMs;
   const startedAt = Date.now();
+  let progressSince = 0;
   let lastStatus = '';
 
   while (Date.now() < deadline) {
@@ -267,6 +274,18 @@ async function waitForRunPodJob(options: {
       );
     }
 
+    if (status === 'IN_PROGRESS') {
+      if (!progressSince) progressSince = Date.now();
+      if (Date.now() - progressSince > STUCK_IN_PROGRESS_MS) {
+        await cancelRunPodJob(options.baseUrl, options.apiKey, options.jobId);
+        throw new Error(
+          `Irodori TTS: job ${options.jobId} treo IN_PROGRESS >${Math.round(STUCK_IN_PROGRESS_MS / 1000)}s (worker nhận việc nhưng không trả audio). Thử lại với đoạn ngắn hơn.`
+        );
+      }
+    } else {
+      progressSince = 0;
+    }
+
     // Kẹt IN_QUEUE quá lâu (worker không lên) → abort sớm để retry submit.
     if (status === 'IN_QUEUE' && Date.now() - startedAt > STUCK_IN_QUEUE_MS) {
       await cancelRunPodJob(options.baseUrl, options.apiKey, options.jobId);
@@ -275,13 +294,30 @@ async function waitForRunPodJob(options: {
       );
     }
 
-    await sleep(POLL_INTERVAL_MS);
+    await sleep(status === 'IN_PROGRESS' ? POLL_PROGRESS_MS : POLL_QUEUE_MS);
   }
 
   await cancelRunPodJob(options.baseUrl, options.apiKey, options.jobId);
   throw new Error(
-    `Irodori TTS: timeout chờ job ${options.jobId} (>${Math.round(timeoutMs / 1000)}s, status cuối: ${lastStatus || 'unknown'}). Endpoint đang cold start / hết worker — Generate lại sau 30–60s.`
+    `Irodori TTS: timeout chờ job ${options.jobId} (>${Math.round(timeoutMs / 1000)}s, status cuối: ${lastStatus || 'unknown'}). Endpoint đang cold start / worker treo — Generate lại sau 30–60s.`
   );
+}
+
+async function getWorkerWarmth(
+  baseUrl: string,
+  apiKey: string
+): Promise<{ warm: boolean; idle: number; running: number }> {
+  try {
+    const health = (await runpodFetchJson(`${baseUrl}/health`, apiKey)) as {
+      workers?: { idle?: number; running?: number };
+    };
+    const idle = Number(health.workers?.idle ?? 0);
+    const running = Number(health.workers?.running ?? 0);
+    // Chỉ idle mới chắc worker sẵn sàng — "running" có thể là job đang treo.
+    return { warm: idle > 0, idle, running };
+  } catch {
+    return { warm: false, idle: 0, running: 0 };
+  }
 }
 
 async function submitAndWaitTts(options: {
@@ -291,12 +327,43 @@ async function submitAndWaitTts(options: {
   timeoutMs?: number;
 }): Promise<RunPodJobResponse> {
   let lastError: Error | null = null;
+  const payload = { input: options.input, policy: { ...JOB_POLICY } };
 
   for (let attempt = 1; attempt <= MAX_SUBMIT_ATTEMPTS; attempt++) {
     try {
+      const { warm } = await getWorkerWarmth(options.baseUrl, options.apiKey);
+
+      // Worker idle thật → /runsync nhanh. Không dùng khi chỉ có "running".
+      if (warm) {
+        try {
+          const syncRes = await runpodFetchJson(`${options.baseUrl}/runsync`, options.apiKey, {
+            method: 'POST',
+            body: JSON.stringify(payload),
+            signal: AbortSignal.timeout(RUNSYNC_WARM_TIMEOUT_MS),
+          });
+          if (syncRes.status === 'COMPLETED' && syncRes.output?.audio_base64) {
+            if (syncRes.output.error) throw new Error(`Irodori TTS: ${syncRes.output.error}`);
+            return syncRes;
+          }
+          if (syncRes.id && (syncRes.status === 'IN_QUEUE' || syncRes.status === 'IN_PROGRESS')) {
+            return await waitForRunPodJob({
+              apiKey: options.apiKey,
+              baseUrl: options.baseUrl,
+              jobId: syncRes.id,
+              timeoutMs: options.timeoutMs,
+            });
+          }
+        } catch (syncErr) {
+          const msg = syncErr instanceof Error ? syncErr.message : String(syncErr);
+          if (!/abort|timeout|TimeoutError|treo IN_PROGRESS|kẹt IN_QUEUE/i.test(msg) && !/HTTP 5\d\d/.test(msg)) {
+            if (/401|403|invalid|required/i.test(msg)) throw syncErr;
+          }
+        }
+      }
+
       const submitted = await runpodFetchJson(`${options.baseUrl}/run`, options.apiKey, {
         method: 'POST',
-        body: JSON.stringify({ input: options.input, policy: { ...JOB_POLICY } }),
+        body: JSON.stringify(payload),
       });
 
       if (submitted.status === 'COMPLETED' && submitted.output?.audio_base64) {
@@ -309,7 +376,6 @@ async function submitAndWaitTts(options: {
         );
       }
 
-      // Lần đầu cold: cho full timeout; lần retry cũng full (worker có thể đã warm hơn).
       return await waitForRunPodJob({
         apiKey: options.apiKey,
         baseUrl: options.baseUrl,
@@ -318,9 +384,10 @@ async function submitAndWaitTts(options: {
       });
     } catch (err) {
       lastError = err instanceof Error ? err : new Error(String(err));
-      const retryable = /timeout|IN_QUEUE|kẹt IN_QUEUE/i.test(lastError.message);
+      const retryable =
+        /timeout|IN_QUEUE|kẹt IN_QUEUE|treo IN_PROGRESS|abort/i.test(lastError.message);
       if (!retryable || attempt >= MAX_SUBMIT_ATTEMPTS) break;
-      await sleep(3000 * attempt);
+      await sleep(2500 * attempt);
     }
   }
 
@@ -383,34 +450,47 @@ export async function synthesizeWithQwen(options: {
 
   const languageType = options.languageType || 'Auto';
   const voice = resolveQwenTtsVoice(options.voice, languageType, options.model);
-  const instructions = buildQwenTtsInstructions(voice, languageType);
+  // Không gửi instruct mặc định — giảm tải / tránh hang trên worker yếu.
   const endpointId = options.endpointId?.trim() || DEFAULT_RUNPOD_ENDPOINT_ID;
   const apiKey = options.apiKey.trim();
   const workDir = path.join(options.outDir, `.irodori-tts-${Date.now()}`);
   fs.mkdirSync(workDir, { recursive: true });
 
-  const chunks = chunkTextForQwenTts(trimmed);
+  let chunks = chunkTextForQwenTts(trimmed);
   const chunkPaths: string[] = [];
 
-  // Luôn thử bump idle khi bắt đầu TTS (kể cả 1 chunk) — giảm cold start lần sau.
-  await irodoriSession.prepareSession({
+  irodoriSession.prepareSession({
     apiKey,
     endpointId,
-    jobCount: Math.max(2, chunks.length),
+    jobCount: Math.max(1, chunks.length),
   });
 
   try {
     for (let i = 0; i < chunks.length; i++) {
       const wavPath = path.join(workDir, `chunk-${String(i).padStart(3, '0')}.wav`);
-      await synthesizeOneChunk({
-        apiKey,
-        endpointId,
-        text: chunks[i],
-        speaker: voice,
-        language: languageType,
-        instruct: instructions,
-        outPath: wavPath,
-      });
+      try {
+        await synthesizeOneChunk({
+          apiKey,
+          endpointId,
+          text: chunks[i],
+          speaker: voice,
+          language: languageType,
+          outPath: wavPath,
+        });
+      } catch (chunkErr) {
+        const msg = chunkErr instanceof Error ? chunkErr.message : String(chunkErr);
+        // Chunk vẫn dài và treo → tách nhỏ hơn rồi chạy tiếp.
+        if (/treo IN_PROGRESS|timeout/i.test(msg) && chunks[i].length > 500) {
+          const smaller = chunkTextForQwenTts(chunks[i], 700);
+          if (smaller.length > 1) {
+            const rest = chunks.slice(i + 1);
+            chunks = [...chunks.slice(0, i), ...smaller, ...rest];
+            i -= 1;
+            continue;
+          }
+        }
+        throw chunkErr;
+      }
       chunkPaths.push(wavPath);
     }
 
@@ -441,6 +521,8 @@ export async function synthesizeContinuousNarrationWithQwen(options: {
   language?: string;
   outDir: string;
   fileName?: string;
+  /** Mặc định false — Whisper làm chậm nhiều; timing theo tỉ lệ ký tự đủ dùng. */
+  useWhisper?: boolean;
 }): Promise<{ audioPath: string; srtPath: string; words: TranscriptWord[] }> {
   const text = buildContinuousNarrationText(options.scenes);
   if (!text) throw new Error('Kịch bản chưa có lời thoại để tạo voiceover.');
@@ -457,7 +539,8 @@ export async function synthesizeContinuousNarrationWithQwen(options: {
     fileName: options.fileName,
   });
 
-  if (options.openaiApiKey?.trim()) {
+  // Whisper sau TTS rất chậm — chỉ bật khi explicitly yêu cầu.
+  if (options.useWhisper && options.openaiApiKey?.trim()) {
     const { srtPath, words } = await transcribeWithWords({
       apiKey: options.openaiApiKey.trim(),
       audioPath,
@@ -467,10 +550,19 @@ export async function synthesizeContinuousNarrationWithQwen(options: {
     return { audioPath, srtPath, words };
   }
 
+  // SRT đơn giản theo scene + tỉ lệ ký tự (computeSceneTimings fallback).
   const srtPath = path.join(options.outDir, 'subs.srt');
-  if (!fs.existsSync(srtPath)) {
-    fs.writeFileSync(srtPath, `1\n00:00:00,000 --> 00:00:02,000\n${text.slice(0, 80)}\n`, 'utf8');
-  }
+  const lines = options.scenes
+    .map((scene, idx) => {
+      const seg = String(scene.narration_segment || '')
+        .replace(/\s+/g, ' ')
+        .trim();
+      if (!seg) return '';
+      return `${idx + 1}\n00:00:00,000 --> 00:00:02,000\n${seg.slice(0, 120)}\n`;
+    })
+    .filter(Boolean)
+    .join('\n');
+  fs.writeFileSync(srtPath, lines || `1\n00:00:00,000 --> 00:00:02,000\n${text.slice(0, 80)}\n`, 'utf8');
   return { audioPath, srtPath, words: [] };
 }
 

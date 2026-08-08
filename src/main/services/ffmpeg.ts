@@ -187,7 +187,18 @@ export async function convertAudioToMp3(inputPath: string, outputPath: string): 
   await run(
     ffmpeg()
       .input(inputPath)
-      .outputOptions(['-c:a', 'libmp3lame', '-q:a', '4', '-ar', '44100', '-ac', '1'])
+      .outputOptions([
+        '-c:a',
+        'libmp3lame',
+        '-q:a',
+        '5',
+        '-ar',
+        '44100',
+        '-ac',
+        '1',
+        '-threads',
+        '0',
+      ])
       .output(outputPath),
     { timeoutMs: 5 * 60 * 1000, label: 'convert-mp3' }
   );

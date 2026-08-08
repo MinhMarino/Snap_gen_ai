@@ -291,7 +291,6 @@ async function prepareNarration(options: {
     }
     const synthesized = await synthesizeContinuousNarrationWithQwen({
       runpodApiKey: runpodKey,
-      openaiApiKey: apiKey,
       scenes,
       voice: options.qwenTtsVoice || 'Ryan',
       model: DEFAULT_QWEN_TTS_MODEL,
@@ -300,6 +299,8 @@ async function prepareNarration(options: {
       language: options.language,
       outDir: projectDir,
       fileName: RAW_NARRATION_FILE,
+      // Bỏ Whisper — timing theo tỉ lệ ký tự, tiết kiệm 20–60s+.
+      useWhisper: false,
     });
     if (synthesized.srtPath !== srtPath && fs.existsSync(synthesized.srtPath)) {
       fs.copyFileSync(synthesized.srtPath, srtPath);
@@ -435,7 +436,10 @@ async function prepareNarrationFittingTarget(options: {
     qwenRegion: options.qwenRegion,
   };
 
-  for (let attempt = 1; attempt <= MAX_TTS_FIT_ATTEMPTS; attempt++) {
+  // Irodori cold start rất chậm — chỉ TTS 1 lần rồi sync video theo speech.
+  const maxAttempts = options.ttsProvider === 'qwen' ? 1 : MAX_TTS_FIT_ATTEMPTS;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     const est = estimateScriptSpokenSeconds(script.scenes);
     const ttsLabel =
       options.ttsProvider === 'elevenlabs'
@@ -443,9 +447,13 @@ async function prepareNarrationFittingTarget(options: {
         : options.ttsProvider === 'qwen'
           ? 'Irodori TTS'
           : 'OpenAI TTS';
+
     emitProgress({
       phase: 'tts',
-      message: `TTS lần ${attempt}/${MAX_TTS_FIT_ATTEMPTS} (${ttsLabel}): ước lượng ~${formatDurationLabel(est)} → mục tiêu ${formatDurationLabel(target)}...`,
+      message:
+        options.ttsProvider === 'qwen'
+          ? `Irodori TTS (1 lần): ~${formatDurationLabel(est)} → mục tiêu ${formatDurationLabel(target)}...`
+          : `TTS lần ${attempt}/${maxAttempts} (${ttsLabel}): ước lượng ~${formatDurationLabel(est)} → mục tiêu ${formatDurationLabel(target)}...`,
       percent: Math.min(10, 3 + attempt),
     });
 
@@ -479,8 +487,11 @@ async function prepareNarrationFittingTarget(options: {
       percent: Math.min(11, 4 + attempt),
     });
 
-    if (relErr <= AUDIO_DURATION_TOLERANCE) {
-      // Đạt mục tiêu → gắn duration theo speech thật, dùng raw làm narration cuối.
+    const acceptNow =
+      relErr <= AUDIO_DURATION_TOLERANCE || options.ttsProvider === 'qwen';
+
+    if (acceptNow) {
+      // Đạt mục tiêu (hoặc Irodori 1-pass) → gắn duration theo speech thật.
       const fitted = await prepareNarration({
         projectDir: options.projectDir,
         workDir: options.workDir,
@@ -502,13 +513,16 @@ async function prepareNarrationFittingTarget(options: {
       });
       emitProgress({
         phase: 'whisper',
-        message: `Voiceover đạt mục tiêu (±${(AUDIO_DURATION_TOLERANCE * 100).toFixed(0)}%) sau ${attempt} lần TTS — bắt đầu render video.`,
+        message:
+          options.ttsProvider === 'qwen'
+            ? `Irodori TTS xong (${formatDurationLabel(raw)}) — sync video theo speech.`
+            : `Voiceover đạt mục tiêu (±${(AUDIO_DURATION_TOLERANCE * 100).toFixed(0)}%) sau ${attempt} lần TTS — bắt đầu render video.`,
         percent: 12,
       });
       return fitted;
     }
 
-    if (attempt >= MAX_TTS_FIT_ATTEMPTS) break;
+    if (attempt >= maxAttempts) break;
 
     emitProgress({
       phase: 'tts',
@@ -527,7 +541,7 @@ async function prepareNarrationFittingTarget(options: {
   }
 
   throw new Error(
-    `Voiceover chưa khớp mục tiêu sau ${MAX_TTS_FIT_ATTEMPTS} lần TTS ` +
+    `Voiceover chưa khớp mục tiêu sau ${maxAttempts} lần TTS ` +
       `(audio ~${formatDurationLabel(lastRaw)}, mục tiêu ${formatDurationLabel(target)}, lệch ${(lastErr * 100).toFixed(1)}%). ` +
       `Hãy Generate script lại hoặc chỉnh brief.`
   );
