@@ -1041,29 +1041,33 @@ export async function assembleFinalVideo(options: {
 }
 
 /**
- * Ken Burns — slow zoom-in then hold.
- * Render thẳng 1080p@60 (không oversample 5K) để bước ghép nhanh hơn.
+ * Ken Burns — zoom-in nhanh rồi hold.
+ * Upscale 2× trước zoompan để tránh rung sub-pixel trên canvas 1080p;
+ * zoom hoàn tất ~40% đầu clip, phần còn lại hold.
  */
 function kenBurnsFilters(durationSec: number): string[] {
   const frames = Math.max(Math.round(durationSec * FINAL_FPS), FINAL_FPS);
   const last = Math.max(frames - 1, 1);
-  // Shorter clips zoom less so they don't feel rushed.
-  const delta = Math.min(0.095, Math.max(0.06, durationSec * 0.012));
-  // Finish the push a bit earlier (was 0.82) — zoom in nhanh hơn một chút, rồi hold.
-  const moveFrames = Math.max(Math.round(last * 0.72), 1);
+  // Zoom in ~10–20% bức ảnh (delta 0.10–0.20).
+  const delta = Math.min(0.2, Math.max(0.1, durationSec * 0.018));
+  // Zoom xong ~60% clip (chậm hơn bản 40% trước ~50%), phần còn lại hold.
+  const moveFrames = Math.max(Math.round(last * 0.6), 1);
 
-  // Smootherstep: t³(t(6t−15)+10) — softer accel/decel than smoothstep.
+  // Ease-out cubic: nhanh lúc đầu, mềm khi dừng.
   // Commas must be escaped for filtergraph.
   const t = `min(1\\,on/${moveFrames})`;
-  const zExpr =
-    `1+${delta.toFixed(8)}*((${t})*(${t})*(${t})*((${t})*((${t})*6-15)+10))`;
+  const zExpr = `1+${delta.toFixed(8)}*(1-pow(1-(${t})\\,3))`;
+
+  // 2× source: mỗi bước zoom lấy mẫu từ nhiều pixel hơn → ít rung khi xuất 1080p.
+  const srcW = FINAL_WIDTH * 2;
+  const srcH = FINAL_HEIGHT * 2;
 
   // Watermark strip is done separately (stripNanoBananaWatermark) — do NOT
   // put delogo in this chain: expression-based delogo often fails with
   // Windows exit 4294967274 (-22 EINVAL) and frame=0 before any output.
   return [
-    `scale=${FINAL_WIDTH}:${FINAL_HEIGHT}:force_original_aspect_ratio=increase:flags=fast_bilinear`,
-    `crop=${FINAL_WIDTH}:${FINAL_HEIGHT}`,
+    `scale=${srcW}:${srcH}:force_original_aspect_ratio=increase:flags=lanczos`,
+    `crop=${srcW}:${srcH}`,
     'setsar=1',
     'format=yuv420p',
     `zoompan=z='${zExpr}':d=${frames}:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=${FINAL_WIDTH}x${FINAL_HEIGHT}:fps=${FINAL_FPS}`,
