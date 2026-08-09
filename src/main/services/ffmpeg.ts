@@ -43,6 +43,38 @@ ffmpeg.setFfprobePath(resolveFfprobePath());
 
 const DEFAULT_FFMPEG_TIMEOUT_MS = 10 * 60 * 1000;
 
+// ---------------------------------------------------------------------------
+// Stage / progress reporting (mục 9)
+// ---------------------------------------------------------------------------
+
+export type MergeStage =
+  | 'VALIDATING'
+  | 'NORMALIZING'
+  | 'CONCATENATING'
+  | 'MIXING_AUDIO'
+  | 'FINALIZING'
+  | 'COMPLETED';
+
+export interface StageEvent {
+  stage: MergeStage;
+  message?: string;
+  /** 0-100, optional — only set when we can estimate it (e.g. per-scene normalize). */
+  progress?: number;
+  reencoding?: boolean;
+  reason?: string;
+  encoder?: string;
+}
+
+export type StageReporter = (event: StageEvent) => void;
+
+function report(reporter: StageReporter | undefined, event: StageEvent): void {
+  try {
+    reporter?.(event);
+  } catch {
+    /* never let a logging callback break the pipeline */
+  }
+}
+
 function run(
   cmd: ffmpeg.FfmpegCommand,
   options?: { timeoutMs?: number; label?: string }
@@ -352,15 +384,478 @@ export async function buildNarrationTrack(options: {
   return outputPath;
 }
 
+const TARGET_VIDEO = {
+  width: 1920,
+  height: 1080,
+  fps: 60,
+  codec: 'h264',
+  pixFmt: 'yuv420p',
+};
+
+const TARGET_AUDIO = {
+  codec: 'aac',
+  sampleRate: 48000,
+  channels: 2,
+};
+
+type VideoStreamInfo = {
+  width?: number;
+  height?: number;
+  codec_name?: string;
+  pix_fmt?: string;
+  r_frame_rate?: string;
+};
+
+type AudioStreamInfo = {
+  codec_name?: string;
+  sample_rate?: number;
+  channels?: number;
+};
+
+type SceneProbeInfo = {
+  filePath: string;
+  width: number;
+  height: number;
+  fps: number;
+  codec: string;
+  pixFmt: string;
+  audioCodec?: string;
+  audioSampleRate?: number;
+  audioChannels?: number;
+  hasAudio: boolean;
+};
+
+function normalizeCodecName(value?: string): string {
+  return (value || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '');
+}
+
+function parseFrameRate(value?: string): number | null {
+  if (!value) return null;
+  const match = value.match(/(\d+)(?:\/(\d+))?/);
+  if (!match) return null;
+  const num = Number(match[1]);
+  const den = match[2] ? Number(match[2]) : 1;
+  if (!Number.isFinite(num) || !Number.isFinite(den) || den <= 0) return null;
+  return num / den;
+}
+
+async function probeSceneInfo(filePath: string): Promise<SceneProbeInfo | null> {
+  try {
+    const data = await new Promise<any>((resolve, reject) => {
+      ffmpeg.ffprobe(filePath, (err, stats) => {
+        if (err) reject(err);
+        else resolve(stats);
+      });
+    });
+
+    const video = data?.streams?.find((stream: VideoStreamInfo) => stream.width && stream.height) || null;
+    const audio = data?.streams?.find((stream: AudioStreamInfo) => stream.codec_name) || null;
+    if (!video) return null;
+
+    const fps = parseFrameRate(video.r_frame_rate ?? data?.streams?.[0]?.r_frame_rate) ?? 0;
+    return {
+      filePath,
+      width: Number(video.width) || 0,
+      height: Number(video.height) || 0,
+      fps,
+      codec: normalizeCodecName(video.codec_name),
+      pixFmt: String(video.pix_fmt || '').toLowerCase(),
+      audioCodec: normalizeCodecName(audio?.codec_name),
+      audioSampleRate: audio?.sample_rate ? Number(audio.sample_rate) : undefined,
+      audioChannels: audio?.channels ? Number(audio.channels) : undefined,
+      hasAudio: Boolean(audio),
+    };
+  } catch {
+    return null;
+  }
+}
+
+function isSceneCompatible(info: SceneProbeInfo | null): boolean {
+  if (!info) return false;
+  if (info.width !== TARGET_VIDEO.width || info.height !== TARGET_VIDEO.height) return false;
+  if (Math.abs(info.fps - TARGET_VIDEO.fps) > 0.5) return false;
+  if (info.codec !== TARGET_VIDEO.codec) return false;
+  if (info.pixFmt !== TARGET_VIDEO.pixFmt) return false;
+  if (info.audioCodec && info.audioCodec !== TARGET_AUDIO.codec) return false;
+  if (info.audioSampleRate && info.audioSampleRate !== TARGET_AUDIO.sampleRate) return false;
+  if (info.audioChannels && info.audioChannels !== TARGET_AUDIO.channels) return false;
+  return true;
+}
+
+/** True when the container has an audio stream already matching AAC/48k/stereo. */
+function isAudioStreamAlreadyTarget(info: SceneProbeInfo | null): boolean {
+  if (!info || !info.hasAudio) return false;
+  return (
+    info.audioCodec === TARGET_AUDIO.codec &&
+    info.audioSampleRate === TARGET_AUDIO.sampleRate &&
+    info.audioChannels === TARGET_AUDIO.channels
+  );
+}
+
+export async function validateSceneCompatibility(
+  scenePaths: string[],
+  onProgress?: StageReporter
+): Promise<{
+  compatible: boolean;
+  incompatible: string[];
+  metadata: Record<string, SceneProbeInfo | null>;
+}> {
+  report(onProgress, { stage: 'VALIDATING', message: `Probing ${scenePaths.length} scene(s)` });
+
+  const metadata: Record<string, SceneProbeInfo | null> = {};
+  const incompatible: string[] = [];
+
+  for (const scenePath of scenePaths) {
+    const info = await probeSceneInfo(scenePath);
+    metadata[scenePath] = info;
+    if (!isSceneCompatible(info)) {
+      incompatible.push(scenePath);
+    }
+  }
+
+  return {
+    compatible: incompatible.length === 0,
+    incompatible,
+    metadata,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Hardware encoder detection (mục 7) — probed once and cached for the process.
+// ---------------------------------------------------------------------------
+
+type EncoderChoice = { name: string; outputArgs: string[] };
+
+let cachedEncoderChoice: Promise<EncoderChoice> | null = null;
+
+function getAvailableEncoders(): Promise<Record<string, unknown> | null> {
+  return new Promise((resolve) => {
+    try {
+      (ffmpeg as unknown as {
+        getAvailableEncoders: (cb: (err: Error | null, data: Record<string, unknown>) => void) => void;
+      }).getAvailableEncoders((err, data) => resolve(err ? null : data));
+    } catch {
+      resolve(null);
+    }
+  });
+}
+
 /**
- * Nối nhiều đoạn video thành 1 file.
- * Dùng filter_complex một lần (không normalize từng file rồi concat -c copy),
- * vì Veo mp4 + concat demuxer dễ treo / rất chậm trên ổ ngoài.
+ * Chọn encoder video: ưu tiên h264_nvenc nếu máy có NVIDIA, fallback libx264.
+ * Kết quả được cache lại — chỉ dò 1 lần cho cả tiến trình (mục 7).
+ */
+async function resolveVideoEncoder(): Promise<EncoderChoice> {
+  if (!cachedEncoderChoice) {
+    cachedEncoderChoice = (async () => {
+      const encoders = await getAvailableEncoders();
+      const hasNvenc = !!(encoders && Object.prototype.hasOwnProperty.call(encoders, 'h264_nvenc'));
+      if (hasNvenc) {
+        return {
+          name: 'h264_nvenc',
+          outputArgs: ['-c:v', 'h264_nvenc', '-preset', 'p5', '-rc', 'vbr', '-cq', '19', '-b:v', '0'],
+        };
+      }
+      return {
+        name: 'libx264',
+        outputArgs: ['-c:v', 'libx264', '-preset', 'faster', '-crf', '18'],
+      };
+    })();
+  }
+  return cachedEncoderChoice;
+}
+
+/**
+ * Chỉ normalize những scene không đạt chuẩn — không probe lại (dùng metadata
+ * đã có từ validateSceneCompatibility), không đụng vào scene đã compatible.
+ */
+export async function normalizeIncompatibleScenes(
+  scenePaths: string[],
+  workDir: string,
+  onProgress?: StageReporter,
+  precomputed?: { metadata: Record<string, SceneProbeInfo | null>; incompatible: string[] }
+): Promise<string[]> {
+  const { metadata, incompatible } =
+    precomputed ?? (await validateSceneCompatibility(scenePaths, onProgress));
+
+  if (!incompatible.length) {
+    report(onProgress, {
+      stage: 'CONCATENATING',
+      message: 'Fast concat mode enabled',
+      reencoding: false,
+    });
+    return [...scenePaths];
+  }
+
+  const encoder = await resolveVideoEncoder();
+  report(onProgress, {
+    stage: 'NORMALIZING',
+    message: `${incompatible.length}/${scenePaths.length} scene(s) require normalization`,
+    reencoding: true,
+    reason: 'incompatible scene parameters',
+    encoder: encoder.name,
+  });
+
+  const normalized: string[] = [];
+  let done = 0;
+  for (const scenePath of scenePaths) {
+    const meta = metadata[scenePath] ?? null;
+    if (meta && isSceneCompatible(meta)) {
+      normalized.push(scenePath);
+      continue;
+    }
+
+    const baseName = path.basename(scenePath, path.extname(scenePath));
+    const out = path.join(workDir, 'normalized', `${baseName}-normalized.mp4`);
+    fs.mkdirSync(path.dirname(out), { recursive: true });
+
+    const filters = [
+      'scale=1920:1080:force_original_aspect_ratio=decrease',
+      'pad=1920:1080:(ow-iw)/2:(oh-ih)/2:black',
+      'fps=60',
+      'format=yuv420p',
+    ];
+    const audioIsCompatible = isAudioStreamAlreadyTarget(meta);
+
+    await run(
+      ffmpeg(scenePath)
+        .videoFilters(filters)
+        .outputOptions([
+          '-map',
+          '0:v:0',
+          '-map',
+          '0:a?',
+          ...encoder.outputArgs,
+          '-pix_fmt',
+          'yuv420p',
+          '-r',
+          '60',
+          ...(audioIsCompatible ? ['-c:a', 'copy'] : ['-c:a', 'aac', '-ar', '48000', '-ac', '2']),
+          '-movflags',
+          '+faststart',
+        ])
+        .output(out),
+      { timeoutMs: 10 * 60 * 1000, label: `Normalize scene ${path.basename(scenePath)}` }
+    );
+
+    normalized.push(out);
+    done += 1;
+    report(onProgress, {
+      stage: 'NORMALIZING',
+      message: `Normalized ${done}/${incompatible.length}`,
+      progress: Math.round((done / incompatible.length) * 100),
+      reencoding: true,
+      encoder: encoder.name,
+    });
+  }
+
+  report(onProgress, {
+    stage: 'CONCATENATING',
+    message: 'Fast concat mode enabled after normalization',
+    reencoding: false,
+  });
+
+  return normalized;
+}
+
+export function createConcatList(scenePaths: string[]): string {
+  return scenePaths.map((p) => `file '${p.replace(/\\/g, '/')}'`).join('\n');
+}
+
+export async function concatScenes(
+  scenePaths: string[],
+  outputPath: string,
+  workDir: string
+): Promise<string> {
+  if (!scenePaths.length) throw new Error('No scenes to concat.');
+  if (scenePaths.length === 1) {
+    fs.mkdirSync(path.dirname(outputPath), { recursive: true });
+    fs.copyFileSync(scenePaths[0], outputPath);
+    return outputPath;
+  }
+
+  fs.mkdirSync(path.dirname(outputPath), { recursive: true });
+  const listPath = path.join(workDir, 'scene-concat.txt');
+  fs.writeFileSync(listPath, createConcatList(scenePaths), 'utf8');
+
+  await run(
+    ffmpeg()
+      .input(listPath)
+      .inputOptions(['-f', 'concat', '-safe', '0'])
+      .outputOptions(['-c', 'copy', '-movflags', '+faststart'])
+      .output(outputPath),
+    { timeoutMs: 10 * 60 * 1000, label: 'concat-scenes' }
+  );
+
+  return outputPath;
+}
+
+export async function prepareFinalAudio(options: {
+  narrationPath?: string;
+  backgroundMusicPath?: string;
+  outputPath: string;
+  workDir: string;
+}): Promise<string> {
+  const { narrationPath, backgroundMusicPath, outputPath, workDir } = options;
+  fs.mkdirSync(path.dirname(outputPath), { recursive: true });
+  fs.mkdirSync(workDir, { recursive: true });
+
+  if (!narrationPath && !backgroundMusicPath) {
+    throw new Error('No narration or background music available for final audio.');
+  }
+
+  const audioInputs: string[] = [];
+  const filters: string[] = [];
+
+  if (narrationPath) {
+    audioInputs.push(narrationPath);
+    filters.push('[0:a]volume=1.0[a0]');
+  }
+
+  if (backgroundMusicPath) {
+    audioInputs.push(backgroundMusicPath);
+    filters.push('[1:a]volume=0.22[a1]');
+  }
+
+  if (audioInputs.length === 1) {
+    const src = audioInputs[0];
+    // Audio-only stream: if it's already AAC/48k/stereo (e.g. a prior final-audio
+    // reused across a re-render), stream-copy it instead of re-encoding.
+    const meta = await probeSceneInfo(src);
+    if (isAudioStreamAlreadyTarget(meta)) {
+      await run(
+        ffmpeg().input(src).outputOptions(['-c:a', 'copy']).output(outputPath),
+        { timeoutMs: 2 * 60 * 1000, label: 'final-audio-copy' }
+      );
+      return outputPath;
+    }
+    await run(
+      ffmpeg()
+        .input(src)
+        .outputOptions(['-c:a', 'aac', '-ar', '48000', '-ac', '2'])
+        .output(outputPath),
+      { timeoutMs: 10 * 60 * 1000, label: 'final-audio' }
+    );
+    return outputPath;
+  }
+
+  const mixFilter = `[a0][a1]amix=inputs=2:duration=longest:dropout_transition=0[outa]`;
+  await run(
+    ffmpeg()
+      .input(audioInputs[0])
+      .input(audioInputs[1])
+      .complexFilter(`${filters.join(';')};${mixFilter}`)
+      .outputOptions(['-map', '[outa]', '-c:a', 'aac', '-ar', '48000', '-ac', '2'])
+      .output(outputPath),
+    { timeoutMs: 10 * 60 * 1000, label: 'mix-audio' }
+  );
+
+  return outputPath;
+}
+
+export async function muxFinalVideo(options: {
+  videoPath: string;
+  audioPath: string;
+  outputPath: string;
+  burnSubtitles?: boolean;
+  srtPath?: string;
+  onProgress?: StageReporter;
+}): Promise<string> {
+  const { videoPath, audioPath, outputPath, burnSubtitles = false, srtPath, onProgress } = options;
+  fs.mkdirSync(path.dirname(outputPath), { recursive: true });
+
+  if (burnSubtitles && srtPath) {
+    const encoder = await resolveVideoEncoder();
+    report(onProgress, {
+      stage: 'FINALIZING',
+      message: 'Burning subtitles into video',
+      reencoding: true,
+      reason: 'burning subtitles',
+      encoder: encoder.name,
+    });
+
+    const srtEscaped = srtPath.replace(/\\/g, '/').replace(/:/g, '\\:').replace(/'/g, "\\'");
+    await run(
+      ffmpeg()
+        .input(videoPath)
+        .input(audioPath)
+        .videoFilters(`subtitles='${srtEscaped}'`)
+        .audioFilters('apad')
+        .outputOptions([
+          '-map',
+          '0:v:0',
+          '-map',
+          '1:a:0',
+          ...encoder.outputArgs,
+          '-pix_fmt',
+          'yuv420p',
+          '-r',
+          '60',
+          '-c:a',
+          'aac',
+          '-ar',
+          '48000',
+          '-ac',
+          '2',
+          '-shortest',
+          '-movflags',
+          '+faststart',
+        ])
+        .output(outputPath),
+      { timeoutMs: 12 * 60 * 1000, label: 'final-mux-subtitles' }
+    );
+    report(onProgress, { stage: 'COMPLETED', message: 'Final video ready' });
+    return outputPath;
+  }
+
+  report(onProgress, {
+    stage: 'FINALIZING',
+    message: 'Muxing audio into video',
+    reencoding: false,
+  });
+
+  await run(
+    ffmpeg()
+      .input(videoPath)
+      .input(audioPath)
+      .outputOptions([
+        '-map',
+        '0:v:0',
+        '-map',
+        '1:a:0',
+        '-c:v',
+        'copy',
+        '-c:a',
+        'aac',
+        '-ar',
+        '48000',
+        '-ac',
+        '2',
+        '-shortest',
+        '-movflags',
+        '+faststart',
+      ])
+      .output(outputPath),
+    { timeoutMs: 12 * 60 * 1000, label: 'final-mux' }
+  );
+
+  report(onProgress, { stage: 'COMPLETED', message: 'Final video ready' });
+  return outputPath;
+}
+
+export function cleanupTempFiles(dirPath: string): void {
+  if (!dirPath || !fs.existsSync(dirPath)) return;
+  fs.rmSync(dirPath, { recursive: true, force: true });
+}
+
+/**
+ * Nối nhiều đoạn video thành 1 file bằng concat demuxer stream-copy.
+ * Chỉ encode lại khi một scene riêng lẻ không đạt chuẩn; không re-encode toàn bộ batch.
  */
 export async function concatClipFiles(
   clipPaths: string[],
   outputPath: string,
-  workDir: string
+  workDir: string,
+  onProgress?: StageReporter
 ): Promise<string> {
   if (!clipPaths.length) throw new Error('No clips to concat.');
   if (clipPaths.length === 1) {
@@ -369,56 +864,8 @@ export async function concatClipFiles(
     return outputPath;
   }
 
-  fs.mkdirSync(workDir, { recursive: true });
-  fs.mkdirSync(path.dirname(outputPath), { recursive: true });
-
-  const n = clipPaths.length;
-  const filterParts: string[] = [];
-  const concatInputs: string[] = [];
-  for (let i = 0; i < n; i++) {
-    filterParts.push(
-      `[${i}:v]scale=1280:720:force_original_aspect_ratio=decrease,` +
-        `pad=1280:720:(ow-iw)/2:(oh-ih)/2:black,fps=30,format=yuv420p,setsar=1[v${i}]`
-    );
-    concatInputs.push(`[v${i}]`);
-  }
-  filterParts.push(`${concatInputs.join('')}concat=n=${n}:v=1:a=0[vout]`);
-
-  const tmpOut = path.join(workDir, `concat-${Date.now()}.mp4`);
-  const cmd = ffmpeg();
-  for (const clip of clipPaths) {
-    cmd.input(clip);
-  }
-  await run(
-    cmd
-      .complexFilter(filterParts.join(';'))
-      .outputOptions([
-        '-map',
-        '[vout]',
-        '-an',
-        '-c:v',
-        'libx264',
-        '-preset',
-        'ultrafast',
-        '-crf',
-        '23',
-        '-pix_fmt',
-        'yuv420p',
-        '-movflags',
-        '+faststart',
-      ])
-      .output(tmpOut),
-    {
-      timeoutMs: 8 * 60 * 1000,
-      label: `Nối ${n} đoạn video`,
-    }
-  );
-
-  if (!fs.existsSync(tmpOut) || fs.statSync(tmpOut).size < 1024) {
-    throw new Error(`Nối ${n} đoạn video thất bại — file output rỗng.`);
-  }
-  fs.renameSync(tmpOut, outputPath);
-  return outputPath;
+  const normalized = await normalizeIncompatibleScenes(clipPaths, workDir, onProgress);
+  return concatScenes(normalized, outputPath, workDir);
 }
 
 export async function assembleFinalVideo(options: {
@@ -432,133 +879,56 @@ export async function assembleFinalVideo(options: {
   clipDurations?: number[];
   /** When clips are already 1280x720@30 (e.g. Ken Burns slides), skip re-encode. */
   skipClipNormalize?: boolean;
+  onProgress?: StageReporter;
 }): Promise<string> {
-  const { clipPaths, audioPath, srtPath, outputPath, burnSubtitles, workDir } = options;
+  const { clipPaths, audioPath, srtPath, outputPath, burnSubtitles, workDir, onProgress } = options;
   if (!clipPaths.length) throw new Error('No clips to assemble.');
 
   fs.mkdirSync(workDir, { recursive: true });
 
-  // Hard cuts between scenes — fit each clip to planned duration.
-  // Longer than natural: freeze last frame (tpad). Shorter: trim with -t.
-  const normalized: string[] = [];
-  for (let i = 0; i < clipPaths.length; i++) {
-    const out = path.join(workDir, `clip-${i}.mp4`);
-    if (options.skipClipNormalize) {
-      const planned = options.clipDurations?.[i];
-      const natural = await getDurationSafe(clipPaths[i], planned ?? 8);
-      if (planned == null || Math.abs(planned - natural) <= 0.08) {
-        fs.copyFileSync(clipPaths[i], out);
-        normalized.push(out);
-        continue;
-      }
-      // Duration mismatch: only trim/pad, do not re-scale (keeps Ken Burns smooth).
-      const filters: string[] = [];
-      if (planned > natural + 0.05) {
-        filters.push(`tpad=stop_mode=clone:stop_duration=${(planned - natural).toFixed(3)}`);
-      }
-      const cmd = ffmpeg(clipPaths[i]).outputOptions([
-        '-an',
-        '-c:v',
-        filters.length ? 'libx264' : 'copy',
-        ...(filters.length ? ['-preset', 'medium', '-crf', '18', '-pix_fmt', 'yuv420p', '-r', '30'] : []),
-      ]);
-      if (filters.length) cmd.videoFilters(filters);
-      if (planned) cmd.outputOptions(['-t', String(planned)]);
-      await run(cmd.output(out));
-      normalized.push(out);
-      continue;
-    }
+  // Probe once, reuse the same metadata for both the compatibility check and
+  // the normalize pass — avoids ffprobe-ing every scene twice.
+  const validation = await validateSceneCompatibility(clipPaths, onProgress);
+  const normalized = await normalizeIncompatibleScenes(clipPaths, workDir, onProgress, validation);
 
-    const natural = await getDurationSafe(clipPaths[i], options.clipDurations?.[i] ?? 8);
-    const planned = options.clipDurations?.[i];
-    const filters = [
-      'scale=1280:720:force_original_aspect_ratio=decrease',
-      'pad=1280:720:(ow-iw)/2:(oh-ih)/2:black',
-      'fps=30',
-    ];
-    if (planned != null && planned > natural + 0.05) {
-      filters.push(`tpad=stop_mode=clone:stop_duration=${(planned - natural).toFixed(3)}`);
-    }
+  report(onProgress, { stage: 'CONCATENATING', message: `Concatenating ${normalized.length} clip(s)` });
+  const mergedVideo = path.join(workDir, 'merged-video.mp4');
+  await concatScenes(normalized, mergedVideo, workDir);
 
-    const cmd = ffmpeg(clipPaths[i]).videoFilters(filters).outputOptions([
-      '-an',
-      '-c:v',
-      'libx264',
-      '-preset',
-      'veryfast',
-      '-pix_fmt',
-      'yuv420p',
-      '-r',
-      '30',
-    ]);
-    if (planned) cmd.outputOptions(['-t', String(planned)]);
-    await run(cmd.output(out));
-    normalized.push(out);
-  }
-
-  const listFile = path.join(workDir, 'concat.txt');
-  fs.writeFileSync(
-    listFile,
-    normalized.map((p) => `file '${p.replace(/\\/g, '/')}'`).join('\n'),
-    'utf8'
-  );
-
-  const silentConcat = path.join(workDir, 'video-silent.mp4');
-  await run(
-    ffmpeg()
-      .input(listFile)
-      .inputOptions(['-f', 'concat', '-safe', '0'])
-      .outputOptions(['-c', 'copy'])
-      .output(silentConcat)
-  );
-
-  fs.mkdirSync(path.dirname(outputPath), { recursive: true });
-
-  // The narration is usually shorter than the footage. `-shortest` would cut the
-  // video down to the audio, dropping whole scenes, so instead pad the audio with
-  // silence and clamp the output to the full video length.
-  const plannedTotal =
-    options.estimatedTotalSeconds ??
-    options.clipDurations?.reduce((sum, value) => sum + value, 0) ??
-    0;
-  const videoDuration = await getDurationSafe(silentConcat, plannedTotal);
-  const lengthOptions = videoDuration > 0 ? ['-t', videoDuration.toFixed(3)] : ['-shortest'];
-
-  if (burnSubtitles) {
-    const srtEscaped = srtPath.replace(/\\/g, '/').replace(/:/g, '\\:').replace(/'/g, "\\'");
+  report(onProgress, { stage: 'MIXING_AUDIO', message: 'Preparing final audio track' });
+  const finalAudio = path.join(workDir, 'final-audio.m4a');
+  const audioMeta = await probeSceneInfo(audioPath);
+  if (isAudioStreamAlreadyTarget(audioMeta)) {
     await run(
-      ffmpeg()
-        .input(silentConcat)
-        .input(audioPath)
-        .videoFilters(`subtitles='${srtEscaped}'`)
-        .audioFilters('apad')
-        .outputOptions([
-          '-c:v',
-          'libx264',
-          '-preset',
-          'veryfast',
-          '-c:a',
-          'aac',
-          '-pix_fmt',
-          'yuv420p',
-          ...lengthOptions,
-        ])
-        .output(outputPath)
+      ffmpeg().input(audioPath).outputOptions(['-c:a', 'copy']).output(finalAudio),
+      { timeoutMs: 2 * 60 * 1000, label: 'normalize-audio-copy' }
     );
   } else {
     await run(
       ffmpeg()
-        .input(silentConcat)
         .input(audioPath)
-        .audioFilters('apad')
-        .outputOptions(['-c:v', 'copy', '-c:a', 'aac', ...lengthOptions])
-        .output(outputPath)
+        .outputOptions(['-c:a', 'aac', '-ar', '48000', '-ac', '2'])
+        .output(finalAudio),
+      { timeoutMs: 10 * 60 * 1000, label: 'normalize-audio' }
     );
   }
 
+  await muxFinalVideo({
+    videoPath: mergedVideo,
+    audioPath: finalAudio,
+    outputPath,
+    burnSubtitles,
+    srtPath,
+    onProgress,
+  });
+
   const beside = outputPath.replace(/\.mp4$/i, '.srt');
   if (path.resolve(srtPath) !== path.resolve(beside)) {
-    fs.copyFileSync(srtPath, beside);
+    try {
+      fs.copyFileSync(srtPath, beside);
+    } catch {
+      /* ignore */
+    }
   }
 
   return outputPath;
@@ -612,6 +982,7 @@ export async function assembleSlideshowFromImages(options: {
   durations?: number[];
   /** Strip nano-banana watermark on each still before Ken Burns (safe, isolated). */
   stripCornerLogo?: boolean;
+  onProgress?: StageReporter;
 }): Promise<string> {
   const {
     imagePaths,
@@ -622,6 +993,7 @@ export async function assembleSlideshowFromImages(options: {
     workDir,
     durations,
     stripCornerLogo = false,
+    onProgress,
   } = options;
   if (!imagePaths.length) throw new Error('No images to assemble.');
 
@@ -630,6 +1002,10 @@ export async function assembleSlideshowFromImages(options: {
   const audioDur = await getDurationSafe(audioPath, estimatedTotal);
   const fallback = Math.max(audioDur / imagePaths.length, 1);
 
+  // Ken Burns clips are always rendered from stills, so libx264 stays the
+  // default here (NVENC gives little benefit on short zoompan outputs and
+  // this keeps quality/behavior unchanged) — hardware encoding is reserved
+  // for the heavier normalize/subtitle-burn passes above.
   const clips: string[] = [];
   for (let i = 0; i < imagePaths.length; i++) {
     const imagePath = imagePaths[i];
@@ -671,6 +1047,11 @@ export async function assembleSlideshowFromImages(options: {
       );
     }
     clips.push(out);
+    report(onProgress, {
+      stage: 'NORMALIZING',
+      message: `Ken Burns clip ${i + 1}/${imagePaths.length}`,
+      progress: Math.round(((i + 1) / imagePaths.length) * 100),
+    });
   }
 
   // Write to a temp file then rename so the UI never opens a half-written final.mp4.
@@ -685,6 +1066,7 @@ export async function assembleSlideshowFromImages(options: {
     estimatedTotalSeconds: estimatedTotal,
     clipDurations: durations,
     skipClipNormalize: true,
+    onProgress,
   });
 
   fs.mkdirSync(path.dirname(outputPath), { recursive: true });
