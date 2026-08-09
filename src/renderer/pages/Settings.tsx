@@ -608,7 +608,7 @@ export default function Settings() {
             <p className="hint">Tạm tắt OpenAI TTS &amp; Irodori — ưu tiên GenMax.</p>
           ) : null}
         </div>
-        {settings.ttsProvider === 'elevenlabs' ? (
+        {coerceSelectableTtsProvider(settings.ttsProvider) === 'elevenlabs' ? (
           <div className="field">
             <label htmlFor="el-model-default">ElevenLabs model mặc định</label>
             <select
@@ -625,7 +625,7 @@ export default function Settings() {
               ))}
             </select>
           </div>
-        ) : settings.ttsProvider === 'qwen' ? (
+        ) : coerceSelectableTtsProvider(settings.ttsProvider) === 'qwen' ? (
           <>
             <div className="field">
               <label htmlFor="qwen-lang">Language type mặc định</label>
@@ -699,7 +699,7 @@ export default function Settings() {
               ) : null}
             </div>
           </>
-        ) : settings.ttsProvider === 'genmax' ? (
+        ) : coerceSelectableTtsProvider(settings.ttsProvider) === 'genmax' ? (
           <>
             <GenmaxVoicePicker
               backend={settings.genmaxBackend || 'elevenlabs'}

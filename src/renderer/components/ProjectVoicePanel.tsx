@@ -164,7 +164,7 @@ export default function ProjectVoicePanel({
         ) : null}
       </div>
 
-      {value.ttsProvider === 'elevenlabs' ? (
+      {selectableProvider === 'elevenlabs' ? (
         <>
           <div className="field">
             <div className="field-row-between">
@@ -254,7 +254,7 @@ export default function ProjectVoicePanel({
             </select>
           </div>
         </>
-      ) : value.ttsProvider === 'qwen' ? (
+      ) : selectableProvider === 'qwen' ? (
         <>
           <div className="field">
             <label htmlFor="project-qwen-lang">Language type</label>
@@ -329,7 +329,7 @@ export default function ProjectVoicePanel({
             )}
           </div>
         </>
-      ) : value.ttsProvider === 'genmax' ? (
+      ) : selectableProvider === 'genmax' ? (
         <>
           <GenmaxVoicePicker
             backend={value.genmaxBackend || 'elevenlabs'}
