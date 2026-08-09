@@ -43,6 +43,13 @@ ffmpeg.setFfprobePath(resolveFfprobePath());
 
 const DEFAULT_FFMPEG_TIMEOUT_MS = 10 * 60 * 1000;
 
+/** Target final merge: 1080p @ 60fps (không render cao hơn để giữ tốc độ). */
+const FINAL_WIDTH = 1920;
+const FINAL_HEIGHT = 1080;
+const FINAL_FPS = 60;
+const FINAL_X264_PRESET = 'ultrafast';
+const FINAL_CRF = '23';
+
 function run(
   cmd: ffmpeg.FfmpegCommand,
   options?: { timeoutMs?: number; label?: string }
@@ -377,8 +384,8 @@ export async function concatClipFiles(
   const concatInputs: string[] = [];
   for (let i = 0; i < n; i++) {
     filterParts.push(
-      `[${i}:v]scale=1280:720:force_original_aspect_ratio=decrease,` +
-        `pad=1280:720:(ow-iw)/2:(oh-ih)/2:black,fps=30,format=yuv420p,setsar=1[v${i}]`
+      `[${i}:v]scale=${FINAL_WIDTH}:${FINAL_HEIGHT}:force_original_aspect_ratio=decrease,` +
+        `pad=${FINAL_WIDTH}:${FINAL_HEIGHT}:(ow-iw)/2:(oh-ih)/2:black,fps=${FINAL_FPS},format=yuv420p,setsar=1[v${i}]`
     );
     concatInputs.push(`[v${i}]`);
   }
@@ -399,11 +406,13 @@ export async function concatClipFiles(
         '-c:v',
         'libx264',
         '-preset',
-        'ultrafast',
+        FINAL_X264_PRESET,
         '-crf',
-        '23',
+        FINAL_CRF,
         '-pix_fmt',
         'yuv420p',
+        '-r',
+        String(FINAL_FPS),
         '-movflags',
         '+faststart',
       ])
@@ -430,7 +439,7 @@ export async function assembleFinalVideo(options: {
   workDir: string;
   estimatedTotalSeconds?: number;
   clipDurations?: number[];
-  /** When clips are already 1280x720@30 (e.g. Ken Burns slides), skip re-encode. */
+  /** When clips are already 1080p@60 (e.g. Ken Burns slides), skip re-encode. */
   skipClipNormalize?: boolean;
 }): Promise<string> {
   const { clipPaths, audioPath, srtPath, outputPath, burnSubtitles, workDir } = options;
@@ -460,7 +469,18 @@ export async function assembleFinalVideo(options: {
         '-an',
         '-c:v',
         filters.length ? 'libx264' : 'copy',
-        ...(filters.length ? ['-preset', 'medium', '-crf', '18', '-pix_fmt', 'yuv420p', '-r', '30'] : []),
+        ...(filters.length
+          ? [
+              '-preset',
+              FINAL_X264_PRESET,
+              '-crf',
+              FINAL_CRF,
+              '-pix_fmt',
+              'yuv420p',
+              '-r',
+              String(FINAL_FPS),
+            ]
+          : []),
       ]);
       if (filters.length) cmd.videoFilters(filters);
       if (planned) cmd.outputOptions(['-t', String(planned)]);
@@ -472,9 +492,9 @@ export async function assembleFinalVideo(options: {
     const natural = await getDurationSafe(clipPaths[i], options.clipDurations?.[i] ?? 8);
     const planned = options.clipDurations?.[i];
     const filters = [
-      'scale=1280:720:force_original_aspect_ratio=decrease',
-      'pad=1280:720:(ow-iw)/2:(oh-ih)/2:black',
-      'fps=30',
+      `scale=${FINAL_WIDTH}:${FINAL_HEIGHT}:force_original_aspect_ratio=decrease`,
+      `pad=${FINAL_WIDTH}:${FINAL_HEIGHT}:(ow-iw)/2:(oh-ih)/2:black`,
+      `fps=${FINAL_FPS}`,
     ];
     if (planned != null && planned > natural + 0.05) {
       filters.push(`tpad=stop_mode=clone:stop_duration=${(planned - natural).toFixed(3)}`);
@@ -485,11 +505,13 @@ export async function assembleFinalVideo(options: {
       '-c:v',
       'libx264',
       '-preset',
-      'veryfast',
+      FINAL_X264_PRESET,
+      '-crf',
+      FINAL_CRF,
       '-pix_fmt',
       'yuv420p',
       '-r',
-      '30',
+      String(FINAL_FPS),
     ]);
     if (planned) cmd.outputOptions(['-t', String(planned)]);
     await run(cmd.output(out));
@@ -536,11 +558,15 @@ export async function assembleFinalVideo(options: {
           '-c:v',
           'libx264',
           '-preset',
-          'veryfast',
+          FINAL_X264_PRESET,
+          '-crf',
+          FINAL_CRF,
           '-c:a',
           'aac',
           '-pix_fmt',
           'yuv420p',
+          '-r',
+          String(FINAL_FPS),
           ...lengthOptions,
         ])
         .output(outputPath)
@@ -566,14 +592,10 @@ export async function assembleFinalVideo(options: {
 
 /**
  * Ken Burns — slow zoom-in then hold.
- * Small push (~6–9%) over ~80% of the clip with smootherstep easing so
- * motion feels cinematic, not a quick linear punch. High-res source +
- * zoompan @ 60fps → 1080p → lanczos 720p reduces sub-pixel shake.
+ * Render thẳng 1080p@60 (không oversample 5K) để bước ghép nhanh hơn.
  */
 function kenBurnsFilters(durationSec: number): string[] {
-  const renderFps = 60;
-  const outFps = 30;
-  const frames = Math.max(Math.round(durationSec * renderFps), renderFps);
+  const frames = Math.max(Math.round(durationSec * FINAL_FPS), FINAL_FPS);
   const last = Math.max(frames - 1, 1);
   // Shorter clips zoom less so they don't feel rushed.
   const delta = Math.min(0.09, Math.max(0.055, durationSec * 0.011));
@@ -590,15 +612,11 @@ function kenBurnsFilters(durationSec: number): string[] {
   // put delogo in this chain: expression-based delogo often fails with
   // Windows exit 4294967274 (-22 EINVAL) and frame=0 before any output.
   return [
-    // Oversample so each zoom step is a tiny fraction of a 720p pixel.
-    'scale=5120:2880:force_original_aspect_ratio=increase:flags=lanczos',
-    'crop=5120:2880',
+    `scale=${FINAL_WIDTH}:${FINAL_HEIGHT}:force_original_aspect_ratio=increase:flags=fast_bilinear`,
+    `crop=${FINAL_WIDTH}:${FINAL_HEIGHT}`,
     'setsar=1',
     'format=yuv420p',
-    // Keep float x/y (no trunc) — trunc caused 1px “jumps” that looked shaky.
-    `zoompan=z='${zExpr}':d=${frames}:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=1920x1080:fps=${renderFps}`,
-    'scale=1280:720:flags=lanczos',
-    `fps=${outFps}`,
+    `zoompan=z='${zExpr}':d=${frames}:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=${FINAL_WIDTH}x${FINAL_HEIGHT}:fps=${FINAL_FPS}`,
   ];
 }
 
@@ -641,11 +659,11 @@ export async function assembleSlideshowFromImages(options: {
     }
     const out = path.join(workDir, `img-clip-${i}.mp4`);
     const dur = Math.max(durations?.[i] ?? fallback, 1);
-    const outFrames = Math.max(Math.round(dur * 30), 30);
+    const outFrames = Math.max(Math.round(dur * FINAL_FPS), FINAL_FPS);
     try {
       await run(
         ffmpeg(imagePath)
-          .inputOptions(['-loop', '1', '-framerate', '60'])
+          .inputOptions(['-loop', '1', '-framerate', String(FINAL_FPS)])
           .videoFilters(kenBurnsFilters(dur))
           .outputOptions([
             '-frames:v',
@@ -654,13 +672,13 @@ export async function assembleSlideshowFromImages(options: {
             '-c:v',
             'libx264',
             '-preset',
-            'medium',
+            FINAL_X264_PRESET,
             '-crf',
-            '18',
+            FINAL_CRF,
             '-pix_fmt',
             'yuv420p',
             '-r',
-            '30',
+            String(FINAL_FPS),
           ])
           .output(out)
       );

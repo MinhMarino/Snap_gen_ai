@@ -51,8 +51,19 @@ function resolveGenmaxBackendField(
   return 'elevenlabs';
 }
 
+/** Tạm ẩn khỏi UI chọn giọng (vẫn giữ code/pipeline). */
+export const TTS_PROVIDERS_TEMPORARILY_HIDDEN: ReadonlySet<TtsProvider> = new Set([
+  'openai',
+  'qwen',
+]);
+
+export function coerceSelectableTtsProvider(provider: TtsProvider): TtsProvider {
+  if (TTS_PROVIDERS_TEMPORARILY_HIDDEN.has(provider)) return 'genmax';
+  return provider;
+}
+
 export const DEFAULT_PROJECT_VOICE: ProjectVoiceSettings = {
-  ttsProvider: 'openai',
+  ttsProvider: 'genmax',
   openaiTtsModel: 'gpt-4o-mini-tts',
   openaiTtsVoice: 'onyx',
   elevenLabsVoiceId: '21m00Tcm4TlvDq8ikWAM',
@@ -90,9 +101,11 @@ export function resolveProjectVoice(
   defaults?: Partial<AppSettings> | null
 ): ProjectVoiceSettings {
   const base: ProjectVoiceSettings = {
-    ttsProvider: isTtsProvider(defaults?.ttsProvider)
-      ? defaults.ttsProvider
-      : DEFAULT_PROJECT_VOICE.ttsProvider,
+    ttsProvider: coerceSelectableTtsProvider(
+      isTtsProvider(defaults?.ttsProvider)
+        ? defaults.ttsProvider
+        : DEFAULT_PROJECT_VOICE.ttsProvider
+    ),
     openaiTtsModel: defaults?.openaiTtsModel || DEFAULT_PROJECT_VOICE.openaiTtsModel,
     openaiTtsVoice: defaults?.openaiTtsVoice || DEFAULT_PROJECT_VOICE.openaiTtsVoice,
     elevenLabsVoiceId: defaults?.elevenLabsVoiceId || DEFAULT_PROJECT_VOICE.elevenLabsVoiceId,
@@ -117,7 +130,9 @@ export function resolveProjectVoice(
   if (!projectDraftHasVoice(partial)) return base;
   const qwenLanguageType = partial!.qwenLanguageType || base.qwenLanguageType;
   return {
-    ttsProvider: isTtsProvider(partial!.ttsProvider) ? partial!.ttsProvider : base.ttsProvider,
+    ttsProvider: coerceSelectableTtsProvider(
+      isTtsProvider(partial!.ttsProvider) ? partial!.ttsProvider : base.ttsProvider
+    ),
     openaiTtsModel: partial!.openaiTtsModel || base.openaiTtsModel,
     openaiTtsVoice: partial!.openaiTtsVoice || base.openaiTtsVoice,
     elevenLabsVoiceId: partial!.elevenLabsVoiceId || base.elevenLabsVoiceId,

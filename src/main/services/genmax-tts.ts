@@ -21,7 +21,8 @@ export const DEFAULT_GENMAX_VOICE_ID = 'hpp4J3VqNfWAUOO0d1Us'; // Bella
 export const DEFAULT_GENMAX_MODEL_ID = 'eleven_flash_v2_5';
 export const DEFAULT_GENMAX_BACKEND: GenmaxBackend = 'elevenlabs';
 
-const MAX_CHARS_PER_REQUEST = 4000;
+/** GenMax/ElevenLabs cho tối đa ~10k ký tự / request — gửi lớn để ít round-trip. */
+const MAX_CHARS_PER_REQUEST = 10_000;
 const POLL_MS = 1500;
 const DEFAULT_TIMEOUT_MS = 600_000;
 

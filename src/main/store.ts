@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import type { ApiKeys, AppSettings } from '../shared/types';
 import { DEFAULT_QWEN_TTS_MODEL, DEFAULT_RUNPOD_ENDPOINT_ID } from '../shared/types';
-import { resolveIrodoriSpeedPreset } from '../shared/voice';
+import { coerceSelectableTtsProvider, resolveIrodoriSpeedPreset } from '../shared/voice';
 
 const DEFAULT_KEYS: ApiKeys = {
   snapgenApiKey: '',
@@ -16,7 +16,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   openaiModel: 'gpt-4o-mini',
   openaiTtsModel: 'gpt-4o-mini-tts',
   openaiTtsVoice: 'onyx',
-  ttsProvider: 'openai',
+  ttsProvider: 'genmax',
   elevenLabsVoiceId: '21m00Tcm4TlvDq8ikWAM',
   elevenLabsModelId: 'eleven_flash_v2_5',
   qwenTtsModel: DEFAULT_QWEN_TTS_MODEL,
@@ -152,13 +152,14 @@ export function saveKeys(keys: ApiKeys): void {
 export function getSettings(): AppSettings {
   const data = readFile();
   const merged = { ...DEFAULT_SETTINGS, ...data.settings };
-  const provider =
+  const rawProvider =
     merged.ttsProvider === 'elevenlabs' ||
     merged.ttsProvider === 'openai' ||
     merged.ttsProvider === 'qwen' ||
     merged.ttsProvider === 'genmax'
       ? merged.ttsProvider
       : DEFAULT_SETTINGS.ttsProvider;
+  const provider = coerceSelectableTtsProvider(rawProvider);
   const qwenRegion = 'singapore' as const;
   const genmaxBackend =
     merged.genmaxBackend === 'minimax' || merged.genmaxBackend === 'capcut'
