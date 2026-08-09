@@ -49,6 +49,8 @@ const FINAL_HEIGHT = 1080;
 const FINAL_FPS = 60;
 const FINAL_X264_PRESET = 'ultrafast';
 const FINAL_CRF = '23';
+/** Fade đen vào/ra mỗi scene — giữ nguyên tổng thời lượng (khớp narration). */
+const SCENE_FADE_SEC = 0.28;
 
 function run(
   cmd: ffmpeg.FfmpegCommand,
@@ -430,6 +432,20 @@ export async function concatClipFiles(
   return outputPath;
 }
 
+function sceneTransitionFades(durationSec: number, options?: { fadeIn?: boolean; fadeOut?: boolean }): string[] {
+  const fadeIn = options?.fadeIn !== false;
+  const fadeOut = options?.fadeOut !== false;
+  const d = Math.max(0.05, durationSec);
+  const fade = Math.min(SCENE_FADE_SEC, Math.max(0.12, d * 0.12));
+  if (d < fade * 2 + 0.15) return [];
+  const filters: string[] = [];
+  if (fadeIn) filters.push(`fade=t=in:st=0:d=${fade.toFixed(3)}:color=black`);
+  if (fadeOut) {
+    filters.push(`fade=t=out:st=${(d - fade).toFixed(3)}:d=${fade.toFixed(3)}:color=black`);
+  }
+  return filters;
+}
+
 export async function assembleFinalVideo(options: {
   clipPaths: string[];
   audioPath: string;
@@ -439,7 +455,7 @@ export async function assembleFinalVideo(options: {
   workDir: string;
   estimatedTotalSeconds?: number;
   clipDurations?: number[];
-  /** When clips are already 1080p@60 (e.g. Ken Burns slides), skip re-encode. */
+  /** When clips are already 1080p@60 (e.g. Ken Burns slides), skip re-scale — vẫn encode fade chuyển cảnh. */
   skipClipNormalize?: boolean;
 }): Promise<string> {
   const { clipPaths, audioPath, srtPath, outputPath, burnSubtitles, workDir } = options;
@@ -447,40 +463,33 @@ export async function assembleFinalVideo(options: {
 
   fs.mkdirSync(workDir, { recursive: true });
 
-  // Hard cuts between scenes — fit each clip to planned duration.
-  // Longer than natural: freeze last frame (tpad). Shorter: trim with -t.
+  // Fit mỗi clip theo duration + fade đen vào/ra (chuyển cảnh mềm, giữ tổng thời lượng).
   const normalized: string[] = [];
   for (let i = 0; i < clipPaths.length; i++) {
     const out = path.join(workDir, `clip-${i}.mp4`);
+    const fadeOpts = { fadeIn: true, fadeOut: true };
+
     if (options.skipClipNormalize) {
       const planned = options.clipDurations?.[i];
       const natural = await getDurationSafe(clipPaths[i], planned ?? 8);
-      if (planned == null || Math.abs(planned - natural) <= 0.08) {
-        fs.copyFileSync(clipPaths[i], out);
-        normalized.push(out);
-        continue;
-      }
-      // Duration mismatch: only trim/pad, do not re-scale (keeps Ken Burns smooth).
+      const targetDur = planned ?? natural;
       const filters: string[] = [];
-      if (planned > natural + 0.05) {
+      if (planned != null && planned > natural + 0.05) {
         filters.push(`tpad=stop_mode=clone:stop_duration=${(planned - natural).toFixed(3)}`);
       }
+      filters.push(...sceneTransitionFades(targetDur, fadeOpts));
       const cmd = ffmpeg(clipPaths[i]).outputOptions([
         '-an',
         '-c:v',
-        filters.length ? 'libx264' : 'copy',
-        ...(filters.length
-          ? [
-              '-preset',
-              FINAL_X264_PRESET,
-              '-crf',
-              FINAL_CRF,
-              '-pix_fmt',
-              'yuv420p',
-              '-r',
-              String(FINAL_FPS),
-            ]
-          : []),
+        'libx264',
+        '-preset',
+        FINAL_X264_PRESET,
+        '-crf',
+        FINAL_CRF,
+        '-pix_fmt',
+        'yuv420p',
+        '-r',
+        String(FINAL_FPS),
       ]);
       if (filters.length) cmd.videoFilters(filters);
       if (planned) cmd.outputOptions(['-t', String(planned)]);
@@ -491,6 +500,7 @@ export async function assembleFinalVideo(options: {
 
     const natural = await getDurationSafe(clipPaths[i], options.clipDurations?.[i] ?? 8);
     const planned = options.clipDurations?.[i];
+    const targetDur = planned ?? natural;
     const filters = [
       `scale=${FINAL_WIDTH}:${FINAL_HEIGHT}:force_original_aspect_ratio=decrease`,
       `pad=${FINAL_WIDTH}:${FINAL_HEIGHT}:(ow-iw)/2:(oh-ih)/2:black`,
@@ -499,6 +509,7 @@ export async function assembleFinalVideo(options: {
     if (planned != null && planned > natural + 0.05) {
       filters.push(`tpad=stop_mode=clone:stop_duration=${(planned - natural).toFixed(3)}`);
     }
+    filters.push(...sceneTransitionFades(targetDur, fadeOpts));
 
     const cmd = ffmpeg(clipPaths[i]).videoFilters(filters).outputOptions([
       '-an',
@@ -598,9 +609,9 @@ function kenBurnsFilters(durationSec: number): string[] {
   const frames = Math.max(Math.round(durationSec * FINAL_FPS), FINAL_FPS);
   const last = Math.max(frames - 1, 1);
   // Shorter clips zoom less so they don't feel rushed.
-  const delta = Math.min(0.09, Math.max(0.055, durationSec * 0.011));
-  // Finish the push early, then hold — avoids constant motion to the last frame.
-  const moveFrames = Math.max(Math.round(last * 0.82), 1);
+  const delta = Math.min(0.095, Math.max(0.06, durationSec * 0.012));
+  // Finish the push a bit earlier (was 0.82) — zoom in nhanh hơn một chút, rồi hold.
+  const moveFrames = Math.max(Math.round(last * 0.72), 1);
 
   // Smootherstep: t³(t(6t−15)+10) — softer accel/decel than smoothstep.
   // Commas must be escaped for filtergraph.
