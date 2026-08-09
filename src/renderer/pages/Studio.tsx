@@ -23,11 +23,15 @@ import {
 } from '../../shared/models';
 import { toLocalMediaUrl } from '../../shared/media-url';
 import ModelPicker from '../components/ModelPicker';
-import JobProgressView from '../components/JobProgress';
 import Timeline from '../components/Timeline';
 import ExportDialog, { buildExportableScenes } from '../components/ExportDialog';
 import GenerateScenesDialog from '../components/GenerateScenesDialog';
 import ProjectVoicePanel from '../components/ProjectVoicePanel';
+import StepActivityUI, {
+  createLogLine,
+  type ActivityLogLevel,
+  type StepActivityState,
+} from '../components/StepActivityUI';
 import type { ProjectVoiceSettings } from '../../shared/types';
 import { OPENAI_CHAT_MODELS } from '../../shared/types';
 import { DEFAULT_PROJECT_VOICE, resolveProjectChatModel, resolveProjectVoice } from '../../shared/voice';
@@ -53,7 +57,7 @@ function sanitizeDurationMinutes(value: unknown, fallback = DEFAULT_DURATION_MIN
   return n;
 }
 
-type Tool = 'ai' | 'script' | 'media' | 'audio' | 'text';
+type WorkflowStep = 'script' | 'voice' | 'media' | 'merge';
 
 interface Props {
   projectId: string | null;
@@ -61,12 +65,17 @@ interface Props {
   onNeedProject: () => void;
 }
 
-const TOOL_ITEMS: Array<{ id: Tool; icon: string; label: string }> = [
-  { id: 'ai', icon: '✦', label: 'AI Create' },
-  { id: 'media', icon: '▧', label: 'Media' },
-  { id: 'script', icon: '☷', label: 'Script' },
-  { id: 'audio', icon: '♫', label: 'Giọng đọc' },
-  { id: 'text', icon: 'T', label: 'Text' },
+const WORKFLOW_STEPS: Array<{
+  id: WorkflowStep;
+  step: number;
+  icon: string;
+  label: string;
+  short: string;
+}> = [
+  { id: 'script', step: 1, icon: '1', label: 'Tạo script', short: 'Script' },
+  { id: 'voice', step: 2, icon: '2', label: 'Tạo voice', short: 'Voice' },
+  { id: 'media', step: 3, icon: '3', label: 'Tạo ảnh/video', short: 'Media' },
+  { id: 'merge', step: 4, icon: '4', label: 'Ghép Final', short: 'Ghép' },
 ];
 
 function toFileUrl(filePath: string): string {
@@ -85,7 +94,7 @@ function formatTime(seconds: number): string {
 }
 
 export default function Studio({ projectId, onProjectReady, onNeedProject }: Props) {
-  const [activeTool, setActiveTool] = useState<Tool>('ai');
+  const [activeStep, setActiveStep] = useState<WorkflowStep>('script');
   const [videoFamilies, setVideoFamilies] = useState<{ id: VideoFamily; label: string }[]>([]);
   const [imageFamilies, setImageFamilies] = useState<{ id: ImageFamily; label: string }[]>([]);
   const [videoModels, setVideoModels] = useState<ModelOption[]>([]);
@@ -129,10 +138,64 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
   const [narrationPlaying, setNarrationPlaying] = useState(false);
   const narrationAudioRef = useRef<HTMLAudioElement | null>(null);
   const [voice, setVoice] = useState<ProjectVoiceSettings>({ ...DEFAULT_PROJECT_VOICE });
+  const [activity, setActivity] = useState<StepActivityState | null>(null);
   const remuxTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const remuxRunning = useRef(false);
   const remuxPending = useRef<ScriptDraft | null>(null);
   const generateRunning = useRef(false);
+  const lastActivityLogRef = useRef<string>('');
+
+  const startActivity = (input: {
+    stepId: string;
+    title: string;
+    blurb: string;
+    showJobControls?: boolean;
+    firstLog?: string;
+  }) => {
+    lastActivityLogRef.current = '';
+    setActivity({
+      stepId: input.stepId,
+      title: input.title,
+      blurb: input.blurb,
+      percent: 2,
+      status: 'running',
+      logs: input.firstLog ? [createLogLine(input.firstLog)] : [],
+      modalOpen: true,
+      dockOpen: true,
+      showJobControls: Boolean(input.showJobControls),
+      jobProgress: null,
+    });
+  };
+
+  const pushActivityLog = (text: string, level: ActivityLogLevel = 'info') => {
+    const trimmed = text.trim();
+    if (!trimmed || trimmed === lastActivityLogRef.current) return;
+    lastActivityLogRef.current = trimmed;
+    setActivity((prev) =>
+      prev
+        ? { ...prev, logs: [...prev.logs, createLogLine(trimmed, level)].slice(-80) }
+        : prev
+    );
+  };
+
+  const setActivityPercent = (percent: number) => {
+    setActivity((prev) => (prev ? { ...prev, percent: Math.min(100, Math.max(0, percent)) } : prev));
+  };
+
+  const finishActivity = (ok: boolean, message: string) => {
+    setActivity((prev) =>
+      prev
+        ? {
+            ...prev,
+            status: ok ? 'done' : 'error',
+            percent: ok ? 100 : prev.percent,
+            modalOpen: true,
+            dockOpen: true,
+            logs: [...prev.logs, createLogLine(message, ok ? 'ok' : 'error')].slice(-80),
+          }
+        : prev
+    );
+  };
 
   const hasSceneMedia = sceneMedia.some((asset) => asset.exists);
   const allScenesHaveMedia = useMemo(() => {
@@ -328,7 +391,28 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
     })();
   }, []);
 
-  useEffect(() => window.studio.onJobProgress(setProgress), []);
+  useEffect(
+    () =>
+      window.studio.onJobProgress((p) => {
+        setProgress(p);
+        setActivity((prev) => {
+          if (!prev || prev.status !== 'running' || !prev.showJobControls) return prev;
+          const msg = (p.message || '').trim();
+          const shouldLog = Boolean(msg) && msg !== lastActivityLogRef.current;
+          if (shouldLog) lastActivityLogRef.current = msg;
+          return {
+            ...prev,
+            // Pipeline đã map % đúng (audio-only: theo chunk 0–100; full job: band TTS/media).
+            percent: Math.min(100, Math.max(prev.percent, p.percent ?? prev.percent)),
+            jobProgress: p,
+            logs: shouldLog
+              ? [...prev.logs, createLogLine(msg, p.phase === 'error' ? 'error' : 'info')].slice(-80)
+              : prev.logs,
+          };
+        });
+      }),
+    []
+  );
 
   /** Quay lại project đang gen nền → gắn lại progress (không mất UI). */
   const attachRunningJob = async (id: string) => {
@@ -336,6 +420,24 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
     if (!job.active || job.projectId !== id) return false;
     setBusy(true);
     if (job.progress) setProgress(job.progress);
+    startActivity({
+      stepId: 'resume',
+      title: 'Tiếp tục job đang chạy',
+      blurb: 'Gắn lại tiến độ từ main process.',
+      showJobControls: true,
+      firstLog: job.progress?.message || 'Đang khôi phục tiến độ…',
+    });
+    if (job.progress) {
+      setActivity((prev) =>
+        prev
+          ? {
+              ...prev,
+              percent: job.progress?.percent ?? prev.percent,
+              jobProgress: job.progress,
+            }
+          : prev
+      );
+    }
     return true;
   };
 
@@ -355,9 +457,11 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
             setPreviewMode('final');
             setPreviewKey((v) => v + 1);
             setToast({ type: 'ok', text: 'Generate hoàn tất (chạy nền).' });
+            finishActivity(true, 'Generate hoàn tất.');
           } else if (!event.ok) {
             setError(event.error || 'Job thất bại.');
             setToast({ type: 'error', text: event.error || 'Job thất bại.' });
+            finishActivity(false, event.error || 'Job thất bại.');
           }
         } finally {
           setBusy(false);
@@ -426,7 +530,11 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
           setOpenaiChatModel(
             resolveProjectChatModel(draft.openaiChatModel, undefined)
           );
-          if (draft.script) setActiveTool('script');
+          if (draft.script) {
+            if (!detail.audioPath) setActiveStep('voice');
+            else if (!detail.sceneMedia.every((a) => a.exists)) setActiveStep('media');
+            else setActiveStep('merge');
+          }
         } else {
           const s = await window.studio.getSettings();
           setVoice(resolveProjectVoice(null, s));
@@ -735,10 +843,20 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
       message: 'Đang ghép lại video bằng FFmpeg (không gọi API)...',
       percent: 80,
     });
+    startActivity({
+      stepId: 'remux',
+      title: 'Ghép lại timeline',
+      blurb: 'FFmpeg local — không gọi TTS / Snapgen.',
+      showJobControls: true,
+      firstLog: 'Bắt đầu remux FFmpeg…',
+    });
+    setActivityPercent(80);
     try {
+      pushActivityLog('Lưu draft timeline…');
       await window.studio.saveProjectDraft(activeProjectId, draftPayload(nextScript), {
         name: projectName.trim() || 'Untitled project',
       });
+      pushActivityLog('Đang ghép final.mp4…');
       const remuxed = await window.studio.remuxProject(activeProjectId);
       setResult(remuxed);
       const refreshed = await window.studio.getProject(activeProjectId);
@@ -756,10 +874,12 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
       setPreviewKey((value) => value + 1);
       setTimelineDirty(false);
       setToast({ type: 'ok', text: 'Đã ghép lại video theo timeline (FFmpeg local).' });
+      finishActivity(true, 'Remux xong.');
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       setError(message);
       setToast({ type: 'error', text: message });
+      finishActivity(false, message);
     } finally {
       remuxRunning.current = false;
       setBusy(false);
@@ -890,8 +1010,27 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
     }
     setBusy(true);
     setError(null);
+    startActivity({
+      stepId: 'script',
+      title: 'Bước — Tạo kịch bản',
+      blurb: 'ChatGPT đang viết narration + chia scene theo thời lượng mục tiêu.',
+      firstLog: 'Bắt đầu tạo kịch bản…',
+    });
+    const tick = window.setInterval(() => {
+      setActivity((prev) => {
+        if (!prev || prev.status !== 'running' || prev.stepId !== 'script') return prev;
+        return { ...prev, percent: Math.min(88, prev.percent + 3) };
+      });
+    }, 900);
     try {
+      pushActivityLog('Đang chuẩn bị / lưu dự án…');
+      setActivityPercent(8);
       const id = await ensureProject();
+      pushActivityLog(`Dự án sẵn sàng · model ${openaiChatModel}`);
+      setActivityPercent(18);
+      pushActivityLog(
+        `Gọi ChatGPT viết kịch bản (~${formatDurationLabel(scenePlan.targetDurationSec)}, ${language})…`
+      );
       const draft = await window.studio.generateScript({
         brief: brief.trim(),
         language,
@@ -905,6 +1044,8 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
         stylePrompt: stylePrompt.trim() || undefined,
         openaiChatModel,
       });
+      setActivityPercent(82);
+      pushActivityLog(`Nhận ${draft.scenes.length} scene — đang lưu draft…`);
       setScript(draft);
       setSelectedScene(0);
       await window.studio.saveProjectDraft(id, draftPayload(draft), {
@@ -914,51 +1055,161 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
       const chapterCount = new Set(
         draft.scenes.map((s) => (s.chapter || '').trim()).filter(Boolean)
       ).size;
-      setToast({
-        type: 'ok',
-        text: `Script sẵn sàng: ${chapterCount ? `${chapterCount} chapter · ` : ''}${draft.scenes.length} scene · lời ~${formatDurationLabel(spoken)} (mục tiêu ${formatDurationLabel(scenePlan.targetDurationSec)}).`,
-      });
-      setActiveTool('script');
+      const summary = `Script sẵn sàng: ${chapterCount ? `${chapterCount} chapter · ` : ''}${draft.scenes.length} scene · lời ~${formatDurationLabel(spoken)} (mục tiêu ${formatDurationLabel(scenePlan.targetDurationSec)}).`;
+      setToast({ type: 'ok', text: summary });
+      pushActivityLog(summary, 'ok');
+      finishActivity(true, 'Tạo kịch bản xong.');
+      setActiveStep('voice');
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      const message = err instanceof Error ? err.message : String(err);
+      setError(message);
+      finishActivity(false, message);
     } finally {
+      window.clearInterval(tick);
       setBusy(false);
     }
   };
 
-  const startJob = async () => {
+  const runStepAction = async (step: WorkflowStep, mode: 'create' | 'recreate' = 'create') => {
+    if (step === 'script') {
+      await createScript();
+      return;
+    }
     if (!script) {
-      setActiveTool('ai');
-      setError('Hãy tạo kịch bản trước khi generate.');
+      setActiveStep('script');
+      setError('Hãy tạo kịch bản trước.');
       return;
     }
-    const spoken = estimateScriptSpokenSeconds(script.scenes);
-    const target = scenePlan.targetDurationSec;
-    if (spoken < target * 0.85) {
-      setActiveTool('ai');
-      setError(
-        `Narration chỉ ~${formatDurationLabel(spoken)}, ngắn hơn mục tiêu ${formatDurationLabel(target)}. Hãy Generate script lại trước khi tạo video.`
-      );
+    if (step === 'voice') {
+      await confirmGenerate({
+        regenerateSceneIds: [],
+        refreshNarration: true,
+        step: 'audio',
+        clearNarrationFirst: mode === 'recreate' || hasNarration,
+      });
       return;
     }
-    setGenerateOpen(true);
+    if (step === 'media') {
+      const missing = script.scenes
+        .filter((scene, index) => {
+          const asset =
+            sceneMedia.find((item) => item.sceneId === scene.id) ?? sceneMedia[index];
+          return !asset?.exists;
+        })
+        .map((scene) => scene.id);
+      const ids =
+        mode === 'recreate' || missing.length === 0
+          ? script.scenes.map((scene) => scene.id)
+          : missing;
+      await confirmGenerate({
+        regenerateSceneIds: ids,
+        refreshNarration: false,
+        step: 'media',
+      });
+      return;
+    }
+    // merge
+    if (!hasNarration && !narrationPath) {
+      setActiveStep('voice');
+      setError('Chưa có voiceover — làm bước 2 trước.');
+      return;
+    }
+    if (!allScenesHaveMedia) {
+      setActiveStep('media');
+      setError('Chưa đủ ảnh/video scene — làm bước 3 trước.');
+      return;
+    }
+    await confirmGenerate({
+      regenerateSceneIds: [],
+      refreshNarration: false,
+      step: 'remux',
+    });
+  };
+
+  const clearNarrationAudio = async () => {
+    try {
+      const id = await ensureProject();
+      if (typeof window.studio.clearNarrationAudio !== 'function') {
+        throw new Error('App chưa reload handler xóa voice — đóng app và chạy lại npm run dev.');
+      }
+      const result = await window.studio.clearNarrationAudio(id);
+      setHasNarration(false);
+      setNarrationPath(null);
+      if (narrationAudioRef.current) {
+        narrationAudioRef.current.pause();
+        narrationAudioRef.current = null;
+      }
+      setNarrationPlaying(false);
+      setToast({
+        type: 'ok',
+        text:
+          result.removed.length > 0
+            ? 'Đã xóa voice. Bấm «Tạo voice» để tạo lại.'
+            : 'Không còn file voice để xóa.',
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      setToast({
+        type: 'error',
+        text: message.includes('No handler')
+          ? 'Main chưa có handler xóa voice — đóng cửa sổ app rồi chạy lại npm run dev.'
+          : message,
+      });
+    }
   };
 
   const confirmGenerate = async (payload: {
     regenerateSceneIds: string[];
     refreshNarration: boolean;
     step?: 'audio' | 'media' | 'remux';
+    clearNarrationFirst?: boolean;
   }) => {
     if (!script || generateRunning.current) return;
     generateRunning.current = true;
     setBusy(true);
     setError(null);
     setProgress({ phase: 'idle', message: 'Đang chuẩn bị pipeline...', percent: 0 });
+    const step = payload.step || 'media';
+    const stepMeta =
+      step === 'audio'
+        ? {
+            title: 'Bước 1 — Tạo audio',
+            blurb: 'TTS voiceover + subtitle. Có thể thu nhỏ popup, theo dõi dock dưới.',
+          }
+        : step === 'media'
+          ? {
+              title: `Bước 2 — Tạo ${mediaKind === 'image' ? 'ảnh' : 'video'}`,
+              blurb: 'Snapgen render từng scene. Theo dõi log + thanh tiến độ ở dock dưới.',
+            }
+          : {
+              title: 'Bước 3 — Ghép Final',
+              blurb: 'FFmpeg ghép clip/ảnh + narration thành final.mp4.',
+            };
+    startActivity({
+      stepId: step,
+      title: stepMeta.title,
+      blurb: stepMeta.blurb,
+      showJobControls: true,
+      firstLog: 'Đang chuẩn bị pipeline…',
+    });
     try {
       const id = await ensureProject();
+      pushActivityLog('Đã lưu draft dự án');
       await window.studio.saveProjectDraft(id, draftPayload(script), {
         name: projectName.trim() || 'Untitled project',
       });
+      if (payload.clearNarrationFirst || (payload.step === 'audio' && payload.refreshNarration)) {
+        pushActivityLog('Xóa narration cũ trước khi gọi TTS API…', 'warn');
+        const cleared = await window.studio.clearNarrationAudio(id);
+        setHasNarration(false);
+        setNarrationPath(null);
+        pushActivityLog(
+          cleared.removed.length
+            ? `Đã xóa: ${cleared.removed.join(', ')}`
+            : 'Không còn file narration cũ.',
+          'ok'
+        );
+      }
       const generated = await window.studio.startGenerate({
         projectId: id,
         projectName: projectName.trim() || 'Untitled project',
@@ -1010,25 +1261,28 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
                 ? `Đã dừng. Xong ${generated.scenesCompleted ?? 0}/${generated.scenesTotal ?? '?'} ${mediaLabel} — tiếp tục bước 2 khi sẵn sàng.`
                 : `Đã xong bước 2 (${payload.regenerateSceneIds.length} ${mediaLabel}). Sang bước 3 để ghép Final.`
               : null;
-      setToast({
-        type: 'ok',
-        text:
-          stepToast ||
-          (generated.stopped
-            ? `Đã dừng. Xong ${generated.scenesCompleted ?? 0}/${generated.scenesTotal ?? '?'} scene — Generate lại scene còn thiếu khi sẵn sàng.`
-            : payload.regenerateSceneIds.length === 0
-              ? payload.refreshNarration
-                ? 'Đã tạo lại voiceover.'
-                : 'Đã ghép lại Final với narration hiện có.'
-              : payload.regenerateSceneIds.length === 1
-                ? `Đã tạo lại ${mediaLabel} scene.`
-                : `Đã generate ${payload.regenerateSceneIds.length} scene.`),
-      });
+      const okText =
+        stepToast ||
+        (generated.stopped
+          ? `Đã dừng. Xong ${generated.scenesCompleted ?? 0}/${generated.scenesTotal ?? '?'} scene — Generate lại scene còn thiếu khi sẵn sàng.`
+          : payload.regenerateSceneIds.length === 0
+            ? payload.refreshNarration
+              ? 'Đã tạo lại voiceover.'
+              : 'Đã ghép lại Final với narration hiện có.'
+            : payload.regenerateSceneIds.length === 1
+              ? `Đã tạo lại ${mediaLabel} scene.`
+              : `Đã generate ${payload.regenerateSceneIds.length} scene.`);
+      setToast({ type: 'ok', text: okText });
+      finishActivity(true, okText);
+      if (payload.step === 'audio') setActiveStep('media');
+      else if (payload.step === 'media' && !generated.stopped) setActiveStep('merge');
+      else if (payload.step === 'remux') setActiveStep('merge');
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       setError(message);
       setProgress({ phase: 'error', message: 'Generate thất bại', error: message });
       setToast({ type: 'error', text: message });
+      finishActivity(false, message);
     } finally {
       generateRunning.current = false;
       setBusy(false);
@@ -1039,11 +1293,12 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
     if (!script || busy || generateRunning.current) return;
     setSelectedScene(sceneIndex);
     setPreviewMode('scene');
-    setActiveTool('script');
+    setActiveStep('media');
     void confirmGenerate({
       regenerateSceneIds: [sceneId],
       // Regen 1 scene: giữ VO; ghép Final lại nếu đã đủ clip (không skipMerge).
       refreshNarration: false,
+      step: 'media',
     });
   };
 
@@ -1085,9 +1340,6 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
   };
 
   const resolvedNarrationPath = narrationPath || result?.audioPath || null;
-  /** Đã xong video từng scene + voiceover → ẩn nút Generate chung (vẫn regen từng scene). */
-  const generationComplete =
-    allScenesHaveMedia && Boolean(hasNarration || resolvedNarrationPath);
 
   const togglePlayNarration = async () => {
     if (!resolvedNarrationPath) return;
@@ -1118,16 +1370,38 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
     }
   };
 
+  const mediaLabel = mediaKind === 'image' ? 'ảnh' : 'video';
+  const step1Done = Boolean(script?.scenes.length);
+  const step2Done = Boolean(hasNarration || resolvedNarrationPath);
+  const step3Done = allScenesHaveMedia;
+  const step4Done = Boolean(result?.videoPath) && !timelineDirty;
+  const stepDone: Record<WorkflowStep, boolean> = {
+    script: step1Done,
+    voice: step2Done,
+    media: step3Done,
+    merge: step4Done,
+  };
+  const missingMediaIds =
+    script?.scenes
+      .filter((scene, index) => {
+        const asset =
+          sceneMedia.find((item) => item.sceneId === scene.id) ?? sceneMedia[index];
+        return !asset?.exists;
+      })
+      .map((scene) => scene.id) ?? [];
+
   const renderLeftPanel = () => {
-    if (activeTool === 'ai') {
+    if (activeStep === 'script') {
       return (
         <>
           <div className="editor-panel-heading">
             <div>
-              <span className="panel-kicker">AI WORKFLOW</span>
-              <h2>Create with AI</h2>
+              <span className="panel-kicker">BƯỚC 1</span>
+              <h2>Tạo script</h2>
             </div>
-            <span className="beta-badge">BETA</span>
+            <span className={`step-status-badge ${step1Done ? 'done' : ''}`}>
+              {step1Done ? 'Đã có' : 'Chưa'}
+            </span>
           </div>
 
           <div className="media-switch">
@@ -1148,7 +1422,7 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
           </div>
 
           <div className="field compact-field">
-            <label htmlFor="brief">Describe your video</label>
+            <label htmlFor="brief">Mô tả video</label>
             <textarea
               id="brief"
               value={brief}
@@ -1163,7 +1437,7 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
               className="small-textarea"
               value={stylePrompt}
               onChange={(event) => setStylePrompt(event.target.value)}
-              placeholder="Warm film look, soft light, consistent character..."
+              placeholder="Warm film look, soft light..."
             />
           </div>
           <div className="field compact-field">
@@ -1176,10 +1450,9 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
           </div>
           <div className="field compact-field duration-field">
             <div className="duration-field-head">
-              <label htmlFor="target-duration">Thời lượng video</label>
+              <label htmlFor="target-duration">Thời lượng</label>
               <span className="duration-field-live">
-                {formatDurationLabel(scenePlan.targetDurationSec)} · AI chia scene theo beat
-                (ước ~{scenePlan.sceneCountHint})
+                {formatDurationLabel(scenePlan.targetDurationSec)} · ~{scenePlan.sceneCountHint} scene
               </span>
             </div>
             <div className="duration-presets" role="group" aria-label="Preset thời lượng">
@@ -1208,18 +1481,12 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
                   onChange={(event) => onDurationInputChange(event.target.value)}
                   onBlur={onDurationInputBlur}
                   placeholder="1"
-                  aria-describedby="duration-hint"
                 />
                 <span className="duration-unit">phút</span>
               </div>
-              <p id="duration-hint" className="hint duration-hint">
-                Chỉ chọn thời lượng — AI tự chia Chapter → Scene theo ý nội dung (không cố định
-                8s/scene). Narration khớp từng beat.
-                {mediaKind === 'video' ? ` · >${maxShotSec}s dùng Extend` : ''}.
-                {scenePlan.sceneCountHint > 20 ? ' Video dài → nhiều scene, chi phí tăng.' : ''}
-              </p>
             </div>
           </div>
+
           <ModelPicker
             mediaKind={mediaKind}
             families={families}
@@ -1237,13 +1504,9 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
             onResolutionChange={setResolution}
             onModeChange={setMode}
           />
-          <p className="hint">
-            Model ở trên là Snapgen tạo {mediaKind === 'image' ? 'ảnh' : 'video'} — không phải model viết
-            kịch bản.
-          </p>
 
           <div className="field compact-field">
-            <label htmlFor="script-chat-model">Model viết kịch bản (theo dự án)</label>
+            <label htmlFor="script-chat-model">Model viết kịch bản</label>
             <select
               id="script-chat-model"
               value={openaiChatModel}
@@ -1271,306 +1534,393 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
                 <option value={openaiChatModel}>{openaiChatModel}</option>
               )}
             </select>
-            <p className="hint">
-              Lưu theo dự án (giống giọng đọc). Video dài nên chọn GPT-4o. API key vẫn ở Settings.
-            </p>
           </div>
 
-          <div className="voice-inline-block">
-            <div className="field compact-field">
-              <label>Giọng đọc (theo dự án)</label>
-            </div>
-            <ProjectVoicePanel value={voice} disabled={busy} onChange={onVoiceChange} />
+          <div className="step-actions">
+            <button
+              type="button"
+              className="editor-primary full-width"
+              disabled={busy}
+              onClick={() => void runStepAction('script', step1Done ? 'recreate' : 'create')}
+            >
+              <span>✦</span>
+              {busy && activity?.stepId === 'script'
+                ? 'Đang tạo script…'
+                : step1Done
+                  ? 'Tạo lại script'
+                  : 'Tạo script'}
+            </button>
+            {step1Done ? (
+              <button
+                type="button"
+                className="editor-secondary full-width"
+                disabled={busy}
+                onClick={() => setActiveStep('voice')}
+              >
+                Tiếp bước 2 — Voice →
+              </button>
+            ) : null}
           </div>
 
-          <button
-            type="button"
-            className="editor-primary full-width"
-            disabled={busy}
-            onClick={() => void createScript()}
-          >
-            <span>✦</span>
-            {busy ? 'Creating script...' : 'Generate script'}
-          </button>
-        </>
-      );
-    }
-
-    if (activeTool === 'script') {
-      return (
-        <>
-          <div className="editor-panel-heading">
-            <div>
-              <span className="panel-kicker">STORYBOARD</span>
-              <h2>Scenes</h2>
-            </div>
-            <span className="scene-count">{script?.scenes.length ?? 0}</span>
-          </div>
           {script ? (
-            <div className="scene-list">
-              {script.scenes.map((scene, index) => {
-                const asset =
-                  sceneMedia.find((item) => item.sceneId === scene.id) ?? sceneMedia[index];
-                const thumbUrl =
-                  asset?.exists && asset.kind === 'image' ? toFileUrl(asset.path) : null;
-                const mediaLabel = mediaKind === 'image' ? 'ảnh' : 'video';
-                return (
-                  <div
+            <div className="step-scene-summary">
+              <div className="editor-panel-heading compact">
+                <div>
+                  <span className="panel-kicker">SCENES</span>
+                  <h3>{script.scenes.length} scene</h3>
+                </div>
+              </div>
+              <div className="scene-list compact">
+                {script.scenes.map((scene, index) => (
+                  <button
                     key={scene.id}
+                    type="button"
                     className={`scene-list-item ${selectedScene === index ? 'active' : ''}`}
-                    role="button"
-                    tabIndex={0}
                     onClick={() => {
                       setSelectedScene(index);
                       setPreviewMode('scene');
                     }}
-                    onKeyDown={(event) => {
-                      if (event.key === 'Enter' || event.key === ' ') {
-                        event.preventDefault();
-                        setSelectedScene(index);
-                        setPreviewMode('scene');
-                      }
-                    }}
                   >
-                    <span className={`scene-thumb ${thumbUrl ? 'has-media' : ''}`}>
-                      {thumbUrl ? (
-                        <img src={thumbUrl} alt="" />
-                      ) : (
-                        <span>{String(index + 1).padStart(2, '0')}</span>
-                      )}
+                    <span className="scene-thumb">
+                      <span>{String(index + 1).padStart(2, '0')}</span>
                     </span>
                     <span className="scene-list-copy">
                       <strong>
                         Scene {index + 1}
                         {scene.chapter ? ` · ${scene.chapter}` : ''}
-                        {scene.section === 'introduction'
-                          ? ' · Intro'
-                          : scene.section === 'conclusion'
-                            ? ' · Outro'
-                            : scene.section === 'body'
-                              ? ' · Body'
-                              : ''}
                       </strong>
-                      <small>{scene.visual_prompt || 'Empty visual prompt'}</small>
+                      <small>{scene.narration_segment || scene.visual_prompt || '…'}</small>
                     </span>
-                    <span className="scene-list-meta">
-                      <span className="scene-duration">{scene.duration_hint}s</span>
-                      <button
-                        type="button"
-                        className="scene-regen-btn"
-                        title={`Tạo lại ${mediaLabel} scene ${index + 1}`}
-                        disabled={busy}
-                        onClick={(event) => {
-                          event.stopPropagation();
-                          regenerateOneScene(scene.id, index);
-                        }}
-                      >
-                        ↻
-                      </button>
-                    </span>
-                  </div>
-                );
-              })}
+                    <span className="scene-duration">{scene.duration_hint}s</span>
+                  </button>
+                ))}
+              </div>
             </div>
-          ) : (
-            <div className="empty-panel">
-              <span>☷</span>
-              <strong>No scenes yet</strong>
-              <p>Create a script with AI to build your timeline.</p>
-              <button type="button" className="editor-secondary" onClick={() => setActiveTool('ai')}>
-                Open AI Create
-              </button>
-            </div>
-          )}
+          ) : null}
         </>
       );
     }
 
-    if (activeTool === 'media') {
-      const readyAssets = sceneMedia.filter((asset) => asset.exists);
+    if (activeStep === 'voice') {
       return (
         <>
           <div className="editor-panel-heading">
             <div>
-              <span className="panel-kicker">PROJECT MEDIA</span>
-              <h2>Scene clips</h2>
+              <span className="panel-kicker">BƯỚC 2</span>
+              <h2>Tạo voice</h2>
             </div>
-            <span className="scene-count">{readyAssets.length}</span>
+            <span className={`step-status-badge ${step2Done ? 'done' : ''}`}>
+              {step2Done ? 'Đã có' : 'Chưa'}
+            </span>
           </div>
-          <p className="media-note">
-            Mỗi scene là một file riêng. Chọn clip để preview hoặc mở thư mục dự án.
-          </p>
-          {readyAssets.length ? (
-            <div className="media-grid">
-              {sceneMedia.map((asset, index) => {
-                const scene = script?.scenes[index];
-                const thumbUrl =
-                  asset.exists && asset.kind === 'image' ? toFileUrl(asset.path) : null;
-                const mediaLabel = mediaKind === 'image' ? 'ảnh' : 'video';
-                return (
-                  <div
-                    key={asset.sceneId}
-                    className={`media-card ${selectedScene === index ? 'active' : ''}`}
+          {!step1Done ? (
+            <div className="empty-panel">
+              <span>♫</span>
+              <strong>Chưa có script</strong>
+              <p>Hoàn thành bước 1 trước khi tạo voiceover.</p>
+              <button type="button" className="editor-secondary" onClick={() => setActiveStep('script')}>
+                ← Về bước 1
+              </button>
+            </div>
+          ) : (
+            <>
+              <p className="media-note">Chọn giọng → tạo voice. Muốn làm lại: xóa voice rồi tạo lại.</p>
+              <ProjectVoicePanel value={voice} disabled={busy} onChange={onVoiceChange} />
+              <div className="step-actions">
+                {!step2Done ? (
+                  <button
+                    type="button"
+                    className="editor-primary full-width"
+                    disabled={busy}
+                    onClick={() => void runStepAction('voice', 'create')}
                   >
+                    <span>♫</span>
+                    {busy && activity?.stepId === 'audio' ? 'Đang tạo voice…' : 'Tạo voice'}
+                  </button>
+                ) : (
+                  <>
                     <button
                       type="button"
-                      className="media-card-select"
-                      disabled={!asset.exists}
-                      onClick={() => {
-                        setSelectedScene(index);
-                        setPreviewMode('scene');
-                      }}
+                      className="btn danger full-width"
+                      disabled={busy}
+                      onClick={() => void clearNarrationAudio()}
                     >
-                      <span className={`media-card-preview ${thumbUrl ? 'has-media' : ''}`}>
-                        {thumbUrl ? (
-                          <img src={thumbUrl} alt="" />
-                        ) : (
-                          <span>{asset.kind === 'video' ? '▶' : '▧'}</span>
-                        )}
-                        <small>{String(index + 1).padStart(2, '0')}</small>
-                      </span>
-                      <span className="media-card-copy">
-                        <strong>Scene {index + 1}</strong>
-                        <small>
-                          {scene?.duration_hint ?? 0}s · {fileName(asset.path)}
-                        </small>
-                      </span>
+                      Xóa voice
                     </button>
-                    {scene && (
-                      <button
-                        type="button"
-                        className="media-card-regen"
-                        title={`Tạo lại ${mediaLabel} scene ${index + 1}`}
-                        disabled={busy}
-                        onClick={() => regenerateOneScene(scene.id, index)}
-                      >
-                        ↻ Tạo lại
-                      </button>
-                    )}
-                  </div>
-                );
-              })}
-            </div>
-          ) : (
-            <div className="upload-dropzone">
-              <span>＋</span>
-              <strong>Chưa có clip scene</strong>
-              <p>Generate sẽ tạo một file riêng cho từng scene.</p>
-            </div>
-          )}
-          {result && (
-            <button
-              type="button"
-              className="editor-secondary full-width media-folder-button"
-              onClick={() => void window.studio.showItemInFolder(result.videoPath)}
-            >
-              Mở thư mục chứa clips
-            </button>
+                    <button
+                      type="button"
+                      className="editor-primary full-width"
+                      disabled={busy}
+                      onClick={() => void runStepAction('voice', 'recreate')}
+                    >
+                      <span>↻</span>
+                      Tạo lại voice
+                    </button>
+                  </>
+                )}
+              </div>
+              <div className="external-narration-box">
+                <p className="media-note">Hoặc tự TTS ngoài app rồi import.</p>
+                <div className="row-actions">
+                  <button
+                    type="button"
+                    className="btn"
+                    disabled={busy || !script?.scenes.length}
+                    onClick={() => {
+                      const text = (script?.scenes || [])
+                        .map((s) => (s.narration_segment || '').replace(/\s+/g, ' ').trim())
+                        .filter(Boolean)
+                        .join(' ');
+                      if (!text) {
+                        setToast({ type: 'error', text: 'Kịch bản chưa có narration.' });
+                        return;
+                      }
+                      void navigator.clipboard.writeText(text).then(
+                        () =>
+                          setToast({
+                            type: 'ok',
+                            text: `Đã copy ${text.length.toLocaleString()} ký tự.`,
+                          }),
+                        () => setToast({ type: 'error', text: 'Không copy được clipboard.' })
+                      );
+                    }}
+                  >
+                    Copy narration
+                  </button>
+                  <button
+                    type="button"
+                    className="btn"
+                    disabled={busy || !script?.scenes.length}
+                    onClick={() => void importNarrationFromFile()}
+                  >
+                    Import audio…
+                  </button>
+                </div>
+              </div>
+              {resolvedNarrationPath ? (
+                <div className="narration-player">
+                  <button
+                    type="button"
+                    className="editor-secondary full-width"
+                    onClick={() => void togglePlayNarration()}
+                  >
+                    <span>{narrationPlaying ? 'Ⅱ' : '▶'}</span>
+                    {narrationPlaying ? 'Tạm dừng' : 'Nghe lại narration'}
+                  </button>
+                  <p className="hint">{fileName(resolvedNarrationPath)}</p>
+                </div>
+              ) : null}
+              {step2Done ? (
+                <button
+                  type="button"
+                  className="editor-secondary full-width"
+                  disabled={busy}
+                  onClick={() => setActiveStep('media')}
+                >
+                  Tiếp bước 3 — Media →
+                </button>
+              ) : null}
+            </>
           )}
         </>
       );
     }
 
-    if (activeTool === 'audio') {
+    if (activeStep === 'media') {
+      const readyCount = sceneMedia.filter((a) => a.exists).length;
       return (
         <>
           <div className="editor-panel-heading">
             <div>
-              <span className="panel-kicker">VOICE</span>
-              <h2>Giọng đọc dự án</h2>
+              <span className="panel-kicker">BƯỚC 3</span>
+              <h2>Tạo {mediaLabel}</h2>
             </div>
+            <span className={`step-status-badge ${step3Done ? 'done' : ''}`}>
+              {readyCount}/{script?.scenes.length ?? 0}
+            </span>
           </div>
-          <p className="media-note">
-            Mỗi dự án có giọng riêng — lưu trong draft, không dùng chung Settings toàn app.
-          </p>
-          <ProjectVoicePanel value={voice} disabled={busy} onChange={onVoiceChange} />
-          <div className="external-narration-box">
-            <p className="media-note">
-              Muốn tự TTS ngoài app? Copy narration → tạo audio → import lại vào dự án.
-            </p>
-            <div className="row-actions">
-              <button
-                type="button"
-                className="btn"
-                disabled={busy || !script?.scenes.length}
-                onClick={() => {
-                  const text = (script?.scenes || [])
-                    .map((s) => (s.narration_segment || '').replace(/\s+/g, ' ').trim())
-                    .filter(Boolean)
-                    .join(' ');
-                  if (!text) {
-                    setToast({ type: 'error', text: 'Kịch bản chưa có narration.' });
-                    return;
-                  }
-                  void navigator.clipboard.writeText(text).then(
-                    () =>
-                      setToast({
-                        type: 'ok',
-                        text: `Đã copy ${text.length.toLocaleString()} ký tự narration.`,
-                      }),
-                    () => setToast({ type: 'error', text: 'Không copy được clipboard.' })
-                  );
-                }}
-              >
-                Copy narration
+          {!step1Done ? (
+            <div className="empty-panel">
+              <span>▧</span>
+              <strong>Chưa có script</strong>
+              <p>Hoàn thành bước 1 trước.</p>
+              <button type="button" className="editor-secondary" onClick={() => setActiveStep('script')}>
+                ← Về bước 1
               </button>
-              <button
-                type="button"
-                className="btn primary"
-                disabled={busy || !script?.scenes.length}
-                onClick={() => void importNarrationFromFile()}
-              >
-                Import audio...
-              </button>
-            </div>
-          </div>
-          {resolvedNarrationPath ? (
-            <div className="narration-player">
-              <button
-                type="button"
-                className="editor-primary full-width"
-                onClick={() => void togglePlayNarration()}
-              >
-                <span>{narrationPlaying ? 'Ⅱ' : '▶'}</span>
-                {narrationPlaying ? 'Tạm dừng narration' : 'Nghe lại toàn bộ narration'}
-              </button>
-              <button
-                type="button"
-                className="editor-secondary full-width media-folder-button"
-                onClick={() => void window.studio.showItemInFolder(resolvedNarrationPath)}
-              >
-                Mở file narration
-              </button>
-              <p className="hint">{fileName(resolvedNarrationPath)}</p>
             </div>
           ) : (
-            <p className="hint">
-              Chưa có narration — dùng TTS trong Generate, hoặc Copy + Import audio ở trên.
-            </p>
+            <>
+              <p className="media-note">
+                {!step2Done
+                  ? 'Nên có voice (bước 2) để khớp thời lượng. Vẫn có thể tạo media theo duration_hint.'
+                  : `Tạo ${mediaLabel} từng scene qua Snapgen. Có thể tạo thiếu hoặc tạo lại toàn bộ.`}
+              </p>
+              <div className="step-actions">
+                <button
+                  type="button"
+                  className="editor-primary full-width"
+                  disabled={busy}
+                  onClick={() => void runStepAction('media', 'create')}
+                >
+                  <span>▧</span>
+                  {busy && activity?.stepId === 'media'
+                    ? `Đang tạo ${mediaLabel}…`
+                    : missingMediaIds.length > 0
+                      ? `Tạo ${missingMediaIds.length} ${mediaLabel} còn thiếu`
+                      : `Tạo lại toàn bộ ${mediaLabel}`}
+                </button>
+                {readyCount > 0 ? (
+                  <button
+                    type="button"
+                    className="editor-secondary full-width"
+                    disabled={busy}
+                    onClick={() => void runStepAction('media', 'recreate')}
+                  >
+                    Tạo lại tất cả scene
+                  </button>
+                ) : null}
+                <button
+                  type="button"
+                  className="btn ghost full-width"
+                  disabled={busy || !script}
+                  onClick={() => setGenerateOpen(true)}
+                >
+                  Chọn scene nâng cao…
+                </button>
+              </div>
+              {script ? (
+                <div className="media-grid">
+                  {script.scenes.map((scene, index) => {
+                    const asset =
+                      sceneMedia.find((item) => item.sceneId === scene.id) ?? sceneMedia[index];
+                    const exists = Boolean(asset?.exists);
+                    const thumbUrl =
+                      exists && asset?.kind === 'image' ? toFileUrl(asset.path) : null;
+                    return (
+                      <div
+                        key={scene.id}
+                        className={`media-card ${selectedScene === index ? 'active' : ''}`}
+                      >
+                        <button
+                          type="button"
+                          className="media-card-select"
+                          onClick={() => {
+                            setSelectedScene(index);
+                            setPreviewMode('scene');
+                          }}
+                        >
+                          <span className={`media-card-preview ${thumbUrl ? 'has-media' : ''}`}>
+                            {thumbUrl ? <img src={thumbUrl} alt="" /> : <span>{exists ? '▶' : '·'}</span>}
+                            <small>{String(index + 1).padStart(2, '0')}</small>
+                          </span>
+                          <span className="media-card-copy">
+                            <strong>Scene {index + 1}</strong>
+                            <small>
+                              {scene.duration_hint}s · {exists ? `đã có ${mediaLabel}` : 'chưa có'}
+                            </small>
+                          </span>
+                        </button>
+                        <button
+                          type="button"
+                          className="media-card-regen"
+                          disabled={busy}
+                          onClick={() => regenerateOneScene(scene.id, index)}
+                        >
+                          ↻ Tạo lại
+                        </button>
+                      </div>
+                    );
+                  })}
+                </div>
+              ) : null}
+              {step3Done ? (
+                <button
+                  type="button"
+                  className="editor-secondary full-width"
+                  disabled={busy}
+                  onClick={() => setActiveStep('merge')}
+                >
+                  Tiếp bước 4 — Ghép →
+                </button>
+              ) : null}
+            </>
           )}
         </>
       );
     }
 
+    // merge
     return (
       <>
         <div className="editor-panel-heading">
           <div>
-            <span className="panel-kicker">TEXT</span>
-            <h2>Text</h2>
+            <span className="panel-kicker">BƯỚC 4</span>
+            <h2>Ghép Final</h2>
           </div>
+          <span className={`step-status-badge ${step4Done ? 'done' : ''}`}>
+            {step4Done ? 'Sẵn sàng' : 'Chưa'}
+          </span>
         </div>
-        <div className="upload-dropzone">
-          <span>T</span>
-          <strong>Captions by Whisper / ElevenLabs</strong>
-          <p>Subtitle track được tạo tự động khi generate voiceover.</p>
+        <p className="media-note">
+          Ghép voiceover + {mediaLabel} từng scene thành final.mp4 (FFmpeg, không tốn TTS/Snapgen).
+        </p>
+        <ul className="merge-checklist">
+          <li className={step1Done ? 'ok' : ''}>1. Script {step1Done ? '✓' : '—'}</li>
+          <li className={step2Done ? 'ok' : ''}>2. Voice {step2Done ? '✓' : '—'}</li>
+          <li className={step3Done ? 'ok' : ''}>
+            3. Media {step3Done ? '✓' : `${sceneMedia.filter((a) => a.exists).length}/${script?.scenes.length ?? 0}`}
+          </li>
+        </ul>
+        <div className="step-actions">
+          <button
+            type="button"
+            className="editor-primary full-width"
+            disabled={busy || !step2Done || !step3Done}
+            onClick={() => void runStepAction('merge', result?.videoPath ? 'recreate' : 'create')}
+          >
+            <span>▣</span>
+            {busy && activity?.stepId === 'remux'
+              ? 'Đang ghép…'
+              : result?.videoPath
+                ? 'Ghép lại Final'
+                : 'Ghép Final'}
+          </button>
+          {canRemux && script ? (
+            <button
+              type="button"
+              className="editor-secondary full-width"
+              disabled={busy}
+              onClick={() => void applyTimeline(script)}
+            >
+              {timelineDirty ? 'Ghép lại theo timeline ●' : 'Ghép lại theo timeline'}
+            </button>
+          ) : null}
+          {result?.videoPath ? (
+            <button
+              type="button"
+              className="editor-secondary full-width"
+              onClick={() => {
+                setPreviewMode('final');
+                setPreviewKey((v) => v + 1);
+              }}
+            >
+              Xem Final
+            </button>
+          ) : null}
         </div>
+        {(!step2Done || !step3Done) && (
+          <p className="hint">
+            {!step2Done ? 'Thiếu bước 2 (voice). ' : ''}
+            {!step3Done ? 'Thiếu bước 3 (media).' : ''}
+          </p>
+        )}
       </>
     );
   };
 
+
   return (
-    <div className="editor-page">
+    <div className={`editor-page${activity?.dockOpen ? ' has-activity-dock' : ''}`}>
       <header className="editor-commandbar">
         <div className="editor-command-left">
           <button type="button" className="icon-button" onClick={onNeedProject} title="Back to projects">
@@ -1631,39 +1981,50 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
           >
             Lưu video...
           </button>
-          <button
+            <button
             type="button"
             className="editor-primary"
-            disabled={busy || !script}
-            onClick={() => void startJob()}
-            title="Tách bước: audio → ảnh/video → ghép Final"
+            disabled={busy}
+            onClick={() => void runStepAction(activeStep, stepDone[activeStep] ? 'recreate' : 'create')}
+            title={WORKFLOW_STEPS.find((s) => s.id === activeStep)?.label}
           >
             <span>✦</span>
             {busy
-              ? 'Generating...'
-              : generationComplete
-                ? 'Tạo lại...'
-                : hasSceneMedia || hasNarration
-                  ? 'Generate tiếp'
-                  : 'Generate'}
+              ? 'Đang chạy…'
+              : stepDone[activeStep]
+                ? `Tạo lại · ${WORKFLOW_STEPS.find((s) => s.id === activeStep)?.short}`
+                : WORKFLOW_STEPS.find((s) => s.id === activeStep)?.label}
           </button>
         </div>
       </header>
 
       <div className="editor-workspace">
-        <aside className="tool-rail">
-          {TOOL_ITEMS.map((item) => (
-            <button
-              type="button"
-              key={item.id}
-              className={activeTool === item.id ? 'active' : ''}
-              onClick={() => setActiveTool(item.id)}
-              title={item.label}
-            >
-              <span className="tool-icon">{item.icon}</span>
-              <small>{item.label}</small>
-            </button>
-          ))}
+        <aside className="tool-rail" aria-label="Các bước tạo video">
+          {WORKFLOW_STEPS.map((item) => {
+            const done = stepDone[item.id];
+            const locked =
+              (item.id === 'voice' && !step1Done) ||
+              (item.id === 'media' && !step1Done) ||
+              (item.id === 'merge' && (!step2Done || !step3Done));
+            return (
+              <button
+                type="button"
+                key={item.id}
+                className={[
+                  activeStep === item.id ? 'active' : '',
+                  done ? 'done' : '',
+                  locked ? 'locked' : '',
+                ]
+                  .filter(Boolean)
+                  .join(' ')}
+                onClick={() => setActiveStep(item.id)}
+                title={item.label}
+              >
+                <span className="tool-icon step-num">{done ? '✓' : item.icon}</span>
+                <small>{item.short}</small>
+              </button>
+            );
+          })}
         </aside>
 
         <aside className="asset-panel">{renderLeftPanel()}</aside>
@@ -1805,11 +2166,6 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
             </div>
             <span>{formatTime(playableSrc && mediaDuration ? mediaDuration : totalDuration)}</span>
           </div>
-          {busy && progress && (
-            <div className="generation-overlay">
-              <JobProgressView progress={progress} showControls />
-            </div>
-          )}
         </main>
 
         <aside className="inspector-panel">
@@ -1968,7 +2324,7 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
             playheadTime={playheadTime}
             onSelect={(index) => {
               setSelectedScene(index);
-              setActiveTool('script');
+              setActiveStep('media');
               setPreviewMode('scene');
             }}
             onReorder={reorderScenes}
@@ -2018,8 +2374,20 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
           onClose={() => setGenerateOpen(false)}
           onConfirm={(payload) => void confirmGenerate(payload)}
           onImportNarration={() => importNarrationFromFile()}
+          onClearNarration={() => clearNarrationAudio()}
         />
       )}
+
+      <StepActivityUI
+        activity={activity}
+        onMinimize={() =>
+          setActivity((prev) => (prev ? { ...prev, modalOpen: false, dockOpen: true } : prev))
+        }
+        onExpand={() =>
+          setActivity((prev) => (prev ? { ...prev, modalOpen: true, dockOpen: true } : prev))
+        }
+        onDismiss={() => setActivity(null)}
+      />
     </div>
   );
 }

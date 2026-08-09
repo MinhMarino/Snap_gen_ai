@@ -246,6 +246,45 @@ export function pickQwenVoiceForLanguage(
   return presets[0]?.id || others[0]?.id || 'Ryan';
 }
 
+/** Preset tốc độ nói → phần instruct gửi CustomVoice (không có param speed số). */
+export type IrodoriSpeedPreset = 'default' | 'slow' | 'normal' | 'fast';
+
+export const IRODORI_SPEED_PRESETS: readonly {
+  id: IrodoriSpeedPreset;
+  label: string;
+  instruct: string;
+}[] = [
+  { id: 'default', label: 'Mặc định', instruct: '' },
+  { id: 'slow', label: 'Chậm', instruct: 'Speak slowly and calmly, with clear pauses.' },
+  { id: 'normal', label: 'Vừa', instruct: 'Speak at a natural, steady pace.' },
+  { id: 'fast', label: 'Nhanh', instruct: 'Speak quickly and energetically.' },
+] as const;
+
+export function isIrodoriSpeedPreset(value: unknown): value is IrodoriSpeedPreset {
+  return value === 'default' || value === 'slow' || value === 'normal' || value === 'fast';
+}
+
+export function resolveIrodoriSpeedPreset(value?: string | null): IrodoriSpeedPreset {
+  return isIrodoriSpeedPreset(value) ? value : 'default';
+}
+
+/**
+ * Ghép preset tốc độ + instruct tùy chỉnh → 1 chuỗi `instruct` cho API.
+ * Trả '' nếu không có gì (không gửi field instruct).
+ */
+export function buildIrodoriInstruct(
+  speedPreset?: string | null,
+  customInstruct?: string | null
+): string {
+  const preset = resolveIrodoriSpeedPreset(speedPreset);
+  const speedPart =
+    IRODORI_SPEED_PRESETS.find((p) => p.id === preset)?.instruct.trim() || '';
+  const custom = String(customInstruct || '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return [speedPart, custom].filter(Boolean).join(' ');
+}
+
 /** Optional instruct cho custom_voice — ép tone khi English / giọng trầm. */
 export function buildQwenTtsInstructions(
   voiceId?: string | null,

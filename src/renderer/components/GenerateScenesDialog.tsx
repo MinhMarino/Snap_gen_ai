@@ -18,8 +18,12 @@ interface Props {
     regenerateSceneIds: string[];
     refreshNarration: boolean;
     step: GenerateStep;
+    /** Xóa file narration cũ trước khi gọi TTS API. */
+    clearNarrationFirst?: boolean;
   }) => void;
   onImportNarration?: () => Promise<void> | void;
+  /** Xóa narration hiện có (không TTS lại). */
+  onClearNarration?: () => Promise<void> | void;
 }
 
 function pickDefaultStep(hasNarration: boolean, missingCount: number): GenerateStep {
@@ -46,6 +50,7 @@ export default function GenerateScenesDialog({
   onClose,
   onConfirm,
   onImportNarration,
+  onClearNarration,
 }: Props) {
   const scenes = script.scenes;
   const mediaLabel = mediaKind === 'image' ? 'ảnh' : 'video';
@@ -74,6 +79,7 @@ export default function GenerateScenesDialog({
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [copyMsg, setCopyMsg] = useState<string | null>(null);
   const [importBusy, setImportBusy] = useState(false);
+  const [clearBusy, setClearBusy] = useState(false);
 
   const mediaIds = useMemo(() => {
     const ids = new Set(selected);
@@ -88,9 +94,31 @@ export default function GenerateScenesDialog({
     setAudioMode('tts');
     setCopyMsg(null);
     setImportBusy(false);
+    setClearBusy(false);
   }, [open, missingIds, hasNarration]);
 
   if (!open) return null;
+
+  const clearNarrationOnly = async () => {
+    if (!onClearNarration || clearBusy || busy) return;
+    if (
+      !window.confirm(
+        'Xóa voiceover hiện có (narration.mp3, subtitle, timing)? Có thể tạo lại qua TTS API sau.'
+      )
+    ) {
+      return;
+    }
+    setClearBusy(true);
+    setCopyMsg(null);
+    try {
+      await onClearNarration();
+      setCopyMsg('Đã xóa audio. Chọn TTS để tạo lại qua API.');
+    } catch (err) {
+      setCopyMsg(err instanceof Error ? err.message : String(err));
+    } finally {
+      setClearBusy(false);
+    }
+  };
 
   const toggle = (sceneId: string, locked: boolean) => {
     if (locked) return;
@@ -142,8 +170,8 @@ export default function GenerateScenesDialog({
           ? 'Đang import...'
           : 'Chọn file audio...'
         : hasNarration
-          ? 'Tạo lại audio (TTS)'
-          : 'Tạo audio (TTS)'
+          ? 'Xóa & tạo lại qua API'
+          : 'Tạo audio (TTS API)'
       : step === 'media'
         ? `Tạo ${mediaIds.length} ${mediaLabel}`
         : 'Ghép Final';
@@ -196,8 +224,9 @@ export default function GenerateScenesDialog({
           <div className="generate-running">
             <JobProgressView progress={progress ?? null} showControls />
             <p className="hint">
-              Thấy ảnh/video không đúng tiêu chí? Bấm <strong>Tạm dừng</strong> (ngừng scene mới) hoặc{' '}
-              <strong>Dừng</strong> để khỏi tốn token. Mỗi shot Snapgen mất khoảng 80–90 giây.
+              Tiến độ + log cũng hiện ở <strong>popup bước</strong> và <strong>dock dưới màn hình</strong>.
+              Có thể đóng dialog này — job vẫn chạy. Bấm <strong>Tạm dừng</strong> / <strong>Dừng</strong> để
+              tiết kiệm token.
             </p>
           </div>
         ) : (
@@ -282,9 +311,25 @@ export default function GenerateScenesDialog({
                   <>
                     <p>
                       {hasNarration
-                        ? 'Sẽ gọi TTS lại toàn bộ kịch bản, cập nhật subtitle và khớp thời lượng scene theo lời nói.'
-                        : 'Sẽ tạo narration.mp3 + subtitle lần đầu từ toàn bộ narration trong kịch bản.'}
+                        ? 'Đã có voiceover. Có thể xóa file hiện có, hoặc xóa rồi gọi lại TTS API (OpenAI / ElevenLabs / Irodori).'
+                        : 'Sẽ tạo narration.mp3 + subtitle lần đầu từ toàn bộ narration trong kịch bản (gọi TTS API).'}
                     </p>
+                    {hasNarration ? (
+                      <div className="audio-manage-actions">
+                        <button
+                          type="button"
+                          className="btn danger"
+                          disabled={!onClearNarration || clearBusy || busy}
+                          onClick={() => void clearNarrationOnly()}
+                        >
+                          {clearBusy ? 'Đang xóa…' : 'Xóa audio hiện có'}
+                        </button>
+                        <p className="hint" style={{ margin: 0 }}>
+                          Nút chính bên dưới = xóa cache rồi tạo lại qua API.
+                        </p>
+                      </div>
+                    ) : null}
+                    {copyMsg ? <p className="hint">{copyMsg}</p> : null}
                     <p className="hint">
                       Bước này không tạo {mediaLabel}. Sau khi xong, sang bước 2 để tạo {mediaLabel}.
                     </p>
@@ -428,13 +473,14 @@ export default function GenerateScenesDialog({
             <button
               type="button"
               className="btn primary"
-              disabled={!canConfirm || importBusy}
+              disabled={!canConfirm || importBusy || clearBusy}
               onClick={() => {
                 if (step === 'audio') {
                   onConfirm({
                     regenerateSceneIds: [],
                     refreshNarration: true,
                     step: 'audio',
+                    clearNarrationFirst: hasNarration,
                   });
                   return;
                 }

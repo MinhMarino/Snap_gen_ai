@@ -1,7 +1,6 @@
 import type { GenerateIdeaInput, SceneDraft, SceneSection, ScriptDraft } from '../../shared/types';
 import {
   assertNarrationCoversTarget,
-  assertScenesNarrationFillDuration,
   countSpokenBudgetUnits,
   estimateScriptSpokenSeconds,
   estimateSpokenSeconds,
@@ -672,7 +671,6 @@ Return { "continuation": "<new sentences only, ≥ ${deficitBudget.amount} ${def
   }
 
   assertNarrationCoversTarget(draft.scenes, targetDurationSec, MIN_NARRATION_COVERAGE);
-  assertScenesNarrationFillDuration(draft.scenes, MIN_NARRATION_COVERAGE);
   return draft;
 }
 

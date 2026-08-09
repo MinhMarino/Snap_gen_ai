@@ -520,6 +520,13 @@ export const WORDS_PER_SECOND = 2.5;
 export const CJK_CHARS_PER_SECOND = 5;
 /** Narration phải đạt tối thiểu tỉ lệ này so với target trước TTS. */
 export const MIN_NARRATION_COVERAGE = 0.85;
+/**
+ * Per-scene: nới hơn tổng coverage.
+ * `duration_hint` thường đã scale theo target (dài hơn lời) → so 85% sẽ false-positive hàng loạt.
+ */
+export const MIN_SCENE_NARRATION_FILL = 0.6;
+/** Bỏ qua lệch nhỏ (giây) — làm tròn / scale hint. */
+export const MIN_SCENE_NARRATION_GAP_SEC = 2;
 /** Sau TTS: nếu |audio − target| / target > ngưỡng này → AI rewrite + TTS lại. */
 export const AUDIO_DURATION_TOLERANCE = 0.03;
 /** Số lần TTS tối đa trong vòng fit duration. */
@@ -682,40 +689,36 @@ export function assertNarrationCoversTarget(
 }
 
 /**
- * Mỗi scene: lời đọc phải đủ để lấp đầy duration_hint (pace ≈ 2.5 từ/s).
- * Trả về danh sách scene còn thiếu.
+ * Mỗi scene: lời đọc thiếu nặng so với duration_hint.
+ * Không dùng cùng ngưỡng 85% với tổng — hint hay bị scale theo target.
  */
 export function findScenesWithShortNarration<
   T extends { id?: string; narration_segment?: string; duration_hint?: number },
->(scenes: T[], minRatio = MIN_NARRATION_COVERAGE): Array<{ index: number; scene: T; spoken: number; planned: number }> {
+>(
+  scenes: T[],
+  minRatio = MIN_SCENE_NARRATION_FILL
+): Array<{ index: number; scene: T; spoken: number; planned: number }> {
   const out: Array<{ index: number; scene: T; spoken: number; planned: number }> = [];
   scenes.forEach((scene, index) => {
     const planned = Math.max(2, Number(scene.duration_hint) || IDEAL_SCENE_BEAT_SEC);
     const spoken = estimateSpokenSeconds(scene.narration_segment || '', 0);
-    if (spoken < planned * minRatio) {
+    const gap = planned - spoken;
+    if (spoken < planned * minRatio && gap >= MIN_SCENE_NARRATION_GAP_SEC) {
       out.push({ index, scene, spoken, planned });
     }
   });
   return out;
 }
 
+/**
+ * Soft-check only — không throw.
+ * Trước đây chặn job:start vì duration_hint bị scale dài hơn lời; timing thật lấy từ TTS.
+ */
 export function assertScenesNarrationFillDuration(
   scenes: Array<{ id?: string; narration_segment?: string; duration_hint?: number }>,
-  minRatio = MIN_NARRATION_COVERAGE
+  minRatio = MIN_SCENE_NARRATION_FILL
 ): void {
-  const short = findScenesWithShortNarration(scenes, minRatio);
-  if (!short.length) return;
-  const sample = short
-    .slice(0, 5)
-    .map(
-      (s) =>
-        `scene ${s.index + 1}: ~${Math.round(s.spoken)}s lời / ${s.planned}s cần`
-    )
-    .join('; ');
-  throw new Error(
-    `${short.length} scene có narration quá ngắn so với thời lượng scene (${sample}` +
-      `${short.length > 5 ? '…' : ''}). Narration must naturally fill each scene duration — Generate script lại.`
-  );
+  void findScenesWithShortNarration(scenes, minRatio);
 }
 
 export interface SceneDurationInput {

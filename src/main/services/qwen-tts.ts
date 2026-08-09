@@ -1,6 +1,11 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import {
+  chunkNarrationText,
+  planNarrationTtsChunks,
+  type NarrationChunkPlan,
+} from '../../shared/narration-chunks';
 import { DEFAULT_QWEN_TTS_MODEL, DEFAULT_RUNPOD_ENDPOINT_ID } from '../../shared/types';
 import {
   resolveQwenLanguageType,
@@ -14,15 +19,17 @@ import {
   type TranscriptWord,
   transcribeWithWords,
 } from './openai-audio';
+import { runPool } from './worker-pool';
 
 /**
- * Chunk vừa phải: text quá dài dễ làm worker treo IN_PROGRESS (OOM / hang inference).
- * Nhiều chunk ngắn + worker ấm thường ổn định hơn 1 job 6000 ký tự.
+ * Chunk vừa phải: text quá dài dễ treo; quá ít chunk thì không lấp đủ 10 worker.
+ * Adaptive re-chunk trong synthesizeWithQwen khi script dài.
  */
-const MAX_CHARS_PER_REQUEST = 1400;
+const MAX_CHARS_PER_REQUEST = 900;
+const MIN_CHARS_PER_REQUEST = 420;
 /** Poll nhanh hơn khi job đang chạy. */
-const POLL_QUEUE_MS = 1000;
-const POLL_PROGRESS_MS = 500;
+const POLL_QUEUE_MS = 800;
+const POLL_PROGRESS_MS = 400;
 /** Timeout tổng mỗi job (queue + inference). */
 const DEFAULT_TIMEOUT_MS = 360_000;
 /** Retry nếu kẹt queue / treo progress / timeout. */
@@ -32,11 +39,15 @@ const STUCK_IN_QUEUE_MS = 120_000;
 const STUCK_IN_PROGRESS_MS = 150_000;
 /** runsync chỉ khi có worker idle thật (không dùng "running" — có thể đang treo). */
 const RUNSYNC_WARM_TIMEOUT_MS = 75_000;
-
 /**
- * Session TTS liên tiếp: giữ worker ấm 60–120s thay vì idle mặc định 5s.
+ * Song song tối đa 10 — khớp workersMax endpoint (mục tiêu ~1 phút / 10 phút audio).
+ * Script ngắn (1 chunk) vẫn concurrency=1.
  */
-const SESSION_IDLE_TIMEOUT_SEC = 120;
+const DEFAULT_TTS_CONCURRENCY = 10;
+const MAX_TTS_CONCURRENCY = 10;
+
+/** Worker phụ idle 90s rồi scale xuống — sau burst dài không giữ 10 GPU. */
+const SESSION_IDLE_TIMEOUT_SEC = 90;
 const SESSION_WINDOW_MS = SESSION_IDLE_TIMEOUT_SEC * 1000;
 const JOB_POLICY = {
   executionTimeout: 300_000,
@@ -71,33 +82,9 @@ type RunPodJobResponse = {
   error?: string;
 };
 
-/** Chia text dài theo câu / khoảng trắng. */
+/** Chia text dài theo câu / scene (shared planner). */
 export function chunkTextForQwenTts(text: string, maxChars = MAX_CHARS_PER_REQUEST): string[] {
-  const cleaned = text.replace(/\s+/g, ' ').trim();
-  if (!cleaned) return [];
-  if (cleaned.length <= maxChars) return [cleaned];
-
-  const chunks: string[] = [];
-  let remaining = cleaned;
-  while (remaining.length > maxChars) {
-    const window = remaining.slice(0, maxChars);
-    const breakAt = Math.max(
-      window.lastIndexOf('. '),
-      window.lastIndexOf('! '),
-      window.lastIndexOf('? '),
-      window.lastIndexOf('。'),
-      window.lastIndexOf('！'),
-      window.lastIndexOf('？'),
-      window.lastIndexOf(', '),
-      window.lastIndexOf('、'),
-      window.lastIndexOf(' ')
-    );
-    const cut = breakAt > maxChars * 0.4 ? breakAt + 1 : maxChars;
-    chunks.push(remaining.slice(0, cut).trim());
-    remaining = remaining.slice(cut).trim();
-  }
-  if (remaining) chunks.push(remaining);
-  return chunks.filter(Boolean);
+  return chunkNarrationText(text, maxChars);
 }
 
 function sleep(ms: number): Promise<void> {
@@ -110,14 +97,18 @@ function runpodBaseUrl(endpointId: string): string {
 }
 
 /**
- * Hàng đợi session toàn cục: serialize mọi job Irodori.
- * Tránh 5 request song song → 5 cold start khi workersMin=0.
+ * Gate toàn cục: tối đa N job Irodori cùng lúc (chia sẻ giữa mọi lần TTS).
+ * N khớp workersMax — tránh queue dài / cold start thừa.
  */
 class IrodoriSessionQueue {
-  private chain: Promise<unknown> = Promise.resolve();
+  private active = 0;
+  private limit = 1;
+  private waiters: Array<() => void> = [];
   private lastActivityAt = 0;
   /** endpointId → thời điểm đã ensure idleTimeout (ms). */
   private idleEnsuredUntil = new Map<string, number>();
+  /** endpointId → workersMax đã cache. */
+  private workersMaxCache = new Map<string, { max: number; until: number }>();
 
   get isWarmSession(): boolean {
     return Date.now() - this.lastActivityAt < SESSION_WINDOW_MS;
@@ -127,19 +118,51 @@ class IrodoriSessionQueue {
     this.lastActivityAt = Date.now();
   }
 
-  /** Chạy tuần tự trong session — mọi TTS đi qua đây. */
-  enqueue<T>(fn: () => Promise<T>): Promise<T> {
-    const run = this.chain.then(() => fn());
-    this.chain = run.then(
-      () => undefined,
-      () => undefined
-    );
-    return run;
+  setConcurrency(n: number): void {
+    this.limit = Math.max(1, Math.min(MAX_TTS_CONCURRENCY, Math.floor(n) || 1));
+    this.drain();
   }
 
-  /**
-   * Bump idleTimeout best-effort — không chặn TTS (fire-and-forget).
-   */
+  get concurrency(): number {
+    return this.limit;
+  }
+
+  async run<T>(fn: () => Promise<T>): Promise<T> {
+    await this.acquire();
+    try {
+      return await fn();
+    } finally {
+      this.release();
+    }
+  }
+
+  private acquire(): Promise<void> {
+    if (this.active < this.limit) {
+      this.active += 1;
+      return Promise.resolve();
+    }
+    return new Promise((resolve) => {
+      this.waiters.push(() => {
+        this.active += 1;
+        resolve();
+      });
+    });
+  }
+
+  private release(): void {
+    this.active = Math.max(0, this.active - 1);
+    this.touch();
+    this.drain();
+  }
+
+  private drain(): void {
+    while (this.active < this.limit && this.waiters.length > 0) {
+      const next = this.waiters.shift();
+      next?.();
+    }
+  }
+
+  /** Bump idleTimeout best-effort — không chặn TTS. */
   prepareSession(options: {
     apiKey: string;
     endpointId: string;
@@ -155,13 +178,106 @@ class IrodoriSessionQueue {
     this.idleEnsuredUntil.set(endpointId, Date.now() + SESSION_WINDOW_MS);
     void ensureEndpointIdleTimeout(apiKey, endpointId, SESSION_IDLE_TIMEOUT_SEC);
   }
+
+  async resolveConcurrency(options: {
+    apiKey: string;
+    endpointId: string;
+    chunkCount: number;
+  }): Promise<number> {
+    const chunkCount = Math.max(1, options.chunkCount);
+    if (chunkCount <= 1) {
+      this.setConcurrency(1);
+      return 1;
+    }
+
+    let workersMax = DEFAULT_TTS_CONCURRENCY;
+    const cached = this.workersMaxCache.get(options.endpointId);
+    if (cached && Date.now() < cached.until) {
+      workersMax = cached.max;
+    } else {
+      const fetched = await fetchEndpointWorkersMax(options.apiKey, options.endpointId);
+      if (fetched != null && fetched > 0) {
+        workersMax = fetched;
+        this.workersMaxCache.set(options.endpointId, {
+          max: fetched,
+          until: Date.now() + 5 * 60_000,
+        });
+      }
+    }
+
+    // Không cap bởi DEFAULT — DEFAULT chỉ là fallback khi chưa đọc được workersMax.
+    const concurrency = Math.max(
+      1,
+      Math.min(MAX_TTS_CONCURRENCY, workersMax, chunkCount)
+    );
+    this.setConcurrency(concurrency);
+    return concurrency;
+  }
+
+  /** workersMax đã biết (hoặc DEFAULT) — dùng để lên kế hoạch số chunk. */
+  async peekWorkersMax(apiKey: string, endpointId: string): Promise<number> {
+    const cached = this.workersMaxCache.get(endpointId);
+    if (cached && Date.now() < cached.until) return cached.max;
+    const fetched = await fetchEndpointWorkersMax(apiKey, endpointId);
+    if (fetched != null && fetched > 0) {
+      this.workersMaxCache.set(endpointId, { max: fetched, until: Date.now() + 5 * 60_000 });
+      return fetched;
+    }
+    return DEFAULT_TTS_CONCURRENCY;
+  }
+}
+
+/** Chia theo script + tận dụng song song khi script đủ dài. */
+function planChunksForParallel(options: {
+  text: string;
+  scenes?: SceneNarrationInput[];
+  targetParallel: number;
+}): NarrationChunkPlan[] {
+  const { text, scenes } = options;
+  const parallel = Math.max(1, Math.min(MAX_TTS_CONCURRENCY, options.targetParallel));
+  let plans = planNarrationTtsChunks({
+    scenes,
+    text,
+    maxChars: MAX_CHARS_PER_REQUEST,
+  });
+  if (plans.length >= parallel || text.length < MIN_CHARS_PER_REQUEST * 2) {
+    return plans;
+  }
+  // Ít chunk hơn worker → giảm maxChars để lấp pipeline (mục tiêu ~1 wave).
+  const targetChars = Math.max(
+    MIN_CHARS_PER_REQUEST,
+    Math.min(MAX_CHARS_PER_REQUEST, Math.ceil(text.length / parallel))
+  );
+  return planNarrationTtsChunks({ scenes, text, maxChars: targetChars });
 }
 
 const irodoriSession = new IrodoriSessionQueue();
 
+/** Đọc workersMax từ REST (owner key). Fail → dùng DEFAULT. */
+async function fetchEndpointWorkersMax(
+  apiKey: string,
+  endpointId: string
+): Promise<number | null> {
+  const id = endpointId.trim() || DEFAULT_RUNPOD_ENDPOINT_ID;
+  try {
+    const res = await fetch(`https://rest.runpod.io/v1/endpoints/${id}`, {
+      headers: { Authorization: `Bearer ${apiKey}` },
+    });
+    if (!res.ok) return null;
+    const data = (await res.json()) as {
+      workers?: { max?: number };
+      workersMax?: number;
+    };
+    const max = Number(data.workers?.max ?? data.workersMax ?? 0);
+    return Number.isFinite(max) && max > 0 ? max : null;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * PATCH idleTimeout qua RunPod REST (cần key sở hữu endpoint).
- * Endpoint shared / không đủ quyền → bỏ qua, vẫn serialize client-side.
+ * Endpoint shared / không đủ quyền → bỏ qua; client vẫn tự giới hạn concurrency.
  */
 async function ensureEndpointIdleTimeout(
   apiKey: string,
@@ -325,38 +441,44 @@ async function submitAndWaitTts(options: {
   baseUrl: string;
   input: Record<string, unknown>;
   timeoutMs?: number;
+  /** Song song: bỏ /runsync (cần idle) — chỉ /run + poll để scale đủ worker. */
+  preferAsync?: boolean;
 }): Promise<RunPodJobResponse> {
   let lastError: Error | null = null;
   const payload = { input: options.input, policy: { ...JOB_POLICY } };
 
   for (let attempt = 1; attempt <= MAX_SUBMIT_ATTEMPTS; attempt++) {
     try {
-      const { warm } = await getWorkerWarmth(options.baseUrl, options.apiKey);
-
-      // Worker idle thật → /runsync nhanh. Không dùng khi chỉ có "running".
-      if (warm) {
-        try {
-          const syncRes = await runpodFetchJson(`${options.baseUrl}/runsync`, options.apiKey, {
-            method: 'POST',
-            body: JSON.stringify(payload),
-            signal: AbortSignal.timeout(RUNSYNC_WARM_TIMEOUT_MS),
-          });
-          if (syncRes.status === 'COMPLETED' && syncRes.output?.audio_base64) {
-            if (syncRes.output.error) throw new Error(`Irodori TTS: ${syncRes.output.error}`);
-            return syncRes;
-          }
-          if (syncRes.id && (syncRes.status === 'IN_QUEUE' || syncRes.status === 'IN_PROGRESS')) {
-            return await waitForRunPodJob({
-              apiKey: options.apiKey,
-              baseUrl: options.baseUrl,
-              jobId: syncRes.id,
-              timeoutMs: options.timeoutMs,
+      // 1 job đơn + worker idle → /runsync nhanh hơn. Parallel thì luôn /run.
+      if (!options.preferAsync) {
+        const { warm } = await getWorkerWarmth(options.baseUrl, options.apiKey);
+        if (warm) {
+          try {
+            const syncRes = await runpodFetchJson(`${options.baseUrl}/runsync`, options.apiKey, {
+              method: 'POST',
+              body: JSON.stringify(payload),
+              signal: AbortSignal.timeout(RUNSYNC_WARM_TIMEOUT_MS),
             });
-          }
-        } catch (syncErr) {
-          const msg = syncErr instanceof Error ? syncErr.message : String(syncErr);
-          if (!/abort|timeout|TimeoutError|treo IN_PROGRESS|kẹt IN_QUEUE/i.test(msg) && !/HTTP 5\d\d/.test(msg)) {
-            if (/401|403|invalid|required/i.test(msg)) throw syncErr;
+            if (syncRes.status === 'COMPLETED' && syncRes.output?.audio_base64) {
+              if (syncRes.output.error) throw new Error(`Irodori TTS: ${syncRes.output.error}`);
+              return syncRes;
+            }
+            if (syncRes.id && (syncRes.status === 'IN_QUEUE' || syncRes.status === 'IN_PROGRESS')) {
+              return await waitForRunPodJob({
+                apiKey: options.apiKey,
+                baseUrl: options.baseUrl,
+                jobId: syncRes.id,
+                timeoutMs: options.timeoutMs,
+              });
+            }
+          } catch (syncErr) {
+            const msg = syncErr instanceof Error ? syncErr.message : String(syncErr);
+            if (
+              !/abort|timeout|TimeoutError|treo IN_PROGRESS|kẹt IN_QUEUE/i.test(msg) &&
+              !/HTTP 5\d\d/.test(msg)
+            ) {
+              if (/401|403|invalid|required/i.test(msg)) throw syncErr;
+            }
           }
         }
       }
@@ -403,8 +525,9 @@ async function synthesizeOneChunk(options: {
   instruct?: string;
   outPath: string;
   timeoutMs?: number;
+  preferAsync?: boolean;
 }): Promise<void> {
-  await irodoriSession.enqueue(async () => {
+  await irodoriSession.run(async () => {
     const baseUrl = runpodBaseUrl(options.endpointId);
     const input: Record<string, unknown> = {
       mode: 'custom_voice',
@@ -421,6 +544,7 @@ async function synthesizeOneChunk(options: {
       baseUrl,
       input,
       timeoutMs: options.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+      preferAsync: options.preferAsync,
     });
 
     const audioB64 = completed.output?.audio_base64;
@@ -430,19 +554,79 @@ async function synthesizeOneChunk(options: {
 
     fs.mkdirSync(path.dirname(options.outPath), { recursive: true });
     fs.writeFileSync(options.outPath, Buffer.from(audioB64, 'base64'));
-    irodoriSession.touch();
   });
 }
+
+/** Synthesize 1 đoạn; treo/timeout + text dài → tách nhỏ rồi ghép path theo thứ tự. */
+async function synthesizeChunkResilient(options: {
+  apiKey: string;
+  endpointId: string;
+  text: string;
+  speaker: string;
+  language: string;
+  instruct?: string;
+  workDir: string;
+  filePrefix: string;
+  preferAsync?: boolean;
+  maxChars?: number;
+}): Promise<string[]> {
+  const wavPath = path.join(options.workDir, `${options.filePrefix}.wav`);
+  try {
+    await synthesizeOneChunk({
+      apiKey: options.apiKey,
+      endpointId: options.endpointId,
+      text: options.text,
+      speaker: options.speaker,
+      language: options.language,
+      instruct: options.instruct,
+      outPath: wavPath,
+      preferAsync: options.preferAsync,
+    });
+    return [wavPath];
+  } catch (chunkErr) {
+    const msg = chunkErr instanceof Error ? chunkErr.message : String(chunkErr);
+    const maxChars = options.maxChars ?? MAX_CHARS_PER_REQUEST;
+    if (/treo IN_PROGRESS|timeout/i.test(msg) && options.text.length > 500 && maxChars > 500) {
+      const smaller = chunkTextForQwenTts(options.text, Math.max(500, Math.floor(maxChars / 2)));
+      if (smaller.length > 1) {
+        const paths: string[] = [];
+        for (let s = 0; s < smaller.length; s++) {
+          const partPaths = await synthesizeChunkResilient({
+            ...options,
+            text: smaller[s],
+            filePrefix: `${options.filePrefix}-s${String(s).padStart(2, '0')}`,
+            maxChars: Math.max(500, Math.floor(maxChars / 2)),
+          });
+          paths.push(...partPaths);
+        }
+        return paths;
+      }
+    }
+    throw chunkErr;
+  }
+}
+
+export type QwenTtsProgress = {
+  phase: 'chunks' | 'concat';
+  chunksDone: number;
+  chunksTotal: number;
+  concurrency: number;
+};
 
 export async function synthesizeWithQwen(options: {
   apiKey: string;
   text: string;
+  /** Khi có scenes — cắt theo scene/câu rồi nối có pause ngắn. */
+  scenes?: SceneNarrationInput[];
   voice: string;
   model?: string;
   languageType?: string;
   endpointId?: string;
+  /** Instruct đã ghép (preset tốc độ + custom). Chỉ gửi khi có nội dung. */
+  instruct?: string;
   outDir: string;
   fileName?: string;
+  onProgress?: (info: QwenTtsProgress) => void;
 }): Promise<string> {
   const trimmed = options.text.replace(/\s+/g, ' ').trim();
   if (!trimmed) throw new Error('Irodori TTS: empty text');
@@ -450,14 +634,21 @@ export async function synthesizeWithQwen(options: {
 
   const languageType = options.languageType || 'Auto';
   const voice = resolveQwenTtsVoice(options.voice, languageType, options.model);
-  // Không gửi instruct mặc định — giảm tải / tránh hang trên worker yếu.
+  const instruct = options.instruct?.trim() || '';
   const endpointId = options.endpointId?.trim() || DEFAULT_RUNPOD_ENDPOINT_ID;
   const apiKey = options.apiKey.trim();
   const workDir = path.join(options.outDir, `.irodori-tts-${Date.now()}`);
   fs.mkdirSync(workDir, { recursive: true });
 
-  let chunks = chunkTextForQwenTts(trimmed);
-  const chunkPaths: string[] = [];
+  const workersMax = await irodoriSession.peekWorkersMax(apiKey, endpointId);
+  const targetParallel = Math.min(MAX_TTS_CONCURRENCY, workersMax);
+  const chunkPlans = planChunksForParallel({
+    text: trimmed,
+    scenes: options.scenes,
+    targetParallel,
+  });
+  const chunks = chunkPlans.map((c) => c.text);
+  if (!chunks.length) throw new Error('Irodori TTS: empty text');
 
   irodoriSession.prepareSession({
     apiKey,
@@ -465,43 +656,91 @@ export async function synthesizeWithQwen(options: {
     jobCount: Math.max(1, chunks.length),
   });
 
+  const concurrency = await irodoriSession.resolveConcurrency({
+    apiKey,
+    endpointId,
+    chunkCount: chunks.length,
+  });
+  const preferAsync = concurrency > 1;
+  const report = (info: QwenTtsProgress) => {
+    try {
+      options.onProgress?.(info);
+    } catch {
+      /* UI progress must not break TTS */
+    }
+  };
+
   try {
-    for (let i = 0; i < chunks.length; i++) {
-      const wavPath = path.join(workDir, `chunk-${String(i).padStart(3, '0')}.wav`);
-      try {
-        await synthesizeOneChunk({
+    report({
+      phase: 'chunks',
+      chunksDone: 0,
+      chunksTotal: chunks.length,
+      concurrency,
+    });
+
+    let chunksDone = 0;
+    const settled = await runPool(
+      chunks.map((text, i) => async () =>
+        synthesizeChunkResilient({
           apiKey,
           endpointId,
-          text: chunks[i],
+          text,
           speaker: voice,
           language: languageType,
-          outPath: wavPath,
-        });
-      } catch (chunkErr) {
-        const msg = chunkErr instanceof Error ? chunkErr.message : String(chunkErr);
-        // Chunk vẫn dài và treo → tách nhỏ hơn rồi chạy tiếp.
-        if (/treo IN_PROGRESS|timeout/i.test(msg) && chunks[i].length > 500) {
-          const smaller = chunkTextForQwenTts(chunks[i], 700);
-          if (smaller.length > 1) {
-            const rest = chunks.slice(i + 1);
-            chunks = [...chunks.slice(0, i), ...smaller, ...rest];
-            i -= 1;
-            continue;
-          }
-        }
-        throw chunkErr;
+          instruct: instruct || undefined,
+          workDir,
+          filePrefix: `chunk-${String(i).padStart(3, '0')}`,
+          preferAsync,
+        })
+      ),
+      {
+        concurrency,
+        onSettled: () => {
+          chunksDone += 1;
+          report({
+            phase: 'chunks',
+            chunksDone,
+            chunksTotal: chunks.length,
+            concurrency,
+          });
+        },
       }
-      chunkPaths.push(wavPath);
+    );
+
+    const chunkPaths: string[] = [];
+    // resilient có thể tách 1 chunk thành nhiều file — giãn pause theo số file con.
+    const pauseAfterMs: number[] = [];
+    for (let i = 0; i < settled.length; i++) {
+      const item = settled[i];
+      if (item.status === 'rejected') {
+        const reason = item.reason instanceof Error ? item.reason.message : String(item.reason);
+        throw new Error(`Irodori TTS: chunk ${i + 1}/${chunks.length} lỗi — ${reason}`);
+      }
+      const parts = item.value;
+      chunkPaths.push(...parts);
+      const plannedPause = chunkPlans[i]?.pauseAfterMs || 0;
+      for (let p = 0; p < parts.length; p++) {
+        pauseAfterMs.push(p === parts.length - 1 ? plannedPause : 60);
+      }
     }
+
+    report({
+      phase: 'concat',
+      chunksDone: chunks.length,
+      chunksTotal: chunks.length,
+      concurrency,
+    });
 
     const audioPath = path.join(options.outDir, options.fileName || 'narration.mp3');
     if (chunkPaths.length === 1) {
       await convertAudioToMp3(chunkPaths[0], audioPath);
     } else {
-      await concatAudioFiles(chunkPaths, audioPath, workDir);
+      await concatAudioFiles(chunkPaths, audioPath, workDir, { pauseAfterMs });
     }
     return audioPath;
   } finally {
+    // Sau batch dài: hạ gate về 1 để job lẻ (test / script ngắn) dùng runsync.
+    irodoriSession.setConcurrency(1);
     try {
       fs.rmSync(workDir, { recursive: true, force: true });
     } catch {
@@ -518,11 +757,13 @@ export async function synthesizeContinuousNarrationWithQwen(options: {
   model?: string;
   languageType?: string;
   endpointId?: string;
+  instruct?: string;
   language?: string;
   outDir: string;
   fileName?: string;
   /** Mặc định false — Whisper làm chậm nhiều; timing theo tỉ lệ ký tự đủ dùng. */
   useWhisper?: boolean;
+  onProgress?: (info: QwenTtsProgress) => void;
 }): Promise<{ audioPath: string; srtPath: string; words: TranscriptWord[] }> {
   const text = buildContinuousNarrationText(options.scenes);
   if (!text) throw new Error('Kịch bản chưa có lời thoại để tạo voiceover.');
@@ -531,12 +772,15 @@ export async function synthesizeContinuousNarrationWithQwen(options: {
   const audioPath = await synthesizeWithQwen({
     apiKey: options.runpodApiKey,
     text,
+    scenes: options.scenes,
     voice: options.voice,
     model: options.model || DEFAULT_QWEN_TTS_MODEL,
     languageType,
     endpointId: options.endpointId,
+    instruct: options.instruct,
     outDir: options.outDir,
     fileName: options.fileName,
+    onProgress: options.onProgress,
   });
 
   // Whisper sau TTS rất chậm — chỉ bật khi explicitly yêu cầu.

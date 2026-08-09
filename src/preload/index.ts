@@ -7,6 +7,8 @@ import type {
   CreateProjectInput,
   ElevenLabsSessionStatus,
   ElevenLabsVoice,
+  GenmaxBackend,
+  GenmaxVoice,
   ExportMediaRequest,
   ExportMediaResult,
   GenerateIdeaInput,
@@ -47,6 +49,25 @@ const api = {
   testOpenAI: (): Promise<ConnectionTestResult> => ipcRenderer.invoke(IPC.testOpenAI),
   testElevenLabs: (): Promise<ConnectionTestResult> => ipcRenderer.invoke(IPC.testElevenLabs),
   testQwen: (): Promise<ConnectionTestResult> => ipcRenderer.invoke(IPC.testQwen),
+  testGenmax: (): Promise<ConnectionTestResult> => ipcRenderer.invoke(IPC.testGenmax),
+  listGenmaxVoices: (input?: {
+    backend?: GenmaxBackend;
+    search?: string;
+    page?: number;
+    pageSize?: number;
+    language?: string;
+    gender?: string;
+  }): Promise<GenmaxVoice[]> => ipcRenderer.invoke(IPC.genmaxListVoices, input),
+  previewGenmaxVoice: (input: {
+    voiceId: string;
+    backend?: GenmaxBackend;
+    modelId?: string;
+    language?: string;
+  }): Promise<{ dataUrl: string }> => ipcRenderer.invoke(IPC.genmaxPreviewVoice, input),
+  listGenmaxModels: (input?: {
+    backend?: GenmaxBackend;
+  }): Promise<Array<{ modelId: string; name: string; description?: string; maxChars?: number }>> =>
+    ipcRenderer.invoke(IPC.genmaxListModels, input),
   getUsageQuotas: (): Promise<UsageSnapshot> => ipcRenderer.invoke(IPC.getUsageQuotas),
   getUsageHistory: (): Promise<UsageHistorySnapshot> => ipcRenderer.invoke(IPC.getUsageHistory),
   loadMoreUsageHistory: (
@@ -145,6 +166,10 @@ const api = {
     alignedWithWhisper: boolean;
     durationSec: number;
   } | null> => ipcRenderer.invoke(IPC.importNarrationAudio, projectId),
+  clearNarrationAudio: (
+    projectId: string
+  ): Promise<{ projectId: string; removed: string[] }> =>
+    ipcRenderer.invoke(IPC.clearNarrationAudio, projectId),
 
   listProjects: (): Promise<ProjectMeta[]> => ipcRenderer.invoke(IPC.listProjects),
   getProject: (id: string): Promise<ProjectDetail> => ipcRenderer.invoke(IPC.getProject, id),

@@ -16,15 +16,22 @@ import {
   QWEN_TTS_LANGUAGE_TYPES,
 } from '../../shared/types';
 import type { TtsProvider } from '../../shared/types';
-import { pickQwenVoiceForLanguage } from '../../shared/voice';
+import {
+  buildIrodoriInstruct,
+  IRODORI_SPEED_PRESETS,
+  pickQwenVoiceForLanguage,
+  resolveIrodoriSpeedPreset,
+  type IrodoriSpeedPreset,
+} from '../../shared/voice';
 import UsageQuotaPanel from '../components/UsageQuotaPanel';
 import UsageHistoryPanel from '../components/UsageHistoryPanel';
 import ElevenLabsApiKeysPanel from '../components/ElevenLabsApiKeysPanel';
+import GenmaxVoicePicker from '../components/GenmaxVoicePicker';
 import QwenVoicePicker from '../components/QwenVoicePicker';
 import SecretInput from '../components/SecretInput';
 
 function parseTtsProvider(value: string): TtsProvider {
-  if (value === 'elevenlabs' || value === 'qwen') return value;
+  if (value === 'elevenlabs' || value === 'qwen' || value === 'genmax') return value;
   return 'openai';
 }
 
@@ -33,6 +40,7 @@ export default function Settings() {
     snapgenApiKey: '',
     openaiApiKey: '',
     runpodApiKey: '',
+    genmaxApiKey: '',
   });
   const [settings, setSettings] = useState<AppSettings>({
     openaiModel: 'gpt-4o-mini',
@@ -45,7 +53,12 @@ export default function Settings() {
     qwenTtsVoice: 'Ryan',
     qwenLanguageType: 'English',
     qwenRegion: 'singapore',
+    qwenSpeedPreset: 'default',
+    qwenInstruct: '',
     runpodEndpointId: DEFAULT_RUNPOD_ENDPOINT_ID,
+    genmaxBackend: 'elevenlabs',
+    genmaxVoiceId: 'hpp4J3VqNfWAUOO0d1Us',
+    genmaxModelId: 'eleven_flash_v2_5',
     burnSubtitles: false,
     maxConcurrentScenes: 5,
   });
@@ -167,7 +180,7 @@ export default function Settings() {
     }
   };
 
-  const test = async (kind: 'snapgen' | 'openai' | 'elevenlabs' | 'qwen') => {
+  const test = async (kind: 'snapgen' | 'openai' | 'elevenlabs' | 'qwen' | 'genmax') => {
     setBusy(true);
     setMsg(
       kind === 'qwen'
@@ -175,7 +188,9 @@ export default function Settings() {
             type: 'ok',
             text: 'Đang kiểm tra Irodori… (health + TTS ngắn, cold start có thể 30–180s)',
           }
-        : null
+        : kind === 'genmax'
+          ? { type: 'ok', text: 'Đang kiểm tra GenMax…' }
+          : null
     );
     try {
       if (kind !== 'elevenlabs') {
@@ -185,8 +200,16 @@ export default function Settings() {
                 ...keys,
                 runpodApiKey: keys.runpodApiKey.replace(/^bearer\s+/i, '').trim(),
               }
-            : keys;
+            : kind === 'genmax'
+              ? {
+                  ...keys,
+                  genmaxApiKey: keys.genmaxApiKey.replace(/^bearer\s+/i, '').trim(),
+                }
+              : keys;
         if (kind === 'qwen' && keysToSave.runpodApiKey !== keys.runpodApiKey) {
+          setKeys(keysToSave);
+        }
+        if (kind === 'genmax' && keysToSave.genmaxApiKey !== keys.genmaxApiKey) {
           setKeys(keysToSave);
         }
         await window.studio.saveKeys(keysToSave);
@@ -205,7 +228,9 @@ export default function Settings() {
             ? await window.studio.testOpenAI()
             : kind === 'qwen'
               ? await window.studio.testQwen()
-              : await window.studio.testElevenLabs();
+              : kind === 'genmax'
+                ? await window.studio.testGenmax()
+                : await window.studio.testElevenLabs();
       if (kind === 'elevenlabs') {
         setElevenLabs(await window.studio.getElevenLabsSession());
         if (res.ok) await loadVoices(true);
@@ -357,6 +382,27 @@ export default function Settings() {
           <p className="hint" style={{ marginTop: 8 }}>
             Cần key RunPod dạng <code>rp_…</code>. Key <code>IRODORI_API_KEYS</code> không dùng được ở đây.
           </p>
+        </div>
+        <div className="field">
+          <label htmlFor="genmax">GenMax API Key</label>
+          <SecretInput
+            id="genmax"
+            value={keys.genmaxApiKey}
+            onChange={(v) => setKeys({ ...keys, genmaxApiKey: v })}
+            placeholder="sk_..."
+          />
+          <p className="hint">
+            Key GenMax (<code>xi-api-key</code>) — TTS ElevenLabs / MiniMax / CapCut qua{' '}
+            <a href="https://api.genmax.io" target="_blank" rel="noreferrer">
+              api.genmax.io
+            </a>
+            .
+          </p>
+          <div className="session-card-actions" style={{ marginTop: 8 }}>
+            <button type="button" className="btn" disabled={busy} onClick={() => void test('genmax')}>
+              {busy ? 'Đang kiểm tra…' : 'Kiểm tra GenMax'}
+            </button>
+          </div>
         </div>
       </section>
 
@@ -547,6 +593,9 @@ export default function Settings() {
             <option value="qwen" disabled={!keys.runpodApiKey?.trim()}>
               Irodori TTS (Qwen3) {!keys.runpodApiKey?.trim() ? '(cần RunPod key)' : ''}
             </option>
+            <option value="genmax" disabled={!keys.genmaxApiKey?.trim()}>
+              GenMax TTS {!keys.genmaxApiKey?.trim() ? '(cần GenMax key)' : ''}
+            </option>
           </select>
         </div>
         {settings.ttsProvider === 'elevenlabs' ? (
@@ -599,6 +648,74 @@ export default function Settings() {
               label="Voice mặc định"
               onChange={(qwenTtsVoice) => setSettings({ ...settings, qwenTtsVoice })}
             />
+            <div className="field">
+              <label>Tốc độ nói mặc định</label>
+              <div className="irodori-speed-presets" role="group" aria-label="Preset tốc độ mặc định">
+                {IRODORI_SPEED_PRESETS.map((preset) => {
+                  const active =
+                    resolveIrodoriSpeedPreset(settings.qwenSpeedPreset) === preset.id;
+                  return (
+                    <button
+                      key={preset.id}
+                      type="button"
+                      className={`irodori-speed-btn ${active ? 'active' : ''}`}
+                      onClick={() =>
+                        setSettings({
+                          ...settings,
+                          qwenSpeedPreset: preset.id as IrodoriSpeedPreset,
+                        })
+                      }
+                    >
+                      {preset.label}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+            <div className="field">
+              <label htmlFor="qwen-instruct-default">Instruct mặc định</label>
+              <textarea
+                id="qwen-instruct-default"
+                className="irodori-instruct-input"
+                rows={2}
+                value={settings.qwenInstruct || ''}
+                placeholder='VD: Speak cheerfully. / 用温柔的语气说'
+                onChange={(e) => setSettings({ ...settings, qwenInstruct: e.target.value })}
+              />
+              {buildIrodoriInstruct(settings.qwenSpeedPreset, settings.qwenInstruct) ? (
+                <p className="hint irodori-instruct-preview">
+                  Sẽ gửi: {buildIrodoriInstruct(settings.qwenSpeedPreset, settings.qwenInstruct)}
+                </p>
+              ) : null}
+            </div>
+          </>
+        ) : settings.ttsProvider === 'genmax' ? (
+          <>
+            <GenmaxVoicePicker
+              backend={settings.genmaxBackend || 'elevenlabs'}
+              value={settings.genmaxVoiceId}
+              disabled={!keys.genmaxApiKey?.trim()}
+              onBackendChange={(genmaxBackend) => setSettings({ ...settings, genmaxBackend })}
+              onChange={(voice) =>
+                setSettings({
+                  ...settings,
+                  genmaxVoiceId: voice.voiceId,
+                  genmaxBackend: voice.backend,
+                })
+              }
+            />
+            <div className="field">
+              <label htmlFor="genmax-model-default">Model mặc định</label>
+              <input
+                id="genmax-model-default"
+                type="text"
+                value={settings.genmaxModelId || ''}
+                onChange={(e) =>
+                  setSettings({ ...settings, genmaxModelId: e.target.value.trim() })
+                }
+                placeholder="eleven_flash_v2_5"
+              />
+            </div>
           </>
         ) : (
           <div className="grid-2">

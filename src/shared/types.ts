@@ -16,8 +16,10 @@ export interface ModelOption {
   extraFields?: Record<string, string[]>;
 }
 
-export type TtsProvider = 'openai' | 'elevenlabs' | 'qwen';
+export type TtsProvider = 'openai' | 'elevenlabs' | 'qwen' | 'genmax';
 export type QwenDashScopeRegion = 'singapore' | 'beijing';
+/** Backend TTS bên trong GenMax gateway. */
+export type GenmaxBackend = 'elevenlabs' | 'minimax' | 'capcut';
 
 export interface ApiKeys {
   snapgenApiKey: string;
@@ -27,6 +29,11 @@ export interface ApiKeys {
    * Tạo tại https://console.runpod.io/user/settings?tab=api-keys
    */
   runpodApiKey: string;
+  /**
+   * GenMax API key (xi-api-key) — https://api.genmax.io
+   * Header: xi-api-key: sk_…
+   */
+  genmaxApiKey: string;
   /**
    * @deprecated Đổi sang runpodApiKey. Giữ để migrate store cũ.
    */
@@ -47,8 +54,16 @@ export interface AppSettings {
   qwenLanguageType: string;
   /** @deprecated Irodori không dùng region DashScope. */
   qwenRegion: QwenDashScopeRegion;
+  /** Preset tốc độ CustomVoice: default | slow | normal | fast. */
+  qwenSpeedPreset: string;
+  /** Instruct tùy chỉnh (cảm xúc / phong cách) — ghép với preset tốc độ. */
+  qwenInstruct: string;
   /** RunPod endpoint ID cho Irodori TTS. */
   runpodEndpointId: string;
+  /** GenMax: elevenlabs | minimax | capcut */
+  genmaxBackend: GenmaxBackend;
+  genmaxVoiceId: string;
+  genmaxModelId: string;
   burnSubtitles: boolean;
   lastExportDir?: string;
   /** Số scene Snapgen generate song song (worker pool). Mặc định 5. */
@@ -70,6 +85,26 @@ export interface ProjectVoiceSettings {
   qwenTtsVoice: string;
   qwenLanguageType: string;
   qwenRegion: QwenDashScopeRegion;
+  qwenSpeedPreset: string;
+  qwenInstruct: string;
+  genmaxBackend: GenmaxBackend;
+  genmaxVoiceId: string;
+  genmaxModelId: string;
+  genmaxVoiceName?: string;
+}
+
+export interface GenmaxVoice {
+  voiceId: string;
+  name: string;
+  previewUrl?: string;
+  category?: string;
+  gender?: string;
+  age?: string;
+  accent?: string;
+  language?: string;
+  description?: string;
+  backend: GenmaxBackend;
+  uniqId?: string;
 }
 
 export interface ElevenLabsVoice {
@@ -211,6 +246,12 @@ export interface ProjectDraft {
   qwenTtsVoice: string;
   qwenLanguageType: string;
   qwenRegion: QwenDashScopeRegion;
+  qwenSpeedPreset: string;
+  qwenInstruct: string;
+  genmaxBackend: GenmaxBackend;
+  genmaxVoiceId: string;
+  genmaxModelId: string;
+  genmaxVoiceName?: string;
 }
 
 export interface SceneMediaAsset {
@@ -254,6 +295,12 @@ export interface CreateProjectInput {
   qwenTtsVoice?: string;
   qwenLanguageType?: string;
   qwenRegion?: QwenDashScopeRegion;
+  qwenSpeedPreset?: string;
+  qwenInstruct?: string;
+  genmaxBackend?: GenmaxBackend;
+  genmaxVoiceId?: string;
+  genmaxModelId?: string;
+  genmaxVoiceName?: string;
 }
 
 export interface GenerateJobInput {
@@ -299,6 +346,12 @@ export interface GenerateJobInput {
   qwenTtsVoice?: string;
   qwenLanguageType?: string;
   qwenRegion?: QwenDashScopeRegion;
+  qwenSpeedPreset?: string;
+  qwenInstruct?: string;
+  genmaxBackend?: GenmaxBackend;
+  genmaxVoiceId?: string;
+  genmaxModelId?: string;
+  genmaxVoiceName?: string;
 }
 
 export type JobPhase =

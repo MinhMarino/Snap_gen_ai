@@ -1,4 +1,5 @@
 import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron';
+import fs from 'node:fs';
 import path from 'node:path';
 import { IPC } from '../shared/ipc';
 import { IMAGE_FAMILIES, IMAGE_MODELS, VIDEO_FAMILIES, VIDEO_MODELS } from '../shared/models';
@@ -13,10 +14,15 @@ import type {
   LoadMoreUsageHistoryRequest,
   ProjectDraft,
 } from '../shared/types';
-import { getKeys, getSettings, saveKeys, saveSettings } from './store';
+import { ensureGenmaxApiKey, getKeys, getSettings, saveKeys, saveSettings } from './store';
 import { testAccount } from './services/snapgen';
 import { generateScript, testOpenAI } from './services/openai';
-import { importExternalNarration, remuxProject, runGenerateJob } from './services/pipeline';
+import {
+  clearProjectNarration,
+  importExternalNarration,
+  remuxProject,
+  runGenerateJob,
+} from './services/pipeline';
 import {
   clearElevenLabsSession,
   getElevenLabsSessionStatus,
@@ -29,6 +35,14 @@ import {
 } from './services/elevenlabs-auth';
 import { listElevenLabsVoices, previewElevenLabsVoice, addElevenLabsLibraryVoice } from './services/elevenlabs-tts';
 import { testQwenTts } from './services/qwen-tts';
+import {
+  listGenmaxModels,
+  listGenmaxVoices,
+  previewGenmaxVoice,
+  resolveGenmaxBackend,
+  testGenmaxApiKey,
+} from './services/genmax-tts';
+import type { GenmaxBackend } from '../shared/types';
 import { ElevenLabsKeyManager } from './services/api-keys/elevenlabs-key-manager';
 import { listElevenLabsKeysPublic, getElevenLabsApiKeyPlain } from './services/api-keys/elevenlabs-keys-store';
 import { getUsageSnapshot, getUsageHistory, loadMoreUsageHistory } from './services/usage';
@@ -117,6 +131,59 @@ function registerIpc(): void {
       voice: settings.qwenTtsVoice,
       languageType: settings.qwenLanguageType,
     });
+  });
+  ipcMain.handle(IPC.testGenmax, async () => testGenmaxApiKey(getKeys().genmaxApiKey));
+  ipcMain.handle(
+    IPC.genmaxListVoices,
+    async (
+      _e,
+      input?: {
+        backend?: GenmaxBackend;
+        search?: string;
+        page?: number;
+        pageSize?: number;
+        language?: string;
+        gender?: string;
+      }
+    ) => {
+      const key = getKeys().genmaxApiKey;
+      if (!key?.trim()) throw new Error('Chưa có GenMax API key.');
+      return listGenmaxVoices({
+        apiKey: key,
+        backend: resolveGenmaxBackend(input?.backend || getSettings().genmaxBackend),
+        search: input?.search,
+        page: input?.page,
+        pageSize: input?.pageSize,
+        language: input?.language,
+        gender: input?.gender,
+      });
+    }
+  );
+  ipcMain.handle(
+    IPC.genmaxPreviewVoice,
+    async (
+      _e,
+      input: { voiceId: string; backend?: GenmaxBackend; modelId?: string; language?: string }
+    ) => {
+      const key = getKeys().genmaxApiKey;
+      if (!key?.trim()) throw new Error('Chưa có GenMax API key.');
+      const settings = getSettings();
+      return previewGenmaxVoice({
+        apiKey: key,
+        voiceId: input.voiceId,
+        backend: resolveGenmaxBackend(input.backend || settings.genmaxBackend),
+        modelId: input.modelId || settings.genmaxModelId,
+        language: input.language,
+      });
+    }
+  );
+  ipcMain.handle(IPC.genmaxListModels, async (_e, input?: { backend?: GenmaxBackend }) => {
+    const key = getKeys().genmaxApiKey;
+    if (!key?.trim()) throw new Error('Chưa có GenMax API key.');
+    return listGenmaxModels(
+      key,
+      resolveGenmaxBackend(input?.backend || getSettings().genmaxBackend)
+    );
   });
   ipcMain.handle(IPC.getUsageQuotas, async () => getUsageSnapshot());
   ipcMain.handle(IPC.getUsageHistory, async () => getUsageHistory());
@@ -246,6 +313,11 @@ function registerIpc(): void {
     });
     if (pick.canceled || !pick.filePaths[0]) return null;
     return importExternalNarration({ projectId, sourcePath: pick.filePaths[0] });
+  });
+
+  ipcMain.removeHandler(IPC.clearNarrationAudio);
+  ipcMain.handle(IPC.clearNarrationAudio, (_e, projectId: string) => {
+    return clearProjectNarration(String(projectId || ''));
   });
 
   ipcMain.handle(IPC.remuxProject, async (_e, projectId: string) => {
@@ -409,6 +481,20 @@ async function exportFinalFile(
 app.whenReady().then(() => {
   installLocalMediaProtocol();
   installElevenLabsApiKeyCapture();
+  // Bootstrap GenMax key: GENMAX_API_KEY env, hoặc file userData/.genmax-key (một lần).
+  {
+    const bootstrapFile = path.join(app.getPath('userData'), '.genmax-key');
+    let bootKey = (process.env.GENMAX_API_KEY || '').trim();
+    if (!bootKey && fs.existsSync(bootstrapFile)) {
+      try {
+        bootKey = fs.readFileSync(bootstrapFile, 'utf8').trim();
+        fs.rmSync(bootstrapFile, { force: true });
+      } catch {
+        bootKey = '';
+      }
+    }
+    if (bootKey) ensureGenmaxApiKey(bootKey);
+  }
   registerIpc();
   createWindow();
 

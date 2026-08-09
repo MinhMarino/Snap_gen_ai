@@ -3,11 +3,13 @@ import fs from 'node:fs';
 import path from 'node:path';
 import type { ApiKeys, AppSettings } from '../shared/types';
 import { DEFAULT_QWEN_TTS_MODEL, DEFAULT_RUNPOD_ENDPOINT_ID } from '../shared/types';
+import { resolveIrodoriSpeedPreset } from '../shared/voice';
 
 const DEFAULT_KEYS: ApiKeys = {
   snapgenApiKey: '',
   openaiApiKey: '',
   runpodApiKey: '',
+  genmaxApiKey: '',
 };
 
 const DEFAULT_SETTINGS: AppSettings = {
@@ -21,7 +23,12 @@ const DEFAULT_SETTINGS: AppSettings = {
   qwenTtsVoice: 'Ryan',
   qwenLanguageType: 'English',
   qwenRegion: 'singapore',
+  qwenSpeedPreset: 'default',
+  qwenInstruct: '',
   runpodEndpointId: DEFAULT_RUNPOD_ENDPOINT_ID,
+  genmaxBackend: 'elevenlabs',
+  genmaxVoiceId: 'hpp4J3VqNfWAUOO0d1Us',
+  genmaxModelId: 'eleven_flash_v2_5',
   burnSubtitles: false,
   maxConcurrentScenes: 5,
 };
@@ -95,6 +102,7 @@ function normalizeApiKeys(parsed: Partial<ApiKeys> & { dashscopeApiKey?: string 
     snapgenApiKey: parsed.snapgenApiKey ?? '',
     openaiApiKey: parsed.openaiApiKey ?? '',
     runpodApiKey: parsed.runpodApiKey || parsed.dashscopeApiKey || '',
+    genmaxApiKey: parsed.genmaxApiKey ?? '',
   };
 }
 
@@ -112,12 +120,23 @@ export function getKeys(): ApiKeys {
   return normalizeApiKeys((data.keysPlain ?? {}) as Partial<ApiKeys> & { dashscopeApiKey?: string });
 }
 
+/** Ghi GenMax key nếu chưa có (bootstrap từ user / env — không ghi đè key đã lưu). */
+export function ensureGenmaxApiKey(apiKey: string): boolean {
+  const key = apiKey.trim();
+  if (!key) return false;
+  const current = getKeys();
+  if (current.genmaxApiKey?.trim()) return false;
+  saveKeys({ ...current, genmaxApiKey: key });
+  return true;
+}
+
 export function saveKeys(keys: ApiKeys): void {
   const data = readFile();
   const clean: ApiKeys = {
     snapgenApiKey: keys.snapgenApiKey,
     openaiApiKey: keys.openaiApiKey,
     runpodApiKey: keys.runpodApiKey ?? '',
+    genmaxApiKey: keys.genmaxApiKey ?? '',
   };
   if (safeStorage.isEncryptionAvailable()) {
     const enc = safeStorage.encryptString(JSON.stringify(clean)).toString('base64');
@@ -136,10 +155,15 @@ export function getSettings(): AppSettings {
   const provider =
     merged.ttsProvider === 'elevenlabs' ||
     merged.ttsProvider === 'openai' ||
-    merged.ttsProvider === 'qwen'
+    merged.ttsProvider === 'qwen' ||
+    merged.ttsProvider === 'genmax'
       ? merged.ttsProvider
       : DEFAULT_SETTINGS.ttsProvider;
   const qwenRegion = 'singapore' as const;
+  const genmaxBackend =
+    merged.genmaxBackend === 'minimax' || merged.genmaxBackend === 'capcut'
+      ? merged.genmaxBackend
+      : 'elevenlabs';
   return {
     openaiModel: merged.openaiModel || DEFAULT_SETTINGS.openaiModel,
     openaiTtsModel: merged.openaiTtsModel || DEFAULT_SETTINGS.openaiTtsModel,
@@ -151,8 +175,15 @@ export function getSettings(): AppSettings {
     qwenTtsVoice: merged.qwenTtsVoice || DEFAULT_SETTINGS.qwenTtsVoice,
     qwenLanguageType: merged.qwenLanguageType || DEFAULT_SETTINGS.qwenLanguageType,
     qwenRegion,
+    qwenSpeedPreset: resolveIrodoriSpeedPreset(
+      merged.qwenSpeedPreset || DEFAULT_SETTINGS.qwenSpeedPreset
+    ),
+    qwenInstruct: String(merged.qwenInstruct || '').trim(),
     runpodEndpointId:
       String(merged.runpodEndpointId || '').trim() || DEFAULT_RUNPOD_ENDPOINT_ID,
+    genmaxBackend,
+    genmaxVoiceId: merged.genmaxVoiceId || DEFAULT_SETTINGS.genmaxVoiceId,
+    genmaxModelId: merged.genmaxModelId || DEFAULT_SETTINGS.genmaxModelId,
     burnSubtitles: Boolean(merged.burnSubtitles),
     lastExportDir: merged.lastExportDir || '',
     maxConcurrentScenes: Math.max(

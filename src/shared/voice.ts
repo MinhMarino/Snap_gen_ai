@@ -1,27 +1,31 @@
 import type { AppSettings, ProjectVoiceSettings, TtsProvider } from './types';
 import { DEFAULT_QWEN_TTS_MODEL } from './types';
-import { resolveQwenTtsVoice } from './qwen-voices';
+import { resolveIrodoriSpeedPreset, resolveQwenTtsVoice } from './qwen-voices';
 
 export {
+  buildIrodoriInstruct,
   buildQwenTtsInstructions,
   filterQwenVoices,
   getQwenVoiceOption,
+  isIrodoriSpeedPreset,
   isQwenInstructFlashModel,
   isQwenVoiceSupportedByModel,
   listQwenVoicesForLanguage,
   pickQwenVoiceForLanguage,
   qwenAgeLabel,
   qwenPurposeLabels,
+  resolveIrodoriSpeedPreset,
   resolveQwenTtsVoice,
   toIrodoriSpeakerId,
   DEFAULT_RUNPOD_ENDPOINT_ID,
+  IRODORI_SPEED_PRESETS,
   QWEN_ENGLISH_DEEP_VOICE_IDS,
   QWEN_TTS_MODEL,
   QWEN_TTS_VOICE_CATALOG,
   QWEN_VOICE_AGES,
   QWEN_VOICE_PURPOSES,
 } from './qwen-voices';
-export type { QwenVoiceFilter } from './qwen-voices';
+export type { IrodoriSpeedPreset, QwenVoiceFilter } from './qwen-voices';
 
 export const DEFAULT_OPENAI_CHAT_MODEL = 'gpt-4o-mini';
 
@@ -35,7 +39,16 @@ export function resolveProjectChatModel(
 }
 
 function isTtsProvider(value: unknown): value is TtsProvider {
-  return value === 'openai' || value === 'elevenlabs' || value === 'qwen';
+  return (
+    value === 'openai' || value === 'elevenlabs' || value === 'qwen' || value === 'genmax'
+  );
+}
+
+function resolveGenmaxBackendField(
+  value?: string | null
+): ProjectVoiceSettings['genmaxBackend'] {
+  if (value === 'minimax' || value === 'capcut' || value === 'elevenlabs') return value;
+  return 'elevenlabs';
 }
 
 export const DEFAULT_PROJECT_VOICE: ProjectVoiceSettings = {
@@ -48,6 +61,11 @@ export const DEFAULT_PROJECT_VOICE: ProjectVoiceSettings = {
   qwenTtsVoice: 'Ryan',
   qwenLanguageType: 'English',
   qwenRegion: 'singapore',
+  qwenSpeedPreset: 'default',
+  qwenInstruct: '',
+  genmaxBackend: 'elevenlabs',
+  genmaxVoiceId: 'hpp4J3VqNfWAUOO0d1Us',
+  genmaxModelId: 'eleven_flash_v2_5',
 };
 
 export function projectDraftHasVoice(
@@ -58,7 +76,8 @@ export function projectDraftHasVoice(
     isTtsProvider(partial.ttsProvider) ||
     Boolean(partial.openaiTtsVoice) ||
     Boolean(partial.elevenLabsVoiceId) ||
-    Boolean(partial.qwenTtsVoice)
+    Boolean(partial.qwenTtsVoice) ||
+    Boolean(partial.genmaxVoiceId)
   );
 }
 
@@ -85,6 +104,15 @@ export function resolveProjectVoice(
     ),
     qwenLanguageType: defaults?.qwenLanguageType || DEFAULT_PROJECT_VOICE.qwenLanguageType,
     qwenRegion: 'singapore',
+    qwenSpeedPreset: resolveIrodoriSpeedPreset(
+      defaults?.qwenSpeedPreset || DEFAULT_PROJECT_VOICE.qwenSpeedPreset
+    ),
+    qwenInstruct: defaults?.qwenInstruct?.trim() || DEFAULT_PROJECT_VOICE.qwenInstruct,
+    genmaxBackend: resolveGenmaxBackendField(
+      defaults?.genmaxBackend || DEFAULT_PROJECT_VOICE.genmaxBackend
+    ),
+    genmaxVoiceId: defaults?.genmaxVoiceId || DEFAULT_PROJECT_VOICE.genmaxVoiceId,
+    genmaxModelId: defaults?.genmaxModelId || DEFAULT_PROJECT_VOICE.genmaxModelId,
   };
   if (!projectDraftHasVoice(partial)) return base;
   const qwenLanguageType = partial!.qwenLanguageType || base.qwenLanguageType;
@@ -104,6 +132,17 @@ export function resolveProjectVoice(
     ),
     qwenLanguageType,
     qwenRegion: 'singapore',
+    qwenSpeedPreset: resolveIrodoriSpeedPreset(
+      partial!.qwenSpeedPreset ?? base.qwenSpeedPreset
+    ),
+    qwenInstruct:
+      partial!.qwenInstruct !== undefined
+        ? String(partial!.qwenInstruct || '').trim()
+        : base.qwenInstruct,
+    genmaxBackend: resolveGenmaxBackendField(partial!.genmaxBackend ?? base.genmaxBackend),
+    genmaxVoiceId: partial!.genmaxVoiceId || base.genmaxVoiceId,
+    genmaxModelId: partial!.genmaxModelId || base.genmaxModelId,
+    genmaxVoiceName: partial!.genmaxVoiceName?.trim() || undefined,
   };
 }
 

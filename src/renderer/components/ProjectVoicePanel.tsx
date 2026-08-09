@@ -11,12 +11,19 @@ import {
   OPENAI_TTS_VOICES,
   QWEN_TTS_LANGUAGE_TYPES,
 } from '../../shared/types';
-import { pickQwenVoiceForLanguage } from '../../shared/voice';
+import {
+  buildIrodoriInstruct,
+  IRODORI_SPEED_PRESETS,
+  pickQwenVoiceForLanguage,
+  resolveIrodoriSpeedPreset,
+  type IrodoriSpeedPreset,
+} from '../../shared/voice';
 import ElevenLabsVoicePicker from './ElevenLabsVoicePicker';
+import GenmaxVoicePicker from './GenmaxVoicePicker';
 import QwenVoicePicker from './QwenVoicePicker';
 
 function parseTtsProvider(value: string): TtsProvider {
-  if (value === 'elevenlabs' || value === 'qwen') return value;
+  if (value === 'elevenlabs' || value === 'qwen' || value === 'genmax') return value;
   return 'openai';
 }
 
@@ -42,6 +49,7 @@ export default function ProjectVoicePanel({
     hasApiCredential: false,
   });
   const [qwenReady, setQwenReady] = useState(false);
+  const [genmaxReady, setGenmaxReady] = useState(false);
 
   const elevenLabsReady = elevenLabs.loggedIn || elevenLabs.hasApiCredential;
 
@@ -73,7 +81,10 @@ export default function ProjectVoicePanel({
 
   useEffect(() => {
     void window.studio.getElevenLabsSession().then(setElevenLabs);
-    void window.studio.getKeys().then((keys) => setQwenReady(Boolean(keys.runpodApiKey?.trim())));
+    void window.studio.getKeys().then((k) => {
+      setQwenReady(Boolean(k.runpodApiKey?.trim()));
+      setGenmaxReady(Boolean(k.genmaxApiKey?.trim()));
+    });
     return window.studio.onElevenLabsSessionChange(setElevenLabs);
   }, []);
 
@@ -125,6 +136,9 @@ export default function ProjectVoicePanel({
           </option>
           <option value="qwen" disabled={!qwenReady}>
             Irodori TTS {!qwenReady ? '(cần RunPod key ở Settings)' : ''}
+          </option>
+          <option value="genmax" disabled={!genmaxReady}>
+            GenMax TTS {!genmaxReady ? '(cần GenMax key ở Settings)' : ''}
           </option>
         </select>
       </div>
@@ -249,6 +263,84 @@ export default function ProjectVoicePanel({
             selectId="project-qwen-voice"
             onChange={(qwenTtsVoice) => patch({ qwenTtsVoice })}
           />
+          <div className="field">
+            <label>Tốc độ nói</label>
+            <div className="irodori-speed-presets" role="group" aria-label="Preset tốc độ">
+              {IRODORI_SPEED_PRESETS.map((preset) => {
+                const active =
+                  resolveIrodoriSpeedPreset(value.qwenSpeedPreset) === preset.id;
+                return (
+                  <button
+                    key={preset.id}
+                    type="button"
+                    className={`irodori-speed-btn ${active ? 'active' : ''}`}
+                    disabled={disabled}
+                    onClick={() =>
+                      patch({ qwenSpeedPreset: preset.id as IrodoriSpeedPreset })
+                    }
+                  >
+                    {preset.label}
+                  </button>
+                );
+              })}
+            </div>
+            <p className="hint" style={{ marginTop: 6 }}>
+              CustomVoice không có speed số — app gửi qua <code>instruct</code>.
+            </p>
+          </div>
+          <div className="field">
+            <label htmlFor="project-qwen-instruct">Instruct (phong cách / cảm xúc)</label>
+            <textarea
+              id="project-qwen-instruct"
+              className="irodori-instruct-input"
+              rows={2}
+              disabled={disabled}
+              value={value.qwenInstruct || ''}
+              placeholder='VD: Speak cheerfully. / 用温柔的语气说'
+              onChange={(e) => patch({ qwenInstruct: e.target.value })}
+            />
+            {buildIrodoriInstruct(value.qwenSpeedPreset, value.qwenInstruct) ? (
+              <p className="hint irodori-instruct-preview">
+                Sẽ gửi: {buildIrodoriInstruct(value.qwenSpeedPreset, value.qwenInstruct)}
+              </p>
+            ) : (
+              <p className="hint">Để trống = không gửi instruct (giọng speaker mặc định).</p>
+            )}
+          </div>
+        </>
+      ) : value.ttsProvider === 'genmax' ? (
+        <>
+          <GenmaxVoicePicker
+            backend={value.genmaxBackend || 'elevenlabs'}
+            value={value.genmaxVoiceId}
+            disabled={disabled || !genmaxReady}
+            onBackendChange={(genmaxBackend) => patch({ genmaxBackend })}
+            onChange={(voice) =>
+              patch({
+                genmaxVoiceId: voice.voiceId,
+                genmaxVoiceName: voice.name,
+                genmaxBackend: voice.backend,
+              })
+            }
+          />
+          <div className="field">
+            <label htmlFor="project-genmax-model">Model ID</label>
+            <input
+              id="project-genmax-model"
+              type="text"
+              disabled={disabled}
+              value={value.genmaxModelId || ''}
+              placeholder={
+                value.genmaxBackend === 'minimax'
+                  ? 'speech-2.8-turbo'
+                  : value.genmaxBackend === 'capcut'
+                    ? 'capcut'
+                    : 'eleven_flash_v2_5'
+              }
+              onChange={(e) => patch({ genmaxModelId: e.target.value.trim() })}
+            />
+            <p className="hint">ElevenLabs: eleven_flash_v2_5 · MiniMax: speech-2.8-turbo · CapCut: capcut</p>
+          </div>
         </>
       ) : (
         <div className="grid-2">

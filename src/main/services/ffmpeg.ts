@@ -205,11 +205,28 @@ export async function convertAudioToMp3(inputPath: string, outputPath: string): 
   return outputPath;
 }
 
-/** Nối nhiều file audio thành 1 mp3 (re-encode để tránh lệch codec). */
+async function makeSilenceMp3(outPath: string, durationSec: number): Promise<string> {
+  const t = Math.max(0.04, durationSec);
+  await run(
+    ffmpeg()
+      .input('anullsrc=r=44100:cl=mono')
+      .inputOptions(['-f', 'lavfi'])
+      .outputOptions(['-t', t.toFixed(3), '-c:a', 'libmp3lame', '-q:a', '4'])
+      .output(outPath),
+    { timeoutMs: 60_000, label: 'silence-mp3' }
+  );
+  return outPath;
+}
+
+/**
+ * Nối nhiều file audio thành 1 mp3 (re-encode để tránh lệch codec).
+ * `pauseAfterMs[i]` = im lặng chèn sau inputPaths[i] (bỏ qua phần tử cuối).
+ */
 export async function concatAudioFiles(
   inputPaths: string[],
   outputPath: string,
-  workDir: string
+  workDir: string,
+  options?: { pauseAfterMs?: number[] }
 ): Promise<string> {
   if (!inputPaths.length) throw new Error('No audio files to concat.');
   fs.mkdirSync(path.dirname(outputPath), { recursive: true });
@@ -222,10 +239,22 @@ export async function concatAudioFiles(
     return convertAudioToMp3(inputPaths[0], outputPath);
   }
 
+  const pauseAfterMs = options?.pauseAfterMs || [];
+  const sequence: string[] = [];
+  for (let i = 0; i < inputPaths.length; i++) {
+    sequence.push(inputPaths[i]);
+    const pauseMs = i < inputPaths.length - 1 ? Math.max(0, pauseAfterMs[i] || 0) : 0;
+    if (pauseMs >= 40) {
+      const silencePath = path.join(workDir, `pause-${String(i).padStart(3, '0')}.mp3`);
+      await makeSilenceMp3(silencePath, pauseMs / 1000);
+      sequence.push(silencePath);
+    }
+  }
+
   const listFile = path.join(workDir, `audio-concat-${Date.now()}.txt`);
   fs.writeFileSync(
     listFile,
-    inputPaths.map((p) => `file '${p.replace(/\\/g, '/')}'`).join('\n'),
+    sequence.map((p) => `file '${p.replace(/\\/g, '/')}'`).join('\n'),
     'utf8'
   );
   await run(

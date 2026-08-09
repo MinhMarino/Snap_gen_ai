@@ -235,10 +235,15 @@ export type SceneTiming = {
 
 /** Nối lời thoại các scene thành một mạch đọc duy nhất cho TTS. */
 export function buildContinuousNarrationText(scenes: SceneNarrationInput[]): string {
-  return scenes
+  const parts = scenes
     .map((scene) => (scene.narration_segment || '').replace(/\s+/g, ' ').trim())
-    .filter(Boolean)
-    .join(' ');
+    .filter(Boolean);
+  // Scene mới: nếu scene trước chưa có dấu kết thúc, thêm "." để TTS nghỉ nhịp tự nhiên.
+  return parts.reduce((acc, part) => {
+    if (!acc) return part;
+    if (/[.!?…。！？]$/.test(acc)) return `${acc} ${part}`;
+    return `${acc}. ${part}`;
+  }, '');
 }
 
 function normalizeForAlign(text: string): string {
