@@ -1429,7 +1429,7 @@ export async function runGenerateJob(input: GenerateJobInput): Promise<GenerateJ
       message:
         mediaKind === 'image'
           ? 'Đang ghép slideshow ảnh + audio + subtitle...'
-          : 'Đang cắt ghép các cảnh (hard cut) + audio + subtitle...',
+          : 'Đang ghép các cảnh (fade chuyển cảnh) + audio + subtitle...',
       percent: 92,
     });
 

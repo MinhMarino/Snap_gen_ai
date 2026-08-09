@@ -18,9 +18,11 @@ import {
 import type { TtsProvider } from '../../shared/types';
 import {
   buildIrodoriInstruct,
+  coerceSelectableTtsProvider,
   IRODORI_SPEED_PRESETS,
   pickQwenVoiceForLanguage,
   resolveIrodoriSpeedPreset,
+  TTS_PROVIDERS_TEMPORARILY_HIDDEN,
   type IrodoriSpeedPreset,
 } from '../../shared/voice';
 import UsageQuotaPanel from '../components/UsageQuotaPanel';
@@ -32,7 +34,8 @@ import SecretInput from '../components/SecretInput';
 
 function parseTtsProvider(value: string): TtsProvider {
   if (value === 'elevenlabs' || value === 'qwen' || value === 'genmax') return value;
-  return 'openai';
+  if (value === 'openai') return 'openai';
+  return 'genmax';
 }
 
 export default function Settings() {
@@ -46,7 +49,7 @@ export default function Settings() {
     openaiModel: 'gpt-4o-mini',
     openaiTtsModel: 'gpt-4o-mini-tts',
     openaiTtsVoice: 'onyx',
-    ttsProvider: 'openai',
+    ttsProvider: 'genmax',
     elevenLabsVoiceId: '21m00Tcm4TlvDq8ikWAM',
     elevenLabsModelId: 'eleven_flash_v2_5',
     qwenTtsModel: DEFAULT_QWEN_TTS_MODEL,
@@ -274,7 +277,7 @@ export default function Settings() {
       setElevenLabs(status);
       setVoicesLoaded(false);
       if (settings.ttsProvider === 'elevenlabs') {
-        setSettings((prev) => ({ ...prev, ttsProvider: 'openai' }));
+        setSettings((prev) => ({ ...prev, ttsProvider: 'genmax' }));
       }
       setMsg({ type: 'ok', text: 'Đã xóa cookies/session ElevenLabs trên máy (danh sách API Keys vẫn giữ).' });
     } catch (err) {
@@ -578,27 +581,34 @@ export default function Settings() {
           <label htmlFor="tts-provider">Nguồn giọng mặc định</label>
           <select
             id="tts-provider"
-            value={settings.ttsProvider}
+            value={coerceSelectableTtsProvider(settings.ttsProvider)}
             onChange={(e) =>
               setSettings({
                 ...settings,
-                ttsProvider: parseTtsProvider(e.target.value),
+                ttsProvider: coerceSelectableTtsProvider(parseTtsProvider(e.target.value)),
               })
             }
           >
-            <option value="openai">OpenAI TTS</option>
+            {!TTS_PROVIDERS_TEMPORARILY_HIDDEN.has('openai') ? (
+              <option value="openai">OpenAI TTS</option>
+            ) : null}
             <option value="elevenlabs" disabled={!elevenLabsReady}>
               ElevenLabs {!elevenLabsReady ? '(cần API key)' : ''}
             </option>
-            <option value="qwen" disabled={!keys.runpodApiKey?.trim()}>
-              Irodori TTS (Qwen3) {!keys.runpodApiKey?.trim() ? '(cần RunPod key)' : ''}
-            </option>
+            {!TTS_PROVIDERS_TEMPORARILY_HIDDEN.has('qwen') ? (
+              <option value="qwen" disabled={!keys.runpodApiKey?.trim()}>
+                Irodori TTS (Qwen3) {!keys.runpodApiKey?.trim() ? '(cần RunPod key)' : ''}
+              </option>
+            ) : null}
             <option value="genmax" disabled={!keys.genmaxApiKey?.trim()}>
               GenMax TTS {!keys.genmaxApiKey?.trim() ? '(cần GenMax key)' : ''}
             </option>
           </select>
+          {TTS_PROVIDERS_TEMPORARILY_HIDDEN.size > 0 ? (
+            <p className="hint">Tạm tắt OpenAI TTS &amp; Irodori — ưu tiên GenMax.</p>
+          ) : null}
         </div>
-        {settings.ttsProvider === 'elevenlabs' ? (
+        {coerceSelectableTtsProvider(settings.ttsProvider) === 'elevenlabs' ? (
           <div className="field">
             <label htmlFor="el-model-default">ElevenLabs model mặc định</label>
             <select
@@ -615,7 +625,7 @@ export default function Settings() {
               ))}
             </select>
           </div>
-        ) : settings.ttsProvider === 'qwen' ? (
+        ) : coerceSelectableTtsProvider(settings.ttsProvider) === 'qwen' ? (
           <>
             <div className="field">
               <label htmlFor="qwen-lang">Language type mặc định</label>
@@ -689,7 +699,7 @@ export default function Settings() {
               ) : null}
             </div>
           </>
-        ) : settings.ttsProvider === 'genmax' ? (
+        ) : coerceSelectableTtsProvider(settings.ttsProvider) === 'genmax' ? (
           <>
             <GenmaxVoicePicker
               backend={settings.genmaxBackend || 'elevenlabs'}

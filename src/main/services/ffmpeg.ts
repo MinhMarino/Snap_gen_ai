@@ -75,6 +75,15 @@ function report(reporter: StageReporter | undefined, event: StageEvent): void {
   }
 }
 
+/** Target final merge: 1080p @ 60fps (không render cao hơn để giữ tốc độ). */
+const FINAL_WIDTH = 1920;
+const FINAL_HEIGHT = 1080;
+const FINAL_FPS = 60;
+const FINAL_X264_PRESET = 'faster';
+const FINAL_CRF = '18';
+/** Fade đen vào/ra mỗi scene — giữ nguyên tổng thời lượng (khớp narration). */
+const SCENE_FADE_SEC = 0.28;
+
 function run(
   cmd: ffmpeg.FfmpegCommand,
   options?: { timeoutMs?: number; label?: string }
@@ -868,6 +877,20 @@ export async function concatClipFiles(
   return concatScenes(normalized, outputPath, workDir);
 }
 
+function sceneTransitionFades(durationSec: number, options?: { fadeIn?: boolean; fadeOut?: boolean }): string[] {
+  const fadeIn = options?.fadeIn !== false;
+  const fadeOut = options?.fadeOut !== false;
+  const d = Math.max(0.05, durationSec);
+  const fade = Math.min(SCENE_FADE_SEC, Math.max(0.12, d * 0.12));
+  if (d < fade * 2 + 0.15) return [];
+  const filters: string[] = [];
+  if (fadeIn) filters.push(`fade=t=in:st=0:d=${fade.toFixed(3)}:color=black`);
+  if (fadeOut) {
+    filters.push(`fade=t=out:st=${(d - fade).toFixed(3)}:d=${fade.toFixed(3)}:color=black`);
+  }
+  return filters;
+}
+
 export async function assembleFinalVideo(options: {
   clipPaths: string[];
   audioPath: string;
@@ -877,7 +900,7 @@ export async function assembleFinalVideo(options: {
   workDir: string;
   estimatedTotalSeconds?: number;
   clipDurations?: number[];
-  /** When clips are already 1280x720@30 (e.g. Ken Burns slides), skip re-encode. */
+  /** When clips are already 1080p@60 (e.g. Ken Burns slides), skip re-scale — vẫn encode fade chuyển cảnh. */
   skipClipNormalize?: boolean;
   onProgress?: StageReporter;
 }): Promise<string> {
@@ -886,32 +909,115 @@ export async function assembleFinalVideo(options: {
 
   fs.mkdirSync(workDir, { recursive: true });
 
-  // Probe once, reuse the same metadata for both the compatibility check and
-  // the normalize pass — avoids ffprobe-ing every scene twice.
-  const validation = await validateSceneCompatibility(clipPaths, onProgress);
-  const normalized = await normalizeIncompatibleScenes(clipPaths, workDir, onProgress, validation);
+  // Fit mỗi clip theo duration + fade đen vào/ra, rồi concat -c copy (không re-encode lần 2).
+  const encoder = await resolveVideoEncoder();
+  report(onProgress, {
+    stage: 'NORMALIZING',
+    message: `Preparing ${clipPaths.length} clip(s) with transitions`,
+    reencoding: true,
+    reason: 'scene fade transitions / duration fit',
+    encoder: encoder.name,
+  });
 
-  report(onProgress, { stage: 'CONCATENATING', message: `Concatenating ${normalized.length} clip(s)` });
+  const normalized: string[] = [];
+  for (let i = 0; i < clipPaths.length; i++) {
+    const out = path.join(workDir, `clip-${i}.mp4`);
+    const fadeOpts = { fadeIn: true, fadeOut: true };
+
+    if (options.skipClipNormalize) {
+      const planned = options.clipDurations?.[i];
+      const natural = await getDurationSafe(clipPaths[i], planned ?? 8);
+      const targetDur = planned ?? natural;
+      const filters: string[] = [];
+      if (planned != null && planned > natural + 0.05) {
+        filters.push(`tpad=stop_mode=clone:stop_duration=${(planned - natural).toFixed(3)}`);
+      }
+      filters.push(...sceneTransitionFades(targetDur, fadeOpts));
+      const cmd = ffmpeg(clipPaths[i]).outputOptions([
+        '-an',
+        ...encoder.outputArgs,
+        '-pix_fmt',
+        'yuv420p',
+        '-r',
+        String(FINAL_FPS),
+      ]);
+      if (filters.length) cmd.videoFilters(filters);
+      if (planned) cmd.outputOptions(['-t', String(planned)]);
+      await run(cmd.output(out), {
+        timeoutMs: 10 * 60 * 1000,
+        label: `Prepare clip ${i + 1}/${clipPaths.length}`,
+      });
+      normalized.push(out);
+      report(onProgress, {
+        stage: 'NORMALIZING',
+        message: `Prepared clip ${i + 1}/${clipPaths.length}`,
+        progress: Math.round(((i + 1) / clipPaths.length) * 100),
+        reencoding: true,
+        encoder: encoder.name,
+      });
+      continue;
+    }
+
+    const natural = await getDurationSafe(clipPaths[i], options.clipDurations?.[i] ?? 8);
+    const planned = options.clipDurations?.[i];
+    const targetDur = planned ?? natural;
+    const filters = [
+      `scale=${FINAL_WIDTH}:${FINAL_HEIGHT}:force_original_aspect_ratio=decrease`,
+      `pad=${FINAL_WIDTH}:${FINAL_HEIGHT}:(ow-iw)/2:(oh-ih)/2:black`,
+      `fps=${FINAL_FPS}`,
+      'format=yuv420p',
+    ];
+    if (planned != null && planned > natural + 0.05) {
+      filters.push(`tpad=stop_mode=clone:stop_duration=${(planned - natural).toFixed(3)}`);
+    }
+    filters.push(...sceneTransitionFades(targetDur, fadeOpts));
+
+    const cmd = ffmpeg(clipPaths[i]).videoFilters(filters).outputOptions([
+      '-an',
+      ...encoder.outputArgs,
+      '-pix_fmt',
+      'yuv420p',
+      '-r',
+      String(FINAL_FPS),
+    ]);
+    if (planned) cmd.outputOptions(['-t', String(planned)]);
+    await run(cmd.output(out), {
+      timeoutMs: 10 * 60 * 1000,
+      label: `Normalize clip ${i + 1}/${clipPaths.length}`,
+    });
+    normalized.push(out);
+    report(onProgress, {
+      stage: 'NORMALIZING',
+      message: `Prepared clip ${i + 1}/${clipPaths.length}`,
+      progress: Math.round(((i + 1) / clipPaths.length) * 100),
+      reencoding: true,
+      encoder: encoder.name,
+    });
+  }
+
+  report(onProgress, {
+    stage: 'CONCATENATING',
+    message: `Concatenating ${normalized.length} clip(s)`,
+    reencoding: false,
+  });
   const mergedVideo = path.join(workDir, 'merged-video.mp4');
   await concatScenes(normalized, mergedVideo, workDir);
 
+  // Narration thường ngắn hơn footage — pad silence thay vì -shortest (tránh cắt scene).
+  const plannedTotal =
+    options.estimatedTotalSeconds ??
+    options.clipDurations?.reduce((sum, value) => sum + value, 0) ??
+    0;
+  const videoDuration = await getDurationSafe(mergedVideo, plannedTotal);
+
   report(onProgress, { stage: 'MIXING_AUDIO', message: 'Preparing final audio track' });
   const finalAudio = path.join(workDir, 'final-audio.m4a');
-  const audioMeta = await probeSceneInfo(audioPath);
-  if (isAudioStreamAlreadyTarget(audioMeta)) {
-    await run(
-      ffmpeg().input(audioPath).outputOptions(['-c:a', 'copy']).output(finalAudio),
-      { timeoutMs: 2 * 60 * 1000, label: 'normalize-audio-copy' }
-    );
-  } else {
-    await run(
-      ffmpeg()
-        .input(audioPath)
-        .outputOptions(['-c:a', 'aac', '-ar', '48000', '-ac', '2'])
-        .output(finalAudio),
-      { timeoutMs: 10 * 60 * 1000, label: 'normalize-audio' }
-    );
-  }
+  const audioOutOpts = ['-c:a', 'aac', '-ar', '48000', '-ac', '2'];
+  if (videoDuration > 0) audioOutOpts.push('-t', videoDuration.toFixed(3));
+  await run(
+    ffmpeg().input(audioPath).audioFilters('apad').outputOptions(audioOutOpts).output(finalAudio),
+    { timeoutMs: 10 * 60 * 1000, label: 'normalize-audio' }
+  );
 
   await muxFinalVideo({
     videoPath: mergedVideo,
@@ -936,19 +1042,15 @@ export async function assembleFinalVideo(options: {
 
 /**
  * Ken Burns — slow zoom-in then hold.
- * Small push (~6–9%) over ~80% of the clip with smootherstep easing so
- * motion feels cinematic, not a quick linear punch. High-res source +
- * zoompan @ 60fps → 1080p → lanczos 720p reduces sub-pixel shake.
+ * Render thẳng 1080p@60 (không oversample 5K) để bước ghép nhanh hơn.
  */
 function kenBurnsFilters(durationSec: number): string[] {
-  const renderFps = 60;
-  const outFps = 30;
-  const frames = Math.max(Math.round(durationSec * renderFps), renderFps);
+  const frames = Math.max(Math.round(durationSec * FINAL_FPS), FINAL_FPS);
   const last = Math.max(frames - 1, 1);
   // Shorter clips zoom less so they don't feel rushed.
-  const delta = Math.min(0.09, Math.max(0.055, durationSec * 0.011));
-  // Finish the push early, then hold — avoids constant motion to the last frame.
-  const moveFrames = Math.max(Math.round(last * 0.82), 1);
+  const delta = Math.min(0.095, Math.max(0.06, durationSec * 0.012));
+  // Finish the push a bit earlier (was 0.82) — zoom in nhanh hơn một chút, rồi hold.
+  const moveFrames = Math.max(Math.round(last * 0.72), 1);
 
   // Smootherstep: t³(t(6t−15)+10) — softer accel/decel than smoothstep.
   // Commas must be escaped for filtergraph.
@@ -960,15 +1062,11 @@ function kenBurnsFilters(durationSec: number): string[] {
   // put delogo in this chain: expression-based delogo often fails with
   // Windows exit 4294967274 (-22 EINVAL) and frame=0 before any output.
   return [
-    // Oversample so each zoom step is a tiny fraction of a 720p pixel.
-    'scale=5120:2880:force_original_aspect_ratio=increase:flags=lanczos',
-    'crop=5120:2880',
+    `scale=${FINAL_WIDTH}:${FINAL_HEIGHT}:force_original_aspect_ratio=increase:flags=fast_bilinear`,
+    `crop=${FINAL_WIDTH}:${FINAL_HEIGHT}`,
     'setsar=1',
     'format=yuv420p',
-    // Keep float x/y (no trunc) — trunc caused 1px “jumps” that looked shaky.
-    `zoompan=z='${zExpr}':d=${frames}:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=1920x1080:fps=${renderFps}`,
-    'scale=1280:720:flags=lanczos',
-    `fps=${outFps}`,
+    `zoompan=z='${zExpr}':d=${frames}:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=${FINAL_WIDTH}x${FINAL_HEIGHT}:fps=${FINAL_FPS}`,
   ];
 }
 
@@ -1017,11 +1115,11 @@ export async function assembleSlideshowFromImages(options: {
     }
     const out = path.join(workDir, `img-clip-${i}.mp4`);
     const dur = Math.max(durations?.[i] ?? fallback, 1);
-    const outFrames = Math.max(Math.round(dur * 30), 30);
+    const outFrames = Math.max(Math.round(dur * FINAL_FPS), FINAL_FPS);
     try {
       await run(
         ffmpeg(imagePath)
-          .inputOptions(['-loop', '1', '-framerate', '60'])
+          .inputOptions(['-loop', '1', '-framerate', String(FINAL_FPS)])
           .videoFilters(kenBurnsFilters(dur))
           .outputOptions([
             '-frames:v',
@@ -1030,13 +1128,13 @@ export async function assembleSlideshowFromImages(options: {
             '-c:v',
             'libx264',
             '-preset',
-            'medium',
+            FINAL_X264_PRESET,
             '-crf',
-            '18',
+            FINAL_CRF,
             '-pix_fmt',
             'yuv420p',
             '-r',
-            '30',
+            String(FINAL_FPS),
           ])
           .output(out)
       );

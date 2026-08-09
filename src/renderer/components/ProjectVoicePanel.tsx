@@ -13,9 +13,11 @@ import {
 } from '../../shared/types';
 import {
   buildIrodoriInstruct,
+  coerceSelectableTtsProvider,
   IRODORI_SPEED_PRESETS,
   pickQwenVoiceForLanguage,
   resolveIrodoriSpeedPreset,
+  TTS_PROVIDERS_TEMPORARILY_HIDDEN,
   type IrodoriSpeedPreset,
 } from '../../shared/voice';
 import ElevenLabsVoicePicker from './ElevenLabsVoicePicker';
@@ -119,6 +121,14 @@ export default function ProjectVoicePanel({
   }, [elevenLabsReady, value.ttsProvider]);
 
   const patch = (partial: Partial<ProjectVoiceSettings>) => onChange({ ...value, ...partial });
+  const selectableProvider = coerceSelectableTtsProvider(value.ttsProvider);
+
+  useEffect(() => {
+    if (value.ttsProvider !== selectableProvider) {
+      onChange({ ...value, ttsProvider: selectableProvider });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectableProvider]);
 
   return (
     <div className="project-voice-panel">
@@ -126,24 +136,35 @@ export default function ProjectVoicePanel({
         <label htmlFor="project-tts-provider">Nguồn giọng đọc</label>
         <select
           id="project-tts-provider"
-          value={value.ttsProvider}
+          value={selectableProvider}
           disabled={disabled}
-          onChange={(e) => patch({ ttsProvider: parseTtsProvider(e.target.value) })}
+          onChange={(e) =>
+            patch({ ttsProvider: coerceSelectableTtsProvider(parseTtsProvider(e.target.value)) })
+          }
         >
-          <option value="openai">OpenAI TTS</option>
+          {!TTS_PROVIDERS_TEMPORARILY_HIDDEN.has('openai') ? (
+            <option value="openai">OpenAI TTS</option>
+          ) : null}
           <option value="elevenlabs" disabled={!elevenLabsReady}>
             ElevenLabs {!elevenLabsReady ? '(cần API key ở Settings)' : ''}
           </option>
-          <option value="qwen" disabled={!qwenReady}>
-            Irodori TTS {!qwenReady ? '(cần RunPod key ở Settings)' : ''}
-          </option>
+          {!TTS_PROVIDERS_TEMPORARILY_HIDDEN.has('qwen') ? (
+            <option value="qwen" disabled={!qwenReady}>
+              Irodori TTS {!qwenReady ? '(cần RunPod key ở Settings)' : ''}
+            </option>
+          ) : null}
           <option value="genmax" disabled={!genmaxReady}>
             GenMax TTS {!genmaxReady ? '(cần GenMax key ở Settings)' : ''}
           </option>
         </select>
+        {TTS_PROVIDERS_TEMPORARILY_HIDDEN.size > 0 ? (
+          <p className="hint" style={{ marginTop: 6 }}>
+            Tạm chỉ dùng GenMax / ElevenLabs (OpenAI TTS &amp; Irodori đang tắt).
+          </p>
+        ) : null}
       </div>
 
-      {value.ttsProvider === 'elevenlabs' ? (
+      {selectableProvider === 'elevenlabs' ? (
         <>
           <div className="field">
             <div className="field-row-between">
@@ -233,7 +254,7 @@ export default function ProjectVoicePanel({
             </select>
           </div>
         </>
-      ) : value.ttsProvider === 'qwen' ? (
+      ) : selectableProvider === 'qwen' ? (
         <>
           <div className="field">
             <label htmlFor="project-qwen-lang">Language type</label>
@@ -308,7 +329,7 @@ export default function ProjectVoicePanel({
             )}
           </div>
         </>
-      ) : value.ttsProvider === 'genmax' ? (
+      ) : selectableProvider === 'genmax' ? (
         <>
           <GenmaxVoicePicker
             backend={value.genmaxBackend || 'elevenlabs'}
