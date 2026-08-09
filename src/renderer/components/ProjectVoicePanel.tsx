@@ -13,7 +13,10 @@ import {
 } from '../../shared/types';
 import {
   buildIrodoriInstruct,
+  clampGenmaxSpeed,
   coerceSelectableTtsProvider,
+  GENMAX_SPEED_PRESETS,
+  genmaxSpeedRange,
   IRODORI_SPEED_PRESETS,
   pickQwenVoiceForLanguage,
   resolveIrodoriSpeedPreset,
@@ -334,16 +337,76 @@ export default function ProjectVoicePanel({
           <GenmaxVoicePicker
             backend={value.genmaxBackend || 'elevenlabs'}
             value={value.genmaxVoiceId}
+            speed={clampGenmaxSpeed(value.genmaxSpeed, value.genmaxBackend)}
             disabled={disabled || !genmaxReady}
-            onBackendChange={(genmaxBackend) => patch({ genmaxBackend })}
+            onBackendChange={(genmaxBackend) =>
+              patch({
+                genmaxBackend,
+                genmaxSpeed: clampGenmaxSpeed(value.genmaxSpeed, genmaxBackend),
+              })
+            }
             onChange={(voice) =>
               patch({
                 genmaxVoiceId: voice.voiceId,
                 genmaxVoiceName: voice.name,
                 genmaxBackend: voice.backend,
+                genmaxSpeed: clampGenmaxSpeed(value.genmaxSpeed, voice.backend),
               })
             }
           />
+          <div className="field">
+            <label htmlFor="project-genmax-speed">Tốc độ đọc</label>
+            <div className="irodori-speed-presets" role="group" aria-label="Preset tốc độ GenMax">
+              {GENMAX_SPEED_PRESETS.map((preset) => {
+                const active =
+                  Math.abs(
+                    clampGenmaxSpeed(value.genmaxSpeed, value.genmaxBackend) - preset.value
+                  ) < 0.01;
+                return (
+                  <button
+                    key={preset.id}
+                    type="button"
+                    className={`irodori-speed-btn ${active ? 'active' : ''}`}
+                    disabled={disabled}
+                    onClick={() =>
+                      patch({
+                        genmaxSpeed: clampGenmaxSpeed(preset.value, value.genmaxBackend),
+                      })
+                    }
+                  >
+                    {preset.label}
+                  </button>
+                );
+              })}
+            </div>
+            <div className="genmax-speed-slider">
+              <input
+                id="project-genmax-speed"
+                type="range"
+                disabled={disabled}
+                min={genmaxSpeedRange(value.genmaxBackend).min}
+                max={genmaxSpeedRange(value.genmaxBackend).max}
+                step={genmaxSpeedRange(value.genmaxBackend).step}
+                value={clampGenmaxSpeed(value.genmaxSpeed, value.genmaxBackend)}
+                onChange={(e) =>
+                  patch({
+                    genmaxSpeed: clampGenmaxSpeed(
+                      Number(e.target.value),
+                      value.genmaxBackend
+                    ),
+                  })
+                }
+              />
+              <strong>
+                {clampGenmaxSpeed(value.genmaxSpeed, value.genmaxBackend).toFixed(2)}×
+              </strong>
+            </div>
+            <p className="hint">
+              {value.genmaxBackend === 'minimax' || value.genmaxBackend === 'capcut'
+                ? 'MiniMax / CapCut: 0.50–2.00'
+                : 'ElevenLabs: 0.70–1.20'}
+            </p>
+          </div>
           <div className="field">
             <label htmlFor="project-genmax-model">Model ID</label>
             <input

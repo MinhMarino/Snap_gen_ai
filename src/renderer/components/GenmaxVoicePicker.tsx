@@ -34,12 +34,15 @@ function extractVoiceId(raw: string): string {
 export default function GenmaxVoicePicker({
   backend,
   value,
+  speed,
   disabled,
   onChange,
   onBackendChange,
 }: {
   backend: GenmaxBackend;
   value: string;
+  /** Tốc độ đọc khi nghe thử (nếu có). */
+  speed?: number;
   disabled?: boolean;
   onChange: (voice: GenmaxVoice) => void;
   onBackendChange: (backend: GenmaxBackend) => void;
@@ -135,11 +138,14 @@ export default function GenmaxVoicePicker({
     setError(null);
     try {
       stopPreview();
-      let src = voice.previewUrl || '';
+      // Sample URL không áp dụng speed — khi user chỉnh tốc độ thì TTS preview ngắn.
+      const useSample = Boolean(voice.previewUrl) && (speed == null || Math.abs(speed - 1) < 0.01);
+      let src = useSample ? voice.previewUrl || '' : '';
       if (!src) {
         const { dataUrl } = await window.studio.previewGenmaxVoice({
           voiceId: voice.voiceId,
           backend,
+          speed,
         });
         src = dataUrl;
       }

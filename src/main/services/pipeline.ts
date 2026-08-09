@@ -55,6 +55,7 @@ import {
   type GenmaxTtsProgress,
 } from './genmax-tts';
 import type { GenmaxBackend } from '../../shared/types';
+import { resolveProjectKind } from '../../shared/types';
 import { getElevenLabsSessionStatus, hasElevenLabsApiAccess } from './elevenlabs-auth';
 import {
   assembleFinalVideo,
@@ -195,6 +196,7 @@ async function prepareNarration(options: {
   genmaxBackend?: GenmaxBackend;
   genmaxVoiceId?: string;
   genmaxModelId?: string;
+  genmaxSpeed?: number;
   /** Khớp video theo độ dài speech thật (sau khi audio đã đạt ±3% mục tiêu). */
   syncToSpeech?: boolean;
   /** Tiến độ TTS (Irodori chunk) — map % theo bước audio-only hoặc full job. */
@@ -219,7 +221,7 @@ async function prepareNarration(options: {
       : options.ttsProvider === 'qwen'
         ? `qwen:${options.qwenTtsVoice || ''}:${options.qwenLanguageType || ''}:${irodoriInstruct}`
         : options.ttsProvider === 'genmax'
-          ? `genmax:${options.genmaxBackend || 'elevenlabs'}:${options.genmaxVoiceId || ''}:${options.genmaxModelId || ''}`
+          ? `genmax:${options.genmaxBackend || 'elevenlabs'}:${options.genmaxVoiceId || ''}:${options.genmaxModelId || ''}:${options.genmaxSpeed ?? 1}`
           : `openai:${voice}:${ttsModel}`;
   const hash = narrationHash(text, voiceKey, options.ttsProvider);
   const rawPath = path.join(projectDir, RAW_NARRATION_FILE);
@@ -350,6 +352,7 @@ async function prepareNarration(options: {
       backend: options.genmaxBackend || 'elevenlabs',
       modelId: options.genmaxModelId || DEFAULT_GENMAX_MODEL_ID,
       language: options.language,
+      speed: options.genmaxSpeed,
       outDir: projectDir,
       fileName: RAW_NARRATION_FILE,
       onProgress: options.onGenmaxProgress,
@@ -471,6 +474,7 @@ async function prepareNarrationFittingTarget(options: {
   genmaxBackend?: GenmaxBackend;
   genmaxVoiceId?: string;
   genmaxModelId?: string;
+  genmaxSpeed?: number;
   targetDurationSec: number;
   /** Bước chỉ tạo voice: % TTS dùng thang 0–100, không nhét vào 3–12% của full job. */
   audioOnlyStep?: boolean;
@@ -551,6 +555,7 @@ async function prepareNarrationFittingTarget(options: {
     genmaxBackend: options.genmaxBackend,
     genmaxVoiceId: options.genmaxVoiceId,
     genmaxModelId: options.genmaxModelId,
+    genmaxSpeed: options.genmaxSpeed,
   };
 
   // Irodori/GenMax async chậm — TTS 1 lần rồi sync video theo speech.
@@ -716,7 +721,9 @@ export async function remuxProject(projectId: string): Promise<GenerateJobResult
     let srtPath = path.join(projectDir, 'subs.srt');
     let durations = script.scenes.map((s) => Math.max(1, s.duration_hint));
 
-    const hasRawNarration = fs.existsSync(path.join(projectDir, RAW_NARRATION_FILE));
+    const isMusicRemux = resolveProjectKind(draft.projectKind ?? detail.meta.projectKind) === 'music-animation';
+    const hasRawNarration =
+      !isMusicRemux && fs.existsSync(path.join(projectDir, RAW_NARRATION_FILE));
     if (hasRawNarration) {
       emitProgress({
         phase: 'tts',
@@ -751,6 +758,7 @@ export async function remuxProject(projectId: string): Promise<GenerateJobResult
         genmaxBackend: voice.genmaxBackend,
         genmaxVoiceId: voice.genmaxVoiceId,
         genmaxModelId: voice.genmaxModelId,
+        genmaxSpeed: voice.genmaxSpeed,
       });
       audioPath = rebuilt.audioPath;
       srtPath = rebuilt.srtPath;
@@ -758,7 +766,11 @@ export async function remuxProject(projectId: string): Promise<GenerateJobResult
       durations = rebuilt.durations;
       persistScript(projectId, script);
     } else if (!fs.existsSync(audioPath)) {
-      throw new Error('Chưa có file narration. Hãy Generate trước.');
+      throw new Error(
+        isMusicRemux
+          ? 'Chưa có file nhạc. Tải audio bài hát ở bước Input trước.'
+          : 'Chưa có file narration. Hãy Generate trước.'
+      );
     }
     if (!fs.existsSync(srtPath)) {
       fs.writeFileSync(srtPath, '', 'utf8');
@@ -822,25 +834,6 @@ export async function runGenerateJob(input: GenerateJobInput): Promise<GenerateJ
   const lockedElevenLabsVoiceId = voice.elevenLabsVoiceId;
 
   if (!keys.snapgenApiKey) throw new Error('Thiếu Snapgen API key. Vào Settings để cấu hình.');
-  if (voice.ttsProvider === 'openai' && !keys.openaiApiKey) {
-    throw new Error('Thiếu OpenAI API key. Vào Settings để cấu hình.');
-  }
-  if (voice.ttsProvider === 'qwen' && !keys.runpodApiKey?.trim()) {
-    throw new Error('Thiếu RunPod API key. Vào Settings để cấu hình Irodori TTS.');
-  }
-  if (voice.ttsProvider === 'genmax' && !keys.genmaxApiKey?.trim()) {
-    throw new Error('Thiếu GenMax API key. Vào Settings để cấu hình GenMax TTS.');
-  }
-  if (voice.ttsProvider === 'elevenlabs') {
-    if (!hasElevenLabsApiAccess()) {
-      const el = await getElevenLabsSessionStatus();
-      if (!el.hasApiCredential) {
-        throw new Error(
-          'Chưa có API key ElevenLabs. Vào Settings → Add API Key (sk_…/xi_…). Không cần đăng nhập web.'
-        );
-      }
-    }
-  }
 
   resetJobProgress();
 
@@ -869,6 +862,33 @@ export async function runGenerateJob(input: GenerateJobInput): Promise<GenerateJ
         ...voice,
         script: input.script,
       });
+    }
+  }
+
+  const projectKind = resolveProjectKind(
+    getProject(meta.id).draft?.projectKind ?? getProject(meta.id).meta.projectKind
+  );
+  const isMusicAnimation = projectKind === 'music-animation';
+
+  if (!isMusicAnimation) {
+    if (voice.ttsProvider === 'openai' && !keys.openaiApiKey) {
+      throw new Error('Thiếu OpenAI API key. Vào Settings để cấu hình.');
+    }
+    if (voice.ttsProvider === 'qwen' && !keys.runpodApiKey?.trim()) {
+      throw new Error('Thiếu RunPod API key. Vào Settings để cấu hình Irodori TTS.');
+    }
+    if (voice.ttsProvider === 'genmax' && !keys.genmaxApiKey?.trim()) {
+      throw new Error('Thiếu GenMax API key. Vào Settings để cấu hình GenMax TTS.');
+    }
+    if (voice.ttsProvider === 'elevenlabs') {
+      if (!hasElevenLabsApiAccess()) {
+        const el = await getElevenLabsSessionStatus();
+        if (!el.hasApiCredential) {
+          throw new Error(
+            'Chưa có API key ElevenLabs. Vào Settings → Add API Key (sk_…/xi_…). Không cần đăng nhập web.'
+          );
+        }
+      }
     }
   }
 
@@ -905,109 +925,145 @@ export async function runGenerateJob(input: GenerateJobInput): Promise<GenerateJ
       Math.round(draftTarget || hintSum || spokenEst)
     );
 
-    // Tổng narration đủ target thì cho TTS; lệch nhẹ từng scene (do duration_hint scale) không chặn.
-    // Timing scene sẽ theo audio TTS thật + normalize duration_hint theo lời.
-    if (refreshNarration) {
-      assertNarrationCoversTarget(input.script.scenes, targetRuntimeSec);
-      input.script = {
-        ...input.script,
-        scenes: normalizeSceneDurations(input.script.scenes, targetRuntimeSec),
-      };
-      const shortScenes = findScenesWithShortNarration(input.script.scenes);
-      if (shortScenes.length) {
-        emitProgress({
-          phase: 'tts',
-          message: `${shortScenes.length} scene hơi ngắn so với hint — tiếp tục TTS, căn timing theo giọng đọc.`,
-          percent: audioOnlyStep ? 3 : 2,
-        });
+    let audioPath: string;
+    let srtPath: string;
+    let script = input.script;
+    let durations: number[];
+    let rawAudioDuration = 0;
+
+    if (isMusicAnimation) {
+      // Music-animation: nhạc đã import → narration.mp3; không TTS.
+      audioPath = path.join(projectDir, 'narration.mp3');
+      srtPath = path.join(projectDir, 'subs.srt');
+      if (!fs.existsSync(audioPath) || fs.statSync(audioPath).size < 100) {
+        throw new Error('Chưa có file nhạc. Bước 1: tải audio bài hát lên trước.');
       }
+      const musicDur = await getDurationSafe(audioPath, targetRuntimeSec);
+      rawAudioDuration = musicDur;
+      script = {
+        ...input.script,
+        scenes: normalizeSceneDurations(input.script.scenes, Math.round(musicDur || targetRuntimeSec)),
+      };
+      durations = script.scenes.map((s) => Math.max(1, s.duration_hint));
+      if (!fs.existsSync(srtPath)) {
+        const body = script.scenes
+          .map((s, i) => `${i + 1}\n00:00:00,000 --> 00:00:02,000\n${(s.narration_segment || '').slice(0, 80)}\n`)
+          .join('\n');
+        fs.writeFileSync(srtPath, body || '', 'utf8');
+      }
+      emitProgress({
+        phase: 'tts',
+        message: `Dùng nhạc gốc (${formatDurationLabel(musicDur)}) — bỏ qua TTS.`,
+        percent: audioOnlyStep ? 20 : 8,
+      });
+      persistScript(meta.id, script);
+    } else {
+      // Tổng narration đủ target thì cho TTS; lệch nhẹ từng scene (do duration_hint scale) không chặn.
+      if (refreshNarration) {
+        assertNarrationCoversTarget(input.script.scenes, targetRuntimeSec);
+        input.script = {
+          ...input.script,
+          scenes: normalizeSceneDurations(input.script.scenes, targetRuntimeSec),
+        };
+        const shortScenes = findScenesWithShortNarration(input.script.scenes);
+        if (shortScenes.length) {
+          emitProgress({
+            phase: 'tts',
+            message: `${shortScenes.length} scene hơi ngắn so với hint — tiếp tục TTS, căn timing theo giọng đọc.`,
+            percent: audioOnlyStep ? 3 : 2,
+          });
+        }
+      }
+
+      const ttsLabel =
+        voice.ttsProvider === 'elevenlabs'
+          ? 'ElevenLabs'
+          : voice.ttsProvider === 'qwen'
+            ? 'Irodori TTS'
+            : voice.ttsProvider === 'genmax'
+              ? 'GenMax TTS'
+              : 'OpenAI TTS';
+      emitProgress({
+        phase: 'tts',
+        message: refreshNarration
+          ? `Bắt đầu vòng TTS fit duration (${ttsLabel}): ước lượng ~${formatDurationLabel(spokenEst)} → mục tiêu ${formatDurationLabel(targetRuntimeSec)}`
+          : 'Giữ voiceover hiện có — không gọi TTS lại.',
+        percent: audioOnlyStep ? 4 : 3,
+      });
+
+      const narration = refreshNarration
+        ? await prepareNarrationFittingTarget({
+            projectDir,
+            workDir,
+            script: input.script,
+            apiKey: keys.openaiApiKey,
+            openaiModel: resolveProjectChatModel(
+              getProject(meta.id).draft?.openaiChatModel,
+              settings.openaiModel
+            ),
+            voice: voice.openaiTtsVoice,
+            ttsModel: voice.openaiTtsModel,
+            language: input.language,
+            ttsProvider: voice.ttsProvider,
+            elevenLabsVoiceId: lockedElevenLabsVoiceId,
+            elevenLabsModelId: voice.elevenLabsModelId,
+            elevenLabsPublicOwnerId: voice.elevenLabsPublicOwnerId,
+            elevenLabsOriginalVoiceId: voice.elevenLabsOriginalVoiceId,
+            elevenLabsVoiceName: voice.elevenLabsVoiceName,
+            dashscopeApiKey: keys.runpodApiKey,
+            runpodApiKey: keys.runpodApiKey,
+            runpodEndpointId: settings.runpodEndpointId,
+            qwenTtsVoice: voice.qwenTtsVoice,
+            qwenTtsModel: voice.qwenTtsModel,
+            qwenLanguageType: voice.qwenLanguageType,
+            qwenRegion: voice.qwenRegion,
+            qwenSpeedPreset: voice.qwenSpeedPreset,
+            qwenInstruct: voice.qwenInstruct,
+            genmaxApiKey: keys.genmaxApiKey,
+            genmaxBackend: voice.genmaxBackend,
+            genmaxVoiceId: voice.genmaxVoiceId,
+            genmaxModelId: voice.genmaxModelId,
+            genmaxSpeed: voice.genmaxSpeed,
+            targetDurationSec: targetRuntimeSec,
+            audioOnlyStep,
+          })
+        : await prepareNarration({
+            projectDir,
+            workDir,
+            script: input.script,
+            apiKey: keys.openaiApiKey,
+            voice: voice.openaiTtsVoice,
+            ttsModel: voice.openaiTtsModel,
+            language: input.language,
+            refresh: false,
+            ttsProvider: voice.ttsProvider,
+            elevenLabsVoiceId: lockedElevenLabsVoiceId,
+            elevenLabsModelId: voice.elevenLabsModelId,
+            elevenLabsPublicOwnerId: voice.elevenLabsPublicOwnerId,
+            elevenLabsOriginalVoiceId: voice.elevenLabsOriginalVoiceId,
+            elevenLabsVoiceName: voice.elevenLabsVoiceName,
+            dashscopeApiKey: keys.runpodApiKey,
+            runpodApiKey: keys.runpodApiKey,
+            runpodEndpointId: settings.runpodEndpointId,
+            genmaxApiKey: keys.genmaxApiKey,
+            genmaxBackend: voice.genmaxBackend,
+            genmaxVoiceId: voice.genmaxVoiceId,
+            genmaxModelId: voice.genmaxModelId,
+            genmaxSpeed: voice.genmaxSpeed,
+            qwenTtsVoice: voice.qwenTtsVoice,
+            qwenTtsModel: voice.qwenTtsModel,
+            qwenLanguageType: voice.qwenLanguageType,
+            qwenRegion: voice.qwenRegion,
+            qwenSpeedPreset: voice.qwenSpeedPreset,
+            qwenInstruct: voice.qwenInstruct,
+          });
+      audioPath = narration.audioPath;
+      srtPath = narration.srtPath;
+      script = narration.script;
+      durations = narration.durations;
+      rawAudioDuration = narration.rawAudioDuration;
+      persistScript(meta.id, script);
     }
-
-    const ttsLabel =
-      voice.ttsProvider === 'elevenlabs'
-        ? 'ElevenLabs'
-        : voice.ttsProvider === 'qwen'
-          ? 'Irodori TTS'
-          : voice.ttsProvider === 'genmax'
-            ? 'GenMax TTS'
-            : 'OpenAI TTS';
-    emitProgress({
-      phase: 'tts',
-      message: refreshNarration
-        ? `Bắt đầu vòng TTS fit duration (${ttsLabel}): ước lượng ~${formatDurationLabel(spokenEst)} → mục tiêu ${formatDurationLabel(targetRuntimeSec)}`
-        : 'Giữ voiceover hiện có — không gọi TTS lại.',
-      percent: audioOnlyStep ? 4 : 3,
-    });
-
-    const narration = refreshNarration
-      ? await prepareNarrationFittingTarget({
-          projectDir,
-          workDir,
-          script: input.script,
-          apiKey: keys.openaiApiKey,
-          openaiModel: resolveProjectChatModel(
-            getProject(meta.id).draft?.openaiChatModel,
-            settings.openaiModel
-          ),
-          voice: voice.openaiTtsVoice,
-          ttsModel: voice.openaiTtsModel,
-          language: input.language,
-          ttsProvider: voice.ttsProvider,
-          elevenLabsVoiceId: lockedElevenLabsVoiceId,
-          elevenLabsModelId: voice.elevenLabsModelId,
-          elevenLabsPublicOwnerId: voice.elevenLabsPublicOwnerId,
-          elevenLabsOriginalVoiceId: voice.elevenLabsOriginalVoiceId,
-          elevenLabsVoiceName: voice.elevenLabsVoiceName,
-          dashscopeApiKey: keys.runpodApiKey,
-          runpodApiKey: keys.runpodApiKey,
-          runpodEndpointId: settings.runpodEndpointId,
-          qwenTtsVoice: voice.qwenTtsVoice,
-          qwenTtsModel: voice.qwenTtsModel,
-          qwenLanguageType: voice.qwenLanguageType,
-          qwenRegion: voice.qwenRegion,
-          qwenSpeedPreset: voice.qwenSpeedPreset,
-          qwenInstruct: voice.qwenInstruct,
-          genmaxApiKey: keys.genmaxApiKey,
-          genmaxBackend: voice.genmaxBackend,
-          genmaxVoiceId: voice.genmaxVoiceId,
-          genmaxModelId: voice.genmaxModelId,
-          targetDurationSec: targetRuntimeSec,
-          audioOnlyStep,
-        })
-      : await prepareNarration({
-          projectDir,
-          workDir,
-          script: input.script,
-          apiKey: keys.openaiApiKey,
-          voice: voice.openaiTtsVoice,
-          ttsModel: voice.openaiTtsModel,
-          language: input.language,
-          refresh: false,
-          ttsProvider: voice.ttsProvider,
-          elevenLabsVoiceId: lockedElevenLabsVoiceId,
-          elevenLabsModelId: voice.elevenLabsModelId,
-          elevenLabsPublicOwnerId: voice.elevenLabsPublicOwnerId,
-          elevenLabsOriginalVoiceId: voice.elevenLabsOriginalVoiceId,
-          elevenLabsVoiceName: voice.elevenLabsVoiceName,
-          dashscopeApiKey: keys.runpodApiKey,
-          runpodApiKey: keys.runpodApiKey,
-          runpodEndpointId: settings.runpodEndpointId,
-          genmaxApiKey: keys.genmaxApiKey,
-          genmaxBackend: voice.genmaxBackend,
-          genmaxVoiceId: voice.genmaxVoiceId,
-          genmaxModelId: voice.genmaxModelId,
-          qwenTtsVoice: voice.qwenTtsVoice,
-          qwenTtsModel: voice.qwenTtsModel,
-          qwenLanguageType: voice.qwenLanguageType,
-          qwenRegion: voice.qwenRegion,
-          qwenSpeedPreset: voice.qwenSpeedPreset,
-          qwenInstruct: voice.qwenInstruct,
-        });
-    const audioPath = narration.audioPath;
-    const srtPath = narration.srtPath;
-    let script = narration.script;
-    const durations = narration.durations;
-    persistScript(meta.id, script);
 
     if (isJobStopRequested()) {
       updateProjectStatus(meta.id, 'draft', { hasVideo: false, lastError: '' });
@@ -1036,7 +1092,7 @@ export async function runGenerateJob(input: GenerateJobInput): Promise<GenerateJ
       updateProjectStatus(meta.id, 'ready', { hasVideo: false, lastError: '' });
       emitProgress({
         phase: 'done',
-        message: `Đã tạo voiceover ${formatDurationLabel(narration.rawAudioDuration)} — sang bước Media khi sẵn sàng.`,
+        message: `Đã tạo voiceover ${formatDurationLabel(rawAudioDuration)} — sang bước Media khi sẵn sàng.`,
         percent: 100,
         detailPercent: 100,
       });
@@ -1055,15 +1111,16 @@ export async function runGenerateJob(input: GenerateJobInput): Promise<GenerateJ
 
     emitProgress({
       phase: 'whisper',
-      message:
-        `Voiceover ${formatDurationLabel(narration.rawAudioDuration)} (mục tiêu ${formatDurationLabel(targetRuntimeSec)}) — ` +
-        (voice.ttsProvider === 'elevenlabs'
-          ? `khớp ${script.scenes.length} scene theo timestamp ElevenLabs.`
-          : voice.ttsProvider === 'qwen'
-            ? `khớp ${script.scenes.length} scene theo timestamp Qwen/Whisper.`
-            : voice.ttsProvider === 'genmax'
-              ? `khớp ${script.scenes.length} scene theo GenMax TTS.`
-              : `khớp ${script.scenes.length} scene theo timestamp Whisper.`),
+      message: isMusicAnimation
+        ? `Nhạc ${formatDurationLabel(rawAudioDuration)} — tạo ${script.scenes.length} scene Snapgen theo beat.`
+        : `Voiceover ${formatDurationLabel(rawAudioDuration)} (mục tiêu ${formatDurationLabel(targetRuntimeSec)}) — ` +
+          (voice.ttsProvider === 'elevenlabs'
+            ? `khớp ${script.scenes.length} scene theo timestamp ElevenLabs.`
+            : voice.ttsProvider === 'qwen'
+              ? `khớp ${script.scenes.length} scene theo timestamp Qwen/Whisper.`
+              : voice.ttsProvider === 'genmax'
+                ? `khớp ${script.scenes.length} scene theo GenMax TTS.`
+                : `khớp ${script.scenes.length} scene theo timestamp Whisper.`),
       percent: 12,
     });
 

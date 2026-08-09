@@ -6,6 +6,7 @@ import {
   planNarrationTtsChunks,
   type NarrationChunkPlan,
 } from '../../shared/narration-chunks';
+import { clampGenmaxSpeed } from '../../shared/voice';
 import { concatAudioFiles, convertAudioToMp3, getDurationSafe } from './ffmpeg';
 import {
   buildContinuousNarrationText,
@@ -349,10 +350,12 @@ async function synthesizeOneChunk(options: {
   backend: GenmaxBackend;
   modelId: string;
   languageCode: string;
+  speed?: number;
   outPath: string;
   exportTranscript?: boolean;
   onProgress?: (status: string, progress: number) => void;
 }): Promise<{ srtPath?: string }> {
+  const speed = clampGenmaxSpeed(options.speed, options.backend);
   const body: Record<string, unknown> = {
     text: options.text,
     provider: options.backend,
@@ -361,16 +364,16 @@ async function synthesizeOneChunk(options: {
   };
   if (options.backend === 'capcut') {
     body.model_id = 'capcut';
-    body.voice_settings = { speed: 1.0, pitch: 0 };
+    body.voice_settings = { speed, pitch: 0 };
   } else if (options.backend === 'minimax') {
     body.model_id = options.modelId || 'speech-2.8-turbo';
-    body.voice_settings = { speed: 1.0, pitch: 0, vol: 1.0 };
+    body.voice_settings = { speed, pitch: 0, vol: 1.0 };
   } else {
     body.model_id = options.modelId || DEFAULT_GENMAX_MODEL_ID;
     body.voice_settings = {
       stability: 0.5,
       similarity_boost: 0.75,
-      speed: 1.0,
+      speed,
     };
   }
 
@@ -420,6 +423,7 @@ export async function synthesizeWithGenmax(options: {
   backend?: GenmaxBackend;
   modelId?: string;
   language?: string;
+  speed?: number;
   outDir: string;
   fileName?: string;
   exportTranscript?: boolean;
@@ -440,6 +444,7 @@ export async function synthesizeWithGenmax(options: {
         ? 'capcut'
         : DEFAULT_GENMAX_MODEL_ID);
   const languageCode = resolveGenmaxLanguageCode(backend, options.language);
+  const speed = clampGenmaxSpeed(options.speed, backend);
   const chunkPlans: NarrationChunkPlan[] = planNarrationTtsChunks({
     scenes: options.scenes,
     text: trimmed,
@@ -476,6 +481,7 @@ export async function synthesizeWithGenmax(options: {
         backend,
         modelId,
         languageCode,
+        speed,
         outPath: partPath,
         exportTranscript: Boolean(options.exportTranscript) && chunks.length === 1,
         onProgress: (status, progress) => {
@@ -540,6 +546,7 @@ export async function synthesizeContinuousNarrationWithGenmax(options: {
   backend?: GenmaxBackend;
   modelId?: string;
   language?: string;
+  speed?: number;
   outDir: string;
   fileName?: string;
   onProgress?: (info: GenmaxTtsProgress) => void;
@@ -561,6 +568,7 @@ export async function synthesizeContinuousNarrationWithGenmax(options: {
     backend: options.backend,
     modelId: options.modelId,
     language: options.language,
+    speed: options.speed,
     outDir: options.outDir,
     fileName: options.fileName,
     onProgress: options.onProgress,
@@ -587,6 +595,7 @@ export async function previewGenmaxVoice(options: {
   backend?: GenmaxBackend;
   modelId?: string;
   language?: string;
+  speed?: number;
 }): Promise<{ dataUrl: string }> {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'snapgen-genmax-'));
   try {
@@ -597,6 +606,7 @@ export async function previewGenmaxVoice(options: {
       backend: options.backend,
       modelId: options.modelId,
       language: options.language || 'en',
+      speed: options.speed,
       outDir: tmpDir,
       fileName: 'preview.mp3',
     });

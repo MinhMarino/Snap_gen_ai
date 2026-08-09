@@ -3,7 +3,11 @@ import fs from 'node:fs';
 import path from 'node:path';
 import type { ApiKeys, AppSettings } from '../shared/types';
 import { DEFAULT_QWEN_TTS_MODEL, DEFAULT_RUNPOD_ENDPOINT_ID } from '../shared/types';
-import { coerceSelectableTtsProvider, resolveIrodoriSpeedPreset } from '../shared/voice';
+import {
+  clampGenmaxSpeed,
+  coerceSelectableTtsProvider,
+  resolveIrodoriSpeedPreset,
+} from '../shared/voice';
 
 const DEFAULT_KEYS: ApiKeys = {
   snapgenApiKey: '',
@@ -29,6 +33,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   genmaxBackend: 'elevenlabs',
   genmaxVoiceId: 'hpp4J3VqNfWAUOO0d1Us',
   genmaxModelId: 'eleven_flash_v2_5',
+  genmaxSpeed: 1,
   burnSubtitles: false,
   maxConcurrentScenes: 5,
 };
@@ -185,6 +190,10 @@ export function getSettings(): AppSettings {
     genmaxBackend,
     genmaxVoiceId: merged.genmaxVoiceId || DEFAULT_SETTINGS.genmaxVoiceId,
     genmaxModelId: merged.genmaxModelId || DEFAULT_SETTINGS.genmaxModelId,
+    genmaxSpeed: clampGenmaxSpeed(
+      merged.genmaxSpeed ?? DEFAULT_SETTINGS.genmaxSpeed,
+      genmaxBackend
+    ),
     burnSubtitles: Boolean(merged.burnSubtitles),
     lastExportDir: merged.lastExportDir || '',
     maxConcurrentScenes: Math.max(

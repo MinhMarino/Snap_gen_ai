@@ -63,6 +63,7 @@ const api = {
     backend?: GenmaxBackend;
     modelId?: string;
     language?: string;
+    speed?: number;
   }): Promise<{ dataUrl: string }> => ipcRenderer.invoke(IPC.genmaxPreviewVoice, input),
   listGenmaxModels: (input?: {
     backend?: GenmaxBackend;
@@ -133,6 +134,38 @@ const api = {
   },
   generateScript: (input: GenerateIdeaInput): Promise<ScriptDraft> =>
     ipcRenderer.invoke(IPC.generateScript, input),
+  generateMusicAnimationScript: (
+    projectId: string,
+    input?: Partial<{
+      lyricText: string;
+      language: string;
+      musicDurationSec: number;
+      stylePrompt: string;
+      openaiChatModel: string;
+      songTitle: string;
+    }>
+  ): Promise<{ script: ScriptDraft; notes: string }> =>
+    ipcRenderer.invoke(IPC.generateMusicAnimationScript, projectId, input),
+  importMusicAudio: (
+    projectId: string
+  ): Promise<{
+    musicRelativePath: string;
+    audioPath: string;
+    durationSec: number;
+    draft: ProjectDraft;
+  } | null> => ipcRenderer.invoke(IPC.importMusicAudio, projectId),
+  clearMusicAudio: (
+    projectId: string
+  ): Promise<{ removed: string[]; draft: ProjectDraft }> =>
+    ipcRenderer.invoke(IPC.clearMusicAudio, projectId),
+  importMusicCharacters: (
+    projectId: string
+  ): Promise<{ characterRelativePaths: string[]; draft: ProjectDraft } | null> =>
+    ipcRenderer.invoke(IPC.importMusicCharacters, projectId),
+  clearMusicCharacters: (
+    projectId: string
+  ): Promise<{ removed: string[]; draft: ProjectDraft }> =>
+    ipcRenderer.invoke(IPC.clearMusicCharacters, projectId),
   startGenerate: (input: GenerateJobInput): Promise<GenerateJobResult> =>
     ipcRenderer.invoke(IPC.startGenerate, input),
   getActiveJob: (): Promise<ActiveJobSnapshot> => ipcRenderer.invoke(IPC.getActiveJob),

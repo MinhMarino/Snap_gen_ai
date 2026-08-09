@@ -18,7 +18,10 @@ import {
 import type { TtsProvider } from '../../shared/types';
 import {
   buildIrodoriInstruct,
+  clampGenmaxSpeed,
   coerceSelectableTtsProvider,
+  GENMAX_SPEED_PRESETS,
+  genmaxSpeedRange,
   IRODORI_SPEED_PRESETS,
   pickQwenVoiceForLanguage,
   resolveIrodoriSpeedPreset,
@@ -62,6 +65,7 @@ export default function Settings() {
     genmaxBackend: 'elevenlabs',
     genmaxVoiceId: 'hpp4J3VqNfWAUOO0d1Us',
     genmaxModelId: 'eleven_flash_v2_5',
+    genmaxSpeed: 1,
     burnSubtitles: false,
     maxConcurrentScenes: 5,
   });
@@ -704,16 +708,73 @@ export default function Settings() {
             <GenmaxVoicePicker
               backend={settings.genmaxBackend || 'elevenlabs'}
               value={settings.genmaxVoiceId}
+              speed={clampGenmaxSpeed(settings.genmaxSpeed, settings.genmaxBackend)}
               disabled={!keys.genmaxApiKey?.trim()}
-              onBackendChange={(genmaxBackend) => setSettings({ ...settings, genmaxBackend })}
+              onBackendChange={(genmaxBackend) =>
+                setSettings({
+                  ...settings,
+                  genmaxBackend,
+                  genmaxSpeed: clampGenmaxSpeed(settings.genmaxSpeed, genmaxBackend),
+                })
+              }
               onChange={(voice) =>
                 setSettings({
                   ...settings,
                   genmaxVoiceId: voice.voiceId,
                   genmaxBackend: voice.backend,
+                  genmaxSpeed: clampGenmaxSpeed(settings.genmaxSpeed, voice.backend),
                 })
               }
             />
+            <div className="field">
+              <label htmlFor="genmax-speed-default">Tốc độ đọc mặc định</label>
+              <div className="irodori-speed-presets" role="group" aria-label="Preset tốc độ GenMax">
+                {GENMAX_SPEED_PRESETS.map((preset) => {
+                  const active =
+                    Math.abs(
+                      clampGenmaxSpeed(settings.genmaxSpeed, settings.genmaxBackend) -
+                        preset.value
+                    ) < 0.01;
+                  return (
+                    <button
+                      key={preset.id}
+                      type="button"
+                      className={`irodori-speed-btn ${active ? 'active' : ''}`}
+                      onClick={() =>
+                        setSettings({
+                          ...settings,
+                          genmaxSpeed: clampGenmaxSpeed(preset.value, settings.genmaxBackend),
+                        })
+                      }
+                    >
+                      {preset.label}
+                    </button>
+                  );
+                })}
+              </div>
+              <div className="genmax-speed-slider">
+                <input
+                  id="genmax-speed-default"
+                  type="range"
+                  min={genmaxSpeedRange(settings.genmaxBackend).min}
+                  max={genmaxSpeedRange(settings.genmaxBackend).max}
+                  step={genmaxSpeedRange(settings.genmaxBackend).step}
+                  value={clampGenmaxSpeed(settings.genmaxSpeed, settings.genmaxBackend)}
+                  onChange={(e) =>
+                    setSettings({
+                      ...settings,
+                      genmaxSpeed: clampGenmaxSpeed(
+                        Number(e.target.value),
+                        settings.genmaxBackend
+                      ),
+                    })
+                  }
+                />
+                <strong>
+                  {clampGenmaxSpeed(settings.genmaxSpeed, settings.genmaxBackend).toFixed(2)}×
+                </strong>
+              </div>
+            </div>
             <div className="field">
               <label htmlFor="genmax-model-default">Model mặc định</label>
               <input

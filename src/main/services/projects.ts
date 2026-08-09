@@ -19,6 +19,7 @@ import type {
   VideoFamily,
   ImageFamily,
 } from '../../shared/types';
+import { resolveProjectKind } from '../../shared/types';
 import { DEFAULT_DURATION_PER_SCENE, defaultFamilyForKind, defaultModelIdForKind, getModelById } from '../../shared/models';
 import { resolveProjectChatModel, resolveProjectVoice, projectDraftHasVoice } from '../../shared/voice';
 
@@ -98,6 +99,7 @@ function readDraft(id: string): ProjectDraft | null {
     const voice = resolveProjectVoice(raw, getSettings());
     const settings = getSettings();
     const draft: ProjectDraft = {
+      projectKind: resolveProjectKind(raw.projectKind),
       brief: raw.brief ?? '',
       language: raw.language ?? 'Tiếng Việt',
       sceneCount,
@@ -113,6 +115,12 @@ function readDraft(id: string): ProjectDraft | null {
       stylePrompt: raw.stylePrompt ?? '',
       openaiChatModel: resolveProjectChatModel(raw.openaiChatModel, settings.openaiModel),
       outputFormat: raw.outputFormat,
+      lyricText: String(raw.lyricText || ''),
+      musicRelativePath: raw.musicRelativePath?.trim() || undefined,
+      characterRelativePaths: Array.isArray(raw.characterRelativePaths)
+        ? raw.characterRelativePaths.map(String).filter(Boolean)
+        : [],
+      musicStoryNotes: String(raw.musicStoryNotes || ''),
       ...voice,
     };
     // Dự án cũ chưa có voice / chat model → snapshot vào draft một lần.
@@ -245,6 +253,7 @@ export function createProject(input: CreateProjectInput): ProjectMeta {
 
   const id = uniqueId(name);
   const ts = nowIso();
+  const projectKind = resolveProjectKind(input.projectKind);
   const mediaKind: MediaKind = input.mediaKind ?? 'video';
   const defaultModel = getModelById(defaultModelIdForKind(mediaKind));
   const meta: ProjectMeta = {
@@ -253,6 +262,7 @@ export function createProject(input: CreateProjectInput): ProjectMeta {
     createdAt: ts,
     updatedAt: ts,
     status: 'draft',
+    projectKind,
     brief: input.brief ?? '',
     language: input.language ?? 'Tiếng Việt',
     family: input.family ?? defaultFamilyForKind(mediaKind),
@@ -266,13 +276,18 @@ export function createProject(input: CreateProjectInput): ProjectMeta {
       (input.sceneCount ?? 3) * DEFAULT_DURATION_PER_SCENE,
     hasVideo: false,
     mediaKind,
-    stylePrompt: input.stylePrompt ?? '',
+    stylePrompt:
+      input.stylePrompt ??
+      (projectKind === 'music-animation'
+        ? 'Animated music video, cinematic anime/illustration style, lip-sync friendly staging, vivid colors'
+        : ''),
   };
 
   writeMeta(meta);
   const settings = getSettings();
   const voice = resolveProjectVoice(input, settings);
   writeDraft(id, {
+    projectKind,
     brief: meta.brief ?? '',
     language: meta.language ?? 'Tiếng Việt',
     sceneCount: meta.sceneCount ?? 3,
@@ -286,6 +301,9 @@ export function createProject(input: CreateProjectInput): ProjectMeta {
     mediaKind,
     stylePrompt: meta.stylePrompt ?? '',
     openaiChatModel: resolveProjectChatModel(input.openaiChatModel, settings.openaiModel),
+    lyricText: '',
+    characterRelativePaths: [],
+    musicStoryNotes: '',
     ...voice,
   });
 
@@ -321,6 +339,7 @@ export function saveProjectDraft(
   writeDraft(id, draft);
   meta = {
     ...meta,
+    projectKind: resolveProjectKind(draft.projectKind ?? meta.projectKind),
     brief: draft.brief,
     language: draft.language,
     sceneCount: draft.sceneCount,

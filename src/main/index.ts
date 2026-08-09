@@ -16,13 +16,23 @@ import type {
 } from '../shared/types';
 import { ensureGenmaxApiKey, getKeys, getSettings, saveKeys, saveSettings } from './store';
 import { testAccount } from './services/snapgen';
-import { generateScript, testOpenAI } from './services/openai';
+import { generateMusicAnimationScript, generateScript, testOpenAI } from './services/openai';
 import {
   clearProjectNarration,
   importExternalNarration,
   remuxProject,
   runGenerateJob,
 } from './services/pipeline';
+import {
+  clearMusicAudio,
+  clearMusicCharacters,
+  importMusicAudio,
+  importMusicCharacters,
+  loadCharacterDataUrls,
+  resolveMusicAudioPath,
+} from './services/music-project';
+import { getDurationSafe } from './services/ffmpeg';
+import type { GenerateMusicAnimationScriptInput } from '../shared/types';
 import {
   clearElevenLabsSession,
   getElevenLabsSessionStatus,
@@ -163,7 +173,13 @@ function registerIpc(): void {
     IPC.genmaxPreviewVoice,
     async (
       _e,
-      input: { voiceId: string; backend?: GenmaxBackend; modelId?: string; language?: string }
+      input: {
+        voiceId: string;
+        backend?: GenmaxBackend;
+        modelId?: string;
+        language?: string;
+        speed?: number;
+      }
     ) => {
       const key = getKeys().genmaxApiKey;
       if (!key?.trim()) throw new Error('Chưa có GenMax API key.');
@@ -174,6 +190,7 @@ function registerIpc(): void {
         backend: resolveGenmaxBackend(input.backend || settings.genmaxBackend),
         modelId: input.modelId || settings.genmaxModelId,
         language: input.language,
+        speed: input.speed ?? settings.genmaxSpeed,
       });
     }
   );
@@ -266,6 +283,92 @@ function registerIpc(): void {
       (input.openaiChatModel || '').trim() || settings.openaiModel || 'gpt-4o-mini';
     return generateScript(keys.openaiApiKey, chatModel, input);
   });
+
+  ipcMain.handle(
+    IPC.generateMusicAnimationScript,
+    async (_e, projectId: string, input?: Partial<GenerateMusicAnimationScriptInput>) => {
+      const keys = getKeys();
+      const settings = getSettings();
+      if (!keys.openaiApiKey) throw new Error('Thiếu OpenAI API key.');
+      const detail = getProject(projectId);
+      const draft = detail.draft;
+      if (!draft) throw new Error('Dự án chưa có draft.');
+      const lyricText = String(input?.lyricText ?? draft.lyricText ?? '').trim();
+      if (!lyricText) throw new Error('Chưa có lyric / script lời bài hát.');
+      const musicPath = resolveMusicAudioPath(projectId);
+      if (!musicPath) throw new Error('Chưa tải file nhạc. Import audio trước.');
+      const musicDurationSec =
+        input?.musicDurationSec && input.musicDurationSec > 0
+          ? input.musicDurationSec
+          : await getDurationSafe(musicPath, draft.targetDurationSec || 60);
+      const chatModel =
+        (input?.openaiChatModel || draft.openaiChatModel || '').trim() ||
+        settings.openaiModel ||
+        'gpt-4o-mini';
+      const images = loadCharacterDataUrls(projectId);
+      const result = await generateMusicAnimationScript(
+        keys.openaiApiKey,
+        chatModel,
+        {
+          lyricText,
+          language: input?.language || draft.language || 'Tiếng Việt',
+          musicDurationSec,
+          family: input?.family || draft.family,
+          model: input?.model || draft.model,
+          aspectRatio: input?.aspectRatio || draft.aspectRatio,
+          resolution: input?.resolution || draft.resolution,
+          mediaKind: input?.mediaKind || draft.mediaKind || 'video',
+          stylePrompt: input?.stylePrompt ?? draft.stylePrompt,
+          openaiChatModel: chatModel,
+          characterBrief: input?.characterBrief,
+          songTitle: input?.songTitle || detail.meta.name,
+        },
+        images
+      );
+      saveProjectDraft(projectId, {
+        ...draft,
+        projectKind: 'music-animation',
+        lyricText,
+        script: result.script,
+        sceneCount: result.script.scenes.length,
+        targetDurationSec: Math.round(musicDurationSec),
+        musicStoryNotes: result.notes,
+      });
+      return result;
+    }
+  );
+
+  ipcMain.handle(IPC.importMusicAudio, async (_e, projectId: string) => {
+    const pick = await dialog.showOpenDialog(mainWindow!, {
+      title: 'Chọn file nhạc / audio bài hát',
+      properties: ['openFile'],
+      filters: [
+        { name: 'Audio', extensions: ['mp3', 'wav', 'm4a', 'aac', 'ogg', 'flac', 'webm'] },
+        { name: 'All files', extensions: ['*'] },
+      ],
+    });
+    if (pick.canceled || !pick.filePaths[0]) return null;
+    return importMusicAudio({ projectId, sourcePath: pick.filePaths[0] });
+  });
+
+  ipcMain.handle(IPC.clearMusicAudio, (_e, projectId: string) => clearMusicAudio(projectId));
+
+  ipcMain.handle(IPC.importMusicCharacters, async (_e, projectId: string) => {
+    const pick = await dialog.showOpenDialog(mainWindow!, {
+      title: 'Chọn ảnh nhân vật (optional)',
+      properties: ['openFile', 'multiSelections'],
+      filters: [
+        { name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'webp'] },
+        { name: 'All files', extensions: ['*'] },
+      ],
+    });
+    if (pick.canceled || !pick.filePaths.length) return null;
+    return importMusicCharacters({ projectId, sourcePaths: pick.filePaths });
+  });
+
+  ipcMain.handle(IPC.clearMusicCharacters, (_e, projectId: string) =>
+    clearMusicCharacters(projectId)
+  );
 
   ipcMain.handle(IPC.startGenerate, async (_e, input: GenerateJobInput) => {
     if (isJobActive()) throw new Error('Đang có job chạy. Đợi hoàn tất.');

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
-import type { ProjectMeta } from '../../shared/types';
+import type { ProjectKind, ProjectMeta } from '../../shared/types';
+import { resolveProjectKind } from '../../shared/types';
 
 interface Props {
   onOpenProject: (id: string) => void;
@@ -13,9 +14,15 @@ const STATUS_LABEL: Record<string, string> = {
   error: 'Lỗi',
 };
 
+const KIND_LABEL: Record<ProjectKind, string> = {
+  standard: 'Thường',
+  'music-animation': 'Nhạc hoạt hình',
+};
+
 export default function Projects({ onOpenProject, onCreateAndOpen }: Props) {
   const [projects, setProjects] = useState<ProjectMeta[]>([]);
   const [newName, setNewName] = useState('');
+  const [newKind, setNewKind] = useState<ProjectKind>('standard');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [renamingId, setRenamingId] = useState<string | null>(null);
@@ -68,7 +75,10 @@ export default function Projects({ onOpenProject, onCreateAndOpen }: Props) {
     setBusy(true);
     setError(null);
     try {
-      const meta = await window.studio.createProject({ name: newName.trim() });
+      const meta = await window.studio.createProject({
+        name: newName.trim(),
+        projectKind: newKind,
+      });
       setNewName('');
       await refresh();
       onCreateAndOpen(meta.id);
@@ -133,6 +143,17 @@ export default function Projects({ onOpenProject, onCreateAndOpen }: Props) {
             }}
           />
         </div>
+        <div className="field" style={{ width: 200, marginBottom: 0 }}>
+          <label htmlFor="new-project-kind">Loại dự án</label>
+          <select
+            id="new-project-kind"
+            value={newKind}
+            onChange={(e) => setNewKind(resolveProjectKind(e.target.value))}
+          >
+            <option value="standard">Bình thường</option>
+            <option value="music-animation">Video hoạt hình nhạc</option>
+          </select>
+        </div>
         <button type="button" className="btn primary" disabled={busy} onClick={() => void create()}>
           Tạo &amp; mở
         </button>
@@ -166,6 +187,8 @@ export default function Projects({ onOpenProject, onCreateAndOpen }: Props) {
                           ? `Đang gen ${Math.round(livePercent)}%`
                           : STATUS_LABEL[p.status] ?? p.status}
                       </span>
+                      {' · '}
+                      {KIND_LABEL[resolveProjectKind(p.projectKind)]}
                       {' · '}
                       {p.model ?? '—'}
                       {' · '}

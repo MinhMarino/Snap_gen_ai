@@ -62,6 +62,38 @@ export function coerceSelectableTtsProvider(provider: TtsProvider): TtsProvider 
   return provider;
 }
 
+export const GENMAX_SPEED_PRESETS = [
+  { id: 'slow', label: 'Chậm', value: 0.85 },
+  { id: 'normal', label: 'Vừa', value: 1 },
+  { id: 'fast', label: 'Nhanh', value: 1.1 },
+  { id: 'faster', label: 'Rất nhanh', value: 1.2 },
+] as const;
+
+/** Clamp tốc độ theo provider GenMax. */
+export function clampGenmaxSpeed(
+  speed: unknown,
+  backend?: ProjectVoiceSettings['genmaxBackend'] | null
+): number {
+  const n = typeof speed === 'number' ? speed : Number(speed);
+  const v = Number.isFinite(n) ? n : 1;
+  const rounded = Math.round(v * 100) / 100;
+  if (backend === 'minimax' || backend === 'capcut') {
+    return Math.min(2, Math.max(0.5, rounded));
+  }
+  return Math.min(1.2, Math.max(0.7, rounded));
+}
+
+export function genmaxSpeedRange(backend?: ProjectVoiceSettings['genmaxBackend'] | null): {
+  min: number;
+  max: number;
+  step: number;
+} {
+  if (backend === 'minimax' || backend === 'capcut') {
+    return { min: 0.5, max: 2, step: 0.05 };
+  }
+  return { min: 0.7, max: 1.2, step: 0.05 };
+}
+
 export const DEFAULT_PROJECT_VOICE: ProjectVoiceSettings = {
   ttsProvider: 'genmax',
   openaiTtsModel: 'gpt-4o-mini-tts',
@@ -77,6 +109,7 @@ export const DEFAULT_PROJECT_VOICE: ProjectVoiceSettings = {
   genmaxBackend: 'elevenlabs',
   genmaxVoiceId: 'hpp4J3VqNfWAUOO0d1Us',
   genmaxModelId: 'eleven_flash_v2_5',
+  genmaxSpeed: 1,
 };
 
 export function projectDraftHasVoice(
@@ -126,9 +159,14 @@ export function resolveProjectVoice(
     ),
     genmaxVoiceId: defaults?.genmaxVoiceId || DEFAULT_PROJECT_VOICE.genmaxVoiceId,
     genmaxModelId: defaults?.genmaxModelId || DEFAULT_PROJECT_VOICE.genmaxModelId,
+    genmaxSpeed: clampGenmaxSpeed(
+      defaults?.genmaxSpeed ?? DEFAULT_PROJECT_VOICE.genmaxSpeed,
+      defaults?.genmaxBackend || DEFAULT_PROJECT_VOICE.genmaxBackend
+    ),
   };
   if (!projectDraftHasVoice(partial)) return base;
   const qwenLanguageType = partial!.qwenLanguageType || base.qwenLanguageType;
+  const genmaxBackend = resolveGenmaxBackendField(partial!.genmaxBackend ?? base.genmaxBackend);
   return {
     ttsProvider: coerceSelectableTtsProvider(
       isTtsProvider(partial!.ttsProvider) ? partial!.ttsProvider : base.ttsProvider
@@ -154,10 +192,14 @@ export function resolveProjectVoice(
       partial!.qwenInstruct !== undefined
         ? String(partial!.qwenInstruct || '').trim()
         : base.qwenInstruct,
-    genmaxBackend: resolveGenmaxBackendField(partial!.genmaxBackend ?? base.genmaxBackend),
+    genmaxBackend,
     genmaxVoiceId: partial!.genmaxVoiceId || base.genmaxVoiceId,
     genmaxModelId: partial!.genmaxModelId || base.genmaxModelId,
     genmaxVoiceName: partial!.genmaxVoiceName?.trim() || undefined,
+    genmaxSpeed: clampGenmaxSpeed(
+      partial!.genmaxSpeed ?? base.genmaxSpeed,
+      genmaxBackend
+    ),
   };
 }
 

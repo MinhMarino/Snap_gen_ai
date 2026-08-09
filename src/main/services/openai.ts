@@ -1,14 +1,18 @@
-import type { GenerateIdeaInput, SceneDraft, SceneSection, ScriptDraft } from '../../shared/types';
+import type {
+  GenerateIdeaInput,
+  GenerateMusicAnimationScriptInput,
+  SceneDraft,
+  SceneSection,
+  ScriptDraft,
+} from '../../shared/types';
 import {
   assertNarrationCoversTarget,
   countSpokenBudgetUnits,
   estimateScriptSpokenSeconds,
   estimateSpokenSeconds,
-  familySupportsExtend,
   findScenesWithShortNarration,
   formatDurationLabel,
   isCjkLanguage,
-  maxSingleShotDuration,
   MAX_SCENE_BEAT_SEC,
   mergeUndersizedScenes,
   MIN_NARRATION_COVERAGE,
@@ -21,11 +25,15 @@ import {
   WORDS_PER_SECOND,
 } from '../../shared/models';
 
-/** Chunk ~50s (~125 từ) — dễ viết đủ lời hơn chunk dài. */
-const CHAPTER_CHUNK_SEC = 50;
-const MAX_COMPLETION_TOKENS = 16384;
-/** Số lần nối tiếp lời thoại khi chapter còn thiếu từ. */
-const MAX_NARRATION_CONTINUATIONS = 6;
+/** Chunk lớn hơn → ít API call hơn (TPM-friendly). */
+const CHAPTER_CHUNK_SEC = 90;
+const MAX_COMPLETION_TOKENS = 8192;
+/** Continuations khi chapter thiếu từ — giữ thấp để tránh cháy TPM. */
+const MAX_NARRATION_CONTINUATIONS = 2;
+/** Retry khi OpenAI 429 / TPM. */
+const MAX_RATE_LIMIT_RETRIES = 6;
+/** Nghỉ giữa các chapter call để không đụng TPM 30k. */
+const INTER_CALL_DELAY_MS = 1500;
 
 interface ChapterOutline {
   name: string;
@@ -151,49 +159,92 @@ function needsBeatSplit(scenes: SceneDraft[]): boolean {
   );
 }
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** Parse "Please try again in 5.48s" / HTTP 429 → ms chờ. */
+function parseRateLimitWaitMs(message: string, status?: number): number | null {
+  const m = message.match(/try again in ([\d.]+)\s*s/i);
+  if (m) return Math.ceil(parseFloat(m[1]) * 1000) + 400;
+  if (status === 429 || /rate limit|tokens per min|TPM|RPM/i.test(message)) {
+    return 8000;
+  }
+  return null;
+}
+
 async function chatJson<T>(options: {
   apiKey: string;
   model: string;
   system: string;
   user: string;
   temperature?: number;
+  /** Giới hạn completion — thấp hơn = ít cháy TPM hơn. */
+  maxTokens?: number;
 }): Promise<T> {
-  const res = await fetch('https://api.openai.com/v1/chat/completions', {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${options.apiKey}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      model: options.model,
-      temperature: options.temperature ?? 0.7,
-      max_tokens: MAX_COMPLETION_TOKENS,
-      response_format: { type: 'json_object' },
-      messages: [
-        { role: 'system', content: options.system },
-        { role: 'user', content: options.user },
-      ],
-    }),
-  });
+  const maxTokens = Math.min(
+    MAX_COMPLETION_TOKENS,
+    Math.max(256, options.maxTokens ?? 4096)
+  );
+  let lastErr: unknown;
 
-  const data = (await res.json()) as {
-    choices?: Array<{ message?: { content?: string }; finish_reason?: string }>;
-    error?: { message?: string };
-  };
+  for (let attempt = 1; attempt <= MAX_RATE_LIMIT_RETRIES; attempt++) {
+    try {
+      const res = await fetch('https://api.openai.com/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${options.apiKey}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          model: options.model,
+          temperature: options.temperature ?? 0.7,
+          max_tokens: maxTokens,
+          response_format: { type: 'json_object' },
+          messages: [
+            { role: 'system', content: options.system },
+            { role: 'user', content: options.user },
+          ],
+        }),
+      });
 
-  if (!res.ok) {
-    throw new Error(data.error?.message || `OpenAI error HTTP ${res.status}`);
+      const data = (await res.json()) as {
+        choices?: Array<{ message?: { content?: string }; finish_reason?: string }>;
+        error?: { message?: string };
+      };
+
+      if (!res.ok) {
+        const msg = data.error?.message || `OpenAI error HTTP ${res.status}`;
+        const wait = parseRateLimitWaitMs(msg, res.status);
+        if (wait != null && attempt < MAX_RATE_LIMIT_RETRIES) {
+          await sleep(wait);
+          continue;
+        }
+        throw new Error(msg);
+      }
+
+      const content = data.choices?.[0]?.message?.content;
+      if (!content) throw new Error('OpenAI returned empty content.');
+      if (data.choices?.[0]?.finish_reason === 'length') {
+        throw new Error(
+          'OpenAI cắt response vì quá dài (finish_reason=length). Thử model lớn hơn hoặc rút ngắn thời lượng.'
+        );
+      }
+
+      return extractJson(content) as T;
+    } catch (err) {
+      lastErr = err;
+      const msg = err instanceof Error ? err.message : String(err);
+      const wait = parseRateLimitWaitMs(msg);
+      if (wait != null && attempt < MAX_RATE_LIMIT_RETRIES) {
+        await sleep(wait);
+        continue;
+      }
+      throw err;
+    }
   }
 
-  const content = data.choices?.[0]?.message?.content;
-  if (!content) throw new Error('OpenAI returned empty content.');
-  if (data.choices?.[0]?.finish_reason === 'length') {
-    throw new Error(
-      'OpenAI cắt response vì quá dài (finish_reason=length). Thử model lớn hơn hoặc rút ngắn thời lượng.'
-    );
-  }
-
-  return extractJson(content) as T;
+  throw lastErr instanceof Error ? lastErr : new Error(String(lastErr));
 }
 
 function defaultChapterPlan(targetDurationSec: number): ChapterOutline[] {
@@ -372,57 +423,30 @@ function splitNarrationFallback(
 
 /**
  * Tạo script theo Chapter → Scene.
- * Mỗi chapter: viết narration văn xuôi đủ từ trước → mới tách scene (tránh caption ngắn trong JSON).
+ * Tối ưu TPM: ít call hơn (bỏ AI split), chapter lớn hơn, retry 429, delay giữa call.
  */
 export async function generateScript(
   apiKey: string,
   openaiModel: string,
   input: GenerateIdeaInput
 ): Promise<ScriptDraft> {
-  const isImage = input.mediaKind === 'image';
   const plan = planScenesFromDuration(input.targetDurationSec);
   const targetDurationSec = plan.targetDurationSec;
-  const maxShot =
-    input.maxShotSec ?? maxSingleShotDuration(input.model) ?? plan.typicalBeatSec;
-  const canExtend = !isImage && familySupportsExtend(String(input.family));
   const totalBudget = spokenBudgetForDurationSec(targetDurationSec, input.language);
+  const styleHint = input.stylePrompt?.trim()
+    ? `Style: ${input.stylePrompt.trim()}`
+    : '';
 
-  const styleLine = input.stylePrompt?.trim()
-    ? `- Global visual style (MUST apply to every visual_prompt): ${input.stylePrompt.trim()}`
-    : '- Keep visual continuity across scenes.';
+  // —— Phase 1: outline (bỏ qua nếu video ngắn — dùng plan local) ——
+  let title =
+    input.brief.trim().split(/\n/)[0]?.slice(0, 80).trim() || 'Untitled Video';
+  let chapters: ChapterOutline[];
 
-  const localeHint = resolveVisualLocaleHint(input.language);
-  const languageLock = resolveVisualLanguageLock(input.language);
-  const visualRule = isImage
-    ? '- visual_prompt: ONE detailed still frame (not a collage). Rich enough for an image model to render without guessing.'
-    : '- visual_prompt: ONE detailed primary shot/action per scene. Hard cut between scenes. Rich enough for image/video models.';
-
-  const sharedRules = `Language for narration: ${input.language}
-${visualRule}
-${styleLine}
-VISUAL FIDELITY (critical — image/video must match the script AND the selected Language):
-- Write visual_prompt in clear English (best for image models), but the CONTENT must always follow Language "${input.language}".
-- visual_prompt MUST depict the SAME people/objects/places as narration_segment: age, gender, role, ethnicity/nationality, clothing, setting, action.
-- Selected language "${input.language}" locks culture AND on-image text.${localeHint ? ` Locale rule: ${localeHint}.` : ''}
-- ${languageLock}
-- Every visual_prompt must explicitly mention the selected language/culture (e.g. Japanese setting / Vietnamese characters) so image models cannot drift to another language.
-- Example: narration about an elderly Japanese person → "Elderly Japanese man/woman …" in a Japanese setting with Japanese-only text if any — NEVER a young Western character or English/Chinese signs.
-- Do NOT invent a different character, age, or culture than the spoken content.
-VISUAL DETAIL (mandatory — avoid short vague prompts like "a person in a city"):
-- Length: about 45–90 English words (2–4 concrete sentences). Pack specifics, not fluff.
-- Subject: exact age range, gender, ethnicity matching Language, facial expression, pose/gesture, clothing materials/colors, hair.
-- Environment: specific place (street type, room, landscape), time of day, weather if relevant, background props tied to the narration.
-- Light & camera: lighting direction/quality (soft window light, neon night, overcast…), camera framing (extreme close-up / medium / wide), angle (eye-level, low, high), shallow or deep depth of field.
-- Mood & palette: atmosphere + dominant colors that fit the beat (warm amber, cool steel, muted earth…).
-- Keep ONE coherent composition; no multi-panel, no text dump of the full narration.
-- Each scene = ONE main idea OR ONE primary visual (~${MIN_SCENE_BEAT_SEC}–${MAX_SCENE_BEAT_SEC}s spoken, ideal ~${plan.typicalBeatSec}s).
-- duration_hint ≈ spoken length of narration_segment (~${WORDS_PER_SECOND} words/sec).
-- Narration is continuous voiceover across scenes; write full host sentences, not captions.
-${isImage ? '' : `- Model max shot / extend chunk: ${maxShot}s (${canExtend ? 'extend ok' : 'multi-cut'})`}
-Media: ${input.mediaKind} · ${input.family}/${input.model} · ${input.aspectRatio} · ${input.resolution}`;
-
-  // —— Phase 1: outline chapters ——
-  const outlineSystem = `You plan a ${formatDurationLabel(targetDurationSec)} video script outline.
+  const skipOutlineApi = targetDurationSec <= 240;
+  if (skipOutlineApi) {
+    chapters = defaultChapterPlan(targetDurationSec);
+  } else {
+    const outlineSystem = `You plan a ${formatDurationLabel(targetDurationSec)} video script outline.
 Return ONLY JSON:
 {
   "title": string,
@@ -432,30 +456,34 @@ Return ONLY JSON:
 }
 Rules:
 - Sum of targetSec MUST equal ${targetDurationSec}.
-- Prefer chapters of ~${CHAPTER_CHUNK_SEC}s (range 40–60s). For listicles, each list item can be its own chapter.
+- Prefer chapters of ~${CHAPTER_CHUNK_SEC}s (range 70–110s). For listicles, each list item can be its own chapter.
 - Must include introduction, body (one or more), conclusion.
 - Do NOT write full narration yet — only chapter plan.`;
 
-  let title = 'Untitled Video';
-  let chapters: ChapterOutline[];
-  try {
-    const outline = await chatJson<{ title?: string; chapters?: Array<Partial<ChapterOutline>> }>({
-      apiKey,
-      model: openaiModel,
-      system: outlineSystem,
-      user: `Brief / topic: ${input.brief}
+    try {
+      const outline = await chatJson<{
+        title?: string;
+        chapters?: Array<Partial<ChapterOutline>>;
+      }>({
+        apiKey,
+        model: openaiModel,
+        system: outlineSystem,
+        user: `Brief / topic: ${input.brief}
 
 Plan chapters for a ${targetDurationSec}s (${formatDurationLabel(targetDurationSec)}) video (~${totalBudget.amount} ${totalBudget.unitLabel} of speech).
-${input.stylePrompt?.trim() ? `Style: ${input.stylePrompt.trim()}` : ''}`,
-      temperature: 0.6,
-    });
-    title = String(outline.title || '').trim() || title;
-    chapters = normalizeOutline(outline.chapters, targetDurationSec);
-  } catch {
-    chapters = defaultChapterPlan(targetDurationSec);
+${styleHint}`,
+        temperature: 0.5,
+        maxTokens: 900,
+      });
+      title = String(outline.title || '').trim() || title;
+      chapters = normalizeOutline(outline.chapters, targetDurationSec);
+    } catch {
+      chapters = defaultChapterPlan(targetDurationSec);
+    }
+    await sleep(INTER_CALL_DELAY_MS);
   }
 
-  // —— Phase 2a: narration văn xuôi đủ từ ——
+  // —— Phase 2: narration per chapter → split scenes local (không gọi AI split) ——
   const writeNarrationSystem = `You write spoken voiceover for ONE video chapter.
 Return ONLY JSON: { "narration": string } OR { "continuation": string }
 Language: ${input.language}
@@ -466,14 +494,20 @@ Do NOT summarize. Aim for the exact word budget.`;
   const chapterNarrations: Array<{ chapter: ChapterOutline; narration: string }> = [];
 
   for (let i = 0; i < chapters.length; i++) {
+    if (i > 0) await sleep(INTER_CALL_DELAY_MS);
+
     const chapter = chapters[i];
     const budget = spokenBudgetForDurationSec(chapter.targetSec, input.language);
     const minUnits = Math.round(budget.amount * MIN_NARRATION_COVERAGE);
     const minSec = chapter.targetSec * MIN_NARRATION_COVERAGE;
     const prevContext =
       previousNarrationTail.length > 0
-        ? `Continue smoothly after this ending (do not repeat):\n"""${previousNarrationTail[previousNarrationTail.length - 1].slice(-400)}"""`
+        ? `Continue smoothly after this ending (do not repeat):\n"""${previousNarrationTail[previousNarrationTail.length - 1].slice(-280)}"""`
         : 'This is the opening of the video.';
+    const chapterMaxTokens = Math.min(
+      MAX_COMPLETION_TOKENS,
+      Math.max(900, Math.round(chapter.targetSec * 28))
+    );
 
     let narration = '';
     for (let attempt = 1; attempt <= MAX_NARRATION_CONTINUATIONS; attempt++) {
@@ -482,13 +516,16 @@ Do NOT summarize. Aim for the exact word budget.`;
       if (spokenSec >= minSec && haveUnits >= minUnits * 0.7) break;
       const needMore = Math.max(0, minUnits - haveUnits);
 
+      if (attempt > 1) await sleep(INTER_CALL_DELAY_MS);
+
       if (!narration) {
         const parsed = await chatJson<{ narration?: string }>({
           apiKey,
           model: openaiModel,
           system: writeNarrationSystem,
           user: `Video title: ${title}
-Brief: ${input.brief}
+Brief: ${input.brief.slice(0, 1200)}
+${styleHint}
 
 Chapter ${i + 1}/${chapters.length}: "${chapter.name}" (${chapter.section})
 Summary: ${chapter.summary}
@@ -500,6 +537,7 @@ ${prevContext}
 
 Return JSON: { "narration": "<full spoken script for this chapter only>" }`,
           temperature: 0.75,
+          maxTokens: chapterMaxTokens,
         });
         narration = String(parsed.narration || '').trim();
       } else {
@@ -510,11 +548,12 @@ Return JSON: { "narration": "<full spoken script for this chapter only>" }`,
           user: `Chapter "${chapter.name}" is TOO SHORT: ~${formatDurationLabel(spokenSec)} / ${chapter.targetSec}s (${haveUnits}/${minUnits} ${budget.unitLabel}).
 
 Already written (keep all of it, then CONTINUE):
-"""${narration}"""
+"""${narration.slice(-1800)}"""
 
 Return JSON: { "continuation": "<only the NEW sentences to append, add ~${needMore} ${budget.unitLabel}>" }
 Do not restart. Do not summarize the previous text.`,
           temperature: 0.8,
+          maxTokens: Math.min(2048, chapterMaxTokens),
         });
         const extra = String(parsed.continuation || parsed.narration || '').trim();
         if (extra) {
@@ -543,81 +582,34 @@ Do not restart. Do not summarize the previous text.`,
     previousNarrationTail.push(narration);
   }
 
-  // —— Phase 2b: tách narration → scenes ——
-  const splitSystem = `You split ONE chapter's voiceover into visual scenes.
-Return ONLY JSON:
-{
-  "scenes": [
-    {
-      "id": string,
-      "section": "introduction"|"body"|"conclusion",
-      "chapter": string,
-      "visual_prompt": string,
-      "narration_segment": string,
-      "duration_hint": number
-    }
-  ]
-}
-${sharedRules}
-CRITICAL: Concatenating all narration_segment MUST preserve the given narration (same words, same order). Do NOT shorten. Slice at natural beats (~${MIN_SCENE_BEAT_SEC}–${MAX_SCENE_BEAT_SEC}s each).`;
-
   const allScenes: SceneDraft[] = [];
-
   for (const { chapter, narration } of chapterNarrations) {
-    const sceneHint = Math.max(3, Math.round(chapter.targetSec / plan.typicalBeatSec));
-    let chapterScenes: SceneDraft[] = [];
-    try {
-      const parsed = await chatJson<{ scenes?: SceneDraft[] }>({
-        apiKey,
-        model: openaiModel,
-        system: splitSystem,
-        user: `Chapter "${chapter.name}" · section=${chapter.section} · ~${sceneHint} scenes
-Language setting (LOCKED for all visuals): ${input.language}${localeHint ? `\nLocale for visuals: ${localeHint}` : ''}
-Language lock: ${languageLock}
-Full narration to split (preserve EVERY word across segments):
-"""${narration}"""
-
-For EACH scene: write a DETAILED visual_prompt (45–90 English words) that mirrors THAT narration_segment — subject (age/gender/expression/clothing), environment, lighting, camera framing/angle, mood/palette — AND stays inside Language "${input.language}" only (no other-language text in the image). Do NOT write short one-liners. All scenes.chapter="${chapter.name}", scenes.section="${chapter.section}".`,
-        temperature: 0.4,
-      });
-      chapterScenes = mapRawScenes(parsed.scenes || []).map((s) => ({
-        ...s,
-        chapter: chapter.name,
-        section: chapter.section,
-      }));
-    } catch {
-      chapterScenes = [];
-    }
-
-    const joined = chapterScenes.map((s) => s.narration_segment || '').join(' ').trim();
-    const srcSec = estimateSpokenSeconds(narration, 0);
-    const outSec = estimateSpokenSeconds(joined, 0);
-    if (!chapterScenes.length || outSec < srcSec * 0.85) {
-      chapterScenes = splitNarrationFallback(
-        narration,
-        chapter,
-        plan.typicalBeatSec,
-        input.language
-      );
-    }
-
+    let chapterScenes = splitNarrationFallback(
+      narration,
+      chapter,
+      plan.typicalBeatSec,
+      input.language
+    );
     if (needsBeatSplit(chapterScenes)) {
-      const full = chapterScenes.map((s) => s.narration_segment).join(' ') || narration;
       chapterScenes = splitNarrationFallback(
-        full,
+        chapterScenes.map((s) => s.narration_segment).join(' ') || narration,
         chapter,
         plan.typicalBeatSec,
         input.language
       );
     }
-
     allScenes.push(...chapterScenes);
   }
 
   let draft = finalizeDraft({ title, narration: '', scenes: allScenes }, targetDurationSec);
 
-  // —— Phase 3: nếu tổng vẫn thiếu → nối lời vào body chapters đến khi đủ ——
-  for (let fill = 1; fill <= 4 && needsNarrationExpansion(draft.scenes, targetDurationSec); fill++) {
+  // —— Phase 3: fill thiếu (tối đa 2 lần, rebuild scene local) ——
+  for (
+    let fill = 1;
+    fill <= 2 && needsNarrationExpansion(draft.scenes, targetDurationSec);
+    fill++
+  ) {
+    await sleep(INTER_CALL_DELAY_MS);
     const spoken = estimateScriptSpokenSeconds(draft.scenes);
     const deficitSec = Math.max(15, targetDurationSec - spoken);
     const deficitBudget = spokenBudgetForDurationSec(deficitSec, input.language);
@@ -632,14 +624,15 @@ For EACH scene: write a DETAILED visual_prompt (45–90 English words) that mirr
       apiKey,
       model: openaiModel,
       system: writeNarrationSystem,
-        user: `The full video is still short (~${formatDurationLabel(spoken)} / ${formatDurationLabel(targetDurationSec)}). Add ≥ ${deficitBudget.amount} ${deficitBudget.unitLabel} of spoken content (~${Math.round(deficitSec)}s).
+      user: `The full video is still short (~${formatDurationLabel(spoken)} / ${formatDurationLabel(targetDurationSec)}). Add ≥ ${deficitBudget.amount} ${deficitBudget.unitLabel} of spoken content (~${Math.round(deficitSec)}s).
 
 Chapter: ${targetChapter.chapter.name}
-Existing:
-"""${targetChapter.narration}"""
+Existing (tail):
+"""${targetChapter.narration.slice(-1600)}"""
 
 Return { "continuation": "<new sentences only, ≥ ${deficitBudget.amount} ${deficitBudget.unitLabel}>" }`,
       temperature: 0.85,
+      maxTokens: Math.min(2048, Math.max(600, Math.round(deficitSec * 28))),
     });
     const extra = String(parsed.continuation || '').trim();
     if (!extra) continue;
@@ -717,6 +710,7 @@ Rules:
     apiKey,
     model: openaiModel,
     system,
+    maxTokens: Math.min(MAX_COMPLETION_TOKENS, Math.max(1500, Math.round(target * 45))),
     user: `Target voiceover: ${target}s (${formatDurationLabel(target)})
 Measured TTS audio: ${actual.toFixed(2)}s (${formatDurationLabel(actual)})
 Relative error: ${(((actual - target) / target) * 100).toFixed(1)}%
@@ -730,4 +724,193 @@ Return the FULL rewritten JSON.`,
   });
 
   return finalizeDraft(rewritten, target);
+}
+
+async function chatJsonWithImages<T>(options: {
+  apiKey: string;
+  model: string;
+  system: string;
+  userText: string;
+  images?: Array<{ dataUrl: string; name?: string }>;
+  temperature?: number;
+  maxTokens?: number;
+}): Promise<T> {
+  const content: Array<Record<string, unknown>> = [{ type: 'text', text: options.userText }];
+  for (const img of options.images || []) {
+    content.push({
+      type: 'image_url',
+      image_url: { url: img.dataUrl },
+    });
+  }
+  const maxTokens = Math.min(
+    MAX_COMPLETION_TOKENS,
+    Math.max(256, options.maxTokens ?? 4096)
+  );
+  let lastErr: unknown;
+
+  for (let attempt = 1; attempt <= MAX_RATE_LIMIT_RETRIES; attempt++) {
+    try {
+      const res = await fetch('https://api.openai.com/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${options.apiKey}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          model: options.model,
+          temperature: options.temperature ?? 0.65,
+          max_tokens: maxTokens,
+          response_format: { type: 'json_object' },
+          messages: [
+            { role: 'system', content: options.system },
+            { role: 'user', content },
+          ],
+        }),
+      });
+      const data = (await res.json()) as {
+        choices?: Array<{ message?: { content?: string }; finish_reason?: string }>;
+        error?: { message?: string };
+      };
+      if (!res.ok) {
+        const msg = data.error?.message || `OpenAI error HTTP ${res.status}`;
+        const wait = parseRateLimitWaitMs(msg, res.status);
+        if (wait != null && attempt < MAX_RATE_LIMIT_RETRIES) {
+          await sleep(wait);
+          continue;
+        }
+        throw new Error(msg);
+      }
+      const text = data.choices?.[0]?.message?.content;
+      if (!text) throw new Error('OpenAI returned empty content.');
+      return extractJson(text) as T;
+    } catch (err) {
+      lastErr = err;
+      const msg = err instanceof Error ? err.message : String(err);
+      const wait = parseRateLimitWaitMs(msg);
+      if (wait != null && attempt < MAX_RATE_LIMIT_RETRIES) {
+        await sleep(wait);
+        continue;
+      }
+      throw err;
+    }
+  }
+
+  throw lastErr instanceof Error ? lastErr : new Error(String(lastErr));
+}
+
+/**
+ * Phân tích lyric + độ dài nhạc → kịch bản phân cảnh cho video hoạt hình nhạc.
+ * narration_segment = lyric/beat lines cho scene; visual_prompt = shot Snapgen.
+ */
+export async function generateMusicAnimationScript(
+  apiKey: string,
+  openaiModel: string,
+  input: GenerateMusicAnimationScriptInput,
+  characterImages?: Array<{ dataUrl: string; name?: string }>
+): Promise<{ script: ScriptDraft; notes: string }> {
+  const musicSec = Math.max(8, Math.round(input.musicDurationSec || 60));
+  const styleLine = input.stylePrompt?.trim()
+    ? `Global animated style (apply every visual_prompt): ${input.stylePrompt.trim()}`
+    : 'Animated music video look (anime/illustration cinematic), vivid, beat-synced staging.';
+  const characterLine = input.characterBrief?.trim()
+    ? `Character continuity: ${input.characterBrief.trim()}`
+    : characterImages?.length
+      ? 'Character continuity: match the uploaded character reference image(s) consistently across scenes.'
+      : 'Characters may be original if none uploaded — keep cast consistent across scenes.';
+
+  const system = `You are a music-video storyboard director for AI video generation (Snapgen).
+Return ONLY JSON:
+{
+  "title": string,
+  "notes": string,
+  "scenes": [
+    {
+      "id": string,
+      "chapter": string,
+      "section": "introduction"|"body"|"conclusion",
+      "duration_hint": number,
+      "narration_segment": string,
+      "visual_prompt": string
+    }
+  ]
+}
+Rules:
+- Total of duration_hint MUST equal ${musicSec} (±2s ok). Prefer beats of ${MIN_SCENE_BEAT_SEC}–${MAX_SCENE_BEAT_SEC}s.
+- narration_segment = the lyric lines / vocal phrases that play during that scene (language: ${input.language}). Keep lyric wording faithful; you may lightly punctuate.
+- visual_prompt = ONE detailed animated shot in English (45–90 words): subject, action synced to lyric mood, environment, camera, lighting, palette. Hard-cut friendly. No multi-panel.
+- Sync energy: slow/emotional lines → intimate slow camera; chorus → wider motion / stronger color.
+- ${styleLine}
+- ${characterLine}
+- section: intro/body/outro structure across the song.
+- Media: ${input.mediaKind} · ${input.family}/${input.model} · ${input.aspectRatio} · ${input.resolution}`;
+
+  const userText = `Song duration: ${musicSec}s (${formatDurationLabel(musicSec)})
+Language / lyric language: ${input.language}
+${input.songTitle ? `Title hint: ${input.songTitle}` : ''}
+
+LYRICS / SCRIPT:
+"""
+${input.lyricText.trim()}
+"""
+
+Plan an animated music-video storyboard that fits the song length exactly.`;
+
+  const model = openaiModel.trim() || 'gpt-4o-mini';
+  const raw =
+    characterImages && characterImages.length
+      ? await chatJsonWithImages<{
+          title?: string;
+          notes?: string;
+          scenes?: Array<Partial<SceneDraft>>;
+        }>({
+          apiKey,
+          model,
+          system,
+          userText,
+          images: characterImages,
+          temperature: 0.65,
+          maxTokens: Math.min(MAX_COMPLETION_TOKENS, Math.max(2000, Math.round(musicSec * 40))),
+        })
+      : await chatJson<{
+          title?: string;
+          notes?: string;
+          scenes?: Array<Partial<SceneDraft>>;
+        }>({
+          apiKey,
+          model,
+          system,
+          user: userText,
+          temperature: 0.65,
+          maxTokens: Math.min(MAX_COMPLETION_TOKENS, Math.max(2000, Math.round(musicSec * 40))),
+        });
+
+  const scenes: SceneDraft[] = (raw.scenes || [])
+    .map((s, i) => ({
+      id: String(s.id || `m${i + 1}`).trim() || `m${i + 1}`,
+      visual_prompt: String(s.visual_prompt || '').trim(),
+      narration_segment: String(s.narration_segment || '').trim(),
+      duration_hint: Math.max(2, Number(s.duration_hint) || 6),
+      section: normalizeSection(s.section) || (i === 0 ? 'introduction' : 'body'),
+      chapter: normalizeChapter(s.chapter) || `Beat ${i + 1}`,
+    }))
+    .filter((s) => s.visual_prompt || s.narration_segment);
+
+  if (!scenes.length) {
+    throw new Error('ChatGPT không trả về scene nào từ lyric.');
+  }
+
+  const draft = finalizeDraft(
+    {
+      title: String(raw.title || input.songTitle || 'Music Animation').trim() || 'Music Animation',
+      narration: scenes.map((s) => s.narration_segment).join('\n'),
+      scenes: assignSections(scenes),
+    },
+    musicSec,
+    { requireStructure: false }
+  );
+
+  return {
+    script: draft,
+    notes: String(raw.notes || '').trim(),
+  };
 }

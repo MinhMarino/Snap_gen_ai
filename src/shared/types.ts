@@ -1,6 +1,16 @@
 export type MediaKind = 'video' | 'image';
+/** standard = script→voice→media→merge; music-animation = nhạc+lyric→phân cảnh→Snapgen→ghép nhạc */
+export type ProjectKind = 'standard' | 'music-animation';
 export type VideoFamily = 'veo' | 'sora' | 'grok' | 'seedance' | 'kling' | 'meta';
 export type ImageFamily = 'gpt-image' | 'grok-image' | 'snapgen-image';
+
+export function isProjectKind(value: unknown): value is ProjectKind {
+  return value === 'standard' || value === 'music-animation';
+}
+
+export function resolveProjectKind(value: unknown): ProjectKind {
+  return isProjectKind(value) ? value : 'standard';
+}
 
 export interface ModelOption {
   id: string;
@@ -64,6 +74,8 @@ export interface AppSettings {
   genmaxBackend: GenmaxBackend;
   genmaxVoiceId: string;
   genmaxModelId: string;
+  /** Tốc độ đọc GenMax (ElevenLabs 0.7–1.2; MiniMax/CapCut 0.5–2.0). */
+  genmaxSpeed: number;
   burnSubtitles: boolean;
   lastExportDir?: string;
   /** Số scene Snapgen generate song song (worker pool). Mặc định 5. */
@@ -91,6 +103,8 @@ export interface ProjectVoiceSettings {
   genmaxVoiceId: string;
   genmaxModelId: string;
   genmaxVoiceName?: string;
+  /** Tốc độ đọc GenMax (ElevenLabs 0.7–1.2; MiniMax/CapCut 0.5–2.0). */
+  genmaxSpeed: number;
 }
 
 export interface GenmaxVoice {
@@ -188,6 +202,24 @@ export interface GenerateIdeaInput {
   openaiChatModel?: string;
 }
 
+/** Input phân tích lyric → kịch bản phân cảnh (music-animation). */
+export interface GenerateMusicAnimationScriptInput {
+  lyricText: string;
+  language: string;
+  /** Độ dài audio nhạc (giây) — tổng duration_hint các scene ≈ giá trị này. */
+  musicDurationSec: number;
+  family: VideoFamily | ImageFamily;
+  model: string;
+  aspectRatio: string;
+  resolution: string;
+  mediaKind: MediaKind;
+  stylePrompt?: string;
+  openaiChatModel?: string;
+  /** Mô tả nhân vật (từ user hoặc vision). */
+  characterBrief?: string;
+  songTitle?: string;
+}
+
 export type ProjectStatus = 'draft' | 'generating' | 'ready' | 'error';
 
 export interface ProjectMeta {
@@ -196,6 +228,8 @@ export interface ProjectMeta {
   createdAt: string;
   updatedAt: string;
   status: ProjectStatus;
+  /** Loại dự án — mặc định standard nếu thiếu (dự án cũ). */
+  projectKind?: ProjectKind;
   brief?: string;
   language?: string;
   family?: VideoFamily | ImageFamily;
@@ -213,6 +247,8 @@ export interface ProjectMeta {
 }
 
 export interface ProjectDraft {
+  /** Loại dự án — standard | music-animation */
+  projectKind?: ProjectKind;
   brief: string;
   language: string;
   sceneCount: number;
@@ -228,6 +264,14 @@ export interface ProjectDraft {
   stylePrompt: string;
   /** Model ChatGPT viết kịch bản — theo từng dự án. */
   openaiChatModel: string;
+  /** music-animation: lời bài hát / lyric script. */
+  lyricText?: string;
+  /** music-animation: đường dẫn tương đối trong project (vd. music/source.mp3). */
+  musicRelativePath?: string;
+  /** music-animation: danh sách file nhân vật (vd. characters/char-0.png). */
+  characterRelativePaths?: string[];
+  /** music-animation: ghi chú phân tích từ ChatGPT (optional). */
+  musicStoryNotes?: string;
   /**
    * Output Format UI (youtube, tiktok, …).
    * API vẫn dùng `aspectRatio`; field này chỉ để nhớ preset khi nhiều format cùng ratio.
@@ -252,6 +296,7 @@ export interface ProjectDraft {
   genmaxVoiceId: string;
   genmaxModelId: string;
   genmaxVoiceName?: string;
+  genmaxSpeed?: number;
 }
 
 export interface SceneMediaAsset {
@@ -274,6 +319,7 @@ export interface ProjectDetail {
 
 export interface CreateProjectInput {
   name: string;
+  projectKind?: ProjectKind;
   brief?: string;
   language?: string;
   sceneCount?: number;
@@ -301,6 +347,7 @@ export interface CreateProjectInput {
   genmaxVoiceId?: string;
   genmaxModelId?: string;
   genmaxVoiceName?: string;
+  genmaxSpeed?: number;
 }
 
 export interface GenerateJobInput {
@@ -352,6 +399,7 @@ export interface GenerateJobInput {
   genmaxVoiceId?: string;
   genmaxModelId?: string;
   genmaxVoiceName?: string;
+  genmaxSpeed?: number;
 }
 
 export type JobPhase =

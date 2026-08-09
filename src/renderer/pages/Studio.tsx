@@ -7,10 +7,12 @@ import type {
   JobProgress,
   MediaKind,
   ModelOption,
+  ProjectKind,
   SceneMediaAsset,
   ScriptDraft,
   VideoFamily,
 } from '../../shared/types';
+import { resolveProjectKind } from '../../shared/types';
 import {
   defaultFamilyForKind,
   defaultModelIdForKind,
@@ -26,6 +28,9 @@ import ModelPicker from '../components/ModelPicker';
 import Timeline from '../components/Timeline';
 import ExportDialog, { buildExportableScenes } from '../components/ExportDialog';
 import GenerateScenesDialog from '../components/GenerateScenesDialog';
+import MusicAnimationPanel, {
+  type MusicWorkflowStep,
+} from '../components/MusicAnimationPanel';
 import ProjectVoicePanel from '../components/ProjectVoicePanel';
 import StepActivityUI, {
   createLogLine,
@@ -77,6 +82,29 @@ const WORKFLOW_STEPS: Array<{
   { id: 'media', step: 3, icon: '3', label: 'Tạo ảnh/video', short: 'Media' },
   { id: 'merge', step: 4, icon: '4', label: 'Ghép Final', short: 'Ghép' },
 ];
+
+/** music-animation: map lại 4 bước lên cùng WorkflowStep id. */
+const MUSIC_WORKFLOW_STEPS: Array<{
+  id: WorkflowStep;
+  step: number;
+  icon: string;
+  label: string;
+  short: string;
+  musicStep: MusicWorkflowStep;
+}> = [
+  { id: 'script', step: 1, icon: '1', label: 'Input nhạc', short: 'Nhạc', musicStep: 'input' },
+  { id: 'voice', step: 2, icon: '2', label: 'Phân cảnh AI', short: 'Phân cảnh', musicStep: 'storyboard' },
+  { id: 'media', step: 3, icon: '3', label: 'Tạo video', short: 'Media', musicStep: 'media' },
+  { id: 'merge', step: 4, icon: '4', label: 'Ghép nhạc', short: 'Ghép', musicStep: 'merge' },
+];
+
+function workflowStepToMusic(step: WorkflowStep): MusicWorkflowStep {
+  return MUSIC_WORKFLOW_STEPS.find((s) => s.id === step)?.musicStep || 'input';
+}
+
+function musicStepToWorkflow(step: MusicWorkflowStep): WorkflowStep {
+  return MUSIC_WORKFLOW_STEPS.find((s) => s.musicStep === step)?.id || 'script';
+}
 
 function toFileUrl(filePath: string): string {
   return toLocalMediaUrl(filePath);
@@ -138,7 +166,15 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
   const [narrationPlaying, setNarrationPlaying] = useState(false);
   const narrationAudioRef = useRef<HTMLAudioElement | null>(null);
   const [voice, setVoice] = useState<ProjectVoiceSettings>({ ...DEFAULT_PROJECT_VOICE });
+  const [projectKind, setProjectKind] = useState<ProjectKind>('standard');
+  const [lyricText, setLyricText] = useState('');
+  const [musicRelativePath, setMusicRelativePath] = useState<string | undefined>();
+  const [characterRelativePaths, setCharacterRelativePaths] = useState<string[]>([]);
+  const [musicStoryNotes, setMusicStoryNotes] = useState('');
+  const [musicDurationSec, setMusicDurationSec] = useState<number | null>(null);
   const [activity, setActivity] = useState<StepActivityState | null>(null);
+  const isMusicAnimation = projectKind === 'music-animation';
+  const railSteps = isMusicAnimation ? MUSIC_WORKFLOW_STEPS : WORKFLOW_STEPS;
   const remuxTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const remuxRunning = useRef(false);
   const remuxPending = useRef<ScriptDraft | null>(null);
@@ -530,7 +566,22 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
           setOpenaiChatModel(
             resolveProjectChatModel(draft.openaiChatModel, undefined)
           );
-          if (draft.script) {
+          const kind = resolveProjectKind(draft.projectKind ?? detail.meta.projectKind);
+          setProjectKind(kind);
+          setLyricText(draft.lyricText || '');
+          setMusicRelativePath(draft.musicRelativePath);
+          setCharacterRelativePaths(draft.characterRelativePaths || []);
+          setMusicStoryNotes(draft.musicStoryNotes || '');
+          if (kind === 'music-animation' && detail.audioPath) {
+            // duration sẽ cập nhật khi import; ước từ draft nếu có
+            setMusicDurationSec(draft.targetDurationSec || null);
+          }
+          if (kind === 'music-animation') {
+            if (!detail.audioPath || !(draft.lyricText || '').trim()) setActiveStep('script');
+            else if (!draft.script?.scenes.length) setActiveStep('voice');
+            else if (!detail.sceneMedia.every((a) => a.exists)) setActiveStep('media');
+            else setActiveStep('merge');
+          } else if (draft.script) {
             if (!detail.audioPath) setActiveStep('voice');
             else if (!detail.sceneMedia.every((a) => a.exists)) setActiveStep('media');
             else setActiveStep('merge');
@@ -659,10 +710,14 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
     nextScript: ScriptDraft | null = script,
     voiceOverride?: ProjectVoiceSettings
   ) => ({
+    projectKind,
     brief,
     language,
     sceneCount: nextScript?.scenes.length ?? scenePlan.sceneCountHint,
-    targetDurationSec: scenePlan.targetDurationSec,
+    targetDurationSec:
+      isMusicAnimation && musicDurationSec && musicDurationSec > 0
+        ? Math.round(musicDurationSec)
+        : scenePlan.targetDurationSec,
     family: family as VideoFamily | ImageFamily,
     model: modelId,
     aspectRatio,
@@ -673,6 +728,10 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
     mediaKind,
     stylePrompt,
     openaiChatModel,
+    lyricText,
+    musicRelativePath,
+    characterRelativePaths,
+    musicStoryNotes,
     ...(voiceOverride ?? voice),
   });
 
@@ -689,6 +748,7 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
     // Chưa có dự án: tạo ngay để gắn giọng, tránh mất khi thoát Studio.
     const meta = await window.studio.createProject({
       name,
+      projectKind,
       brief,
       language,
       sceneCount: scenePlan.sceneCountHint,
@@ -722,6 +782,7 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
     }
     const meta = await window.studio.createProject({
       name,
+      projectKind,
       brief,
       language,
       sceneCount: scenePlan.sceneCountHint,
@@ -767,6 +828,7 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
     }
     const meta = await window.studio.createProject({
       name,
+      projectKind,
       brief,
       language,
       sceneCount: scenePlan.sceneCountHint,
@@ -1371,8 +1433,13 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
   };
 
   const mediaLabel = mediaKind === 'image' ? 'ảnh' : 'video';
-  const step1Done = Boolean(script?.scenes.length);
-  const step2Done = Boolean(hasNarration || resolvedNarrationPath);
+  const musicInputDone = Boolean(
+    (hasNarration || resolvedNarrationPath || musicRelativePath) && lyricText.trim()
+  );
+  const step1Done = isMusicAnimation ? musicInputDone : Boolean(script?.scenes.length);
+  const step2Done = isMusicAnimation
+    ? Boolean(script?.scenes.length)
+    : Boolean(hasNarration || resolvedNarrationPath);
   const step3Done = allScenesHaveMedia;
   const step4Done = Boolean(result?.videoPath) && !timelineDirty;
   const stepDone: Record<WorkflowStep, boolean> = {
@@ -1380,6 +1447,77 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
     voice: step2Done,
     media: step3Done,
     merge: step4Done,
+  };
+
+  const persistMusicDraft = async (patch?: {
+    lyricText?: string;
+    musicRelativePath?: string | undefined;
+    characterRelativePaths?: string[];
+    musicStoryNotes?: string;
+  }) => {
+    if (patch?.lyricText !== undefined) setLyricText(patch.lyricText);
+    if (patch && 'musicRelativePath' in patch) setMusicRelativePath(patch.musicRelativePath);
+    if (patch?.characterRelativePaths) setCharacterRelativePaths(patch.characterRelativePaths);
+    if (patch?.musicStoryNotes !== undefined) setMusicStoryNotes(patch.musicStoryNotes);
+    const id = await ensureProject();
+    await window.studio.saveProjectDraft(id, {
+      ...draftPayload(script),
+      lyricText: patch?.lyricText ?? lyricText,
+      musicRelativePath:
+        patch && 'musicRelativePath' in patch ? patch.musicRelativePath : musicRelativePath,
+      characterRelativePaths: patch?.characterRelativePaths ?? characterRelativePaths,
+      musicStoryNotes: patch?.musicStoryNotes ?? musicStoryNotes,
+      projectKind: 'music-animation',
+    });
+    return id;
+  };
+
+  const runMusicImportAudio = async () => {
+    try {
+      const id = await ensureProject();
+      const result = await window.studio.importMusicAudio(id);
+      if (!result) return;
+      setMusicRelativePath(result.musicRelativePath);
+      setMusicDurationSec(result.durationSec || null);
+      setHasNarration(true);
+      setNarrationPath(result.audioPath);
+      setProjectKind('music-animation');
+      setToast({ type: 'ok', text: `Đã import nhạc (~${Math.round(result.durationSec)}s).` });
+    } catch (err) {
+      setToast({ type: 'error', text: err instanceof Error ? err.message : String(err) });
+    }
+  };
+
+  const runMusicAnalyze = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      const id = await persistMusicDraft({ lyricText });
+      startActivity({
+        stepId: 'script',
+        title: 'Phân tích lyric',
+        blurb: 'ChatGPT lập storyboard theo beat nhạc.',
+        firstLog: 'Đang gửi lyric + độ dài nhạc…',
+      });
+      const result = await window.studio.generateMusicAnimationScript(id, {
+        lyricText,
+        language,
+        stylePrompt,
+        openaiChatModel,
+        songTitle: projectName,
+      });
+      setScript(result.script);
+      setMusicStoryNotes(result.notes || '');
+      pushActivityLog(`Đã tạo ${result.script.scenes.length} scene.`, 'ok');
+      finishActivity(true, 'Phân cảnh xong');
+      setActiveStep('voice');
+      setToast({ type: 'ok', text: `Đã phân cảnh ${result.script.scenes.length} shot.` });
+    } catch (err) {
+      finishActivity(false, err instanceof Error ? err.message : String(err));
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
   };
   const missingMediaIds =
     script?.scenes
@@ -1391,6 +1529,63 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
       .map((scene) => scene.id) ?? [];
 
   const renderLeftPanel = () => {
+    if (isMusicAnimation) {
+      return (
+        <MusicAnimationPanel
+          step={workflowStepToMusic(activeStep)}
+          draft={{
+            ...draftPayload(script),
+            lyricText,
+            musicRelativePath,
+            characterRelativePaths,
+            musicStoryNotes,
+            projectKind: 'music-animation',
+          }}
+          script={script}
+          audioPath={resolvedNarrationPath || narrationPath}
+          musicDurationSec={musicDurationSec}
+          step3Done={step3Done}
+          step4Done={step4Done}
+          busy={busy}
+          onLyricChange={(v) => {
+            setLyricText(v);
+            void persistMusicDraft({ lyricText: v }).catch(() => undefined);
+          }}
+          onImportMusic={() => void runMusicImportAudio()}
+          onClearMusic={() => {
+            void (async () => {
+              const id = await ensureProject();
+              await window.studio.clearMusicAudio(id);
+              setMusicRelativePath(undefined);
+              setMusicDurationSec(null);
+              setHasNarration(false);
+              setNarrationPath(null);
+            })();
+          }}
+          onImportCharacters={() => {
+            void (async () => {
+              const id = await ensureProject();
+              const result = await window.studio.importMusicCharacters(id);
+              if (!result) return;
+              setCharacterRelativePaths(result.characterRelativePaths);
+              setToast({ type: 'ok', text: `Đã thêm ${result.characterRelativePaths.length} ảnh nhân vật.` });
+            })();
+          }}
+          onClearCharacters={() => {
+            void (async () => {
+              const id = await ensureProject();
+              await window.studio.clearMusicCharacters(id);
+              setCharacterRelativePaths([]);
+            })();
+          }}
+          onAnalyze={() => void runMusicAnalyze()}
+          onGenerateMedia={() => void runStepAction('media', step3Done ? 'recreate' : 'create')}
+          onMerge={() => void runStepAction('merge', step4Done ? 'recreate' : 'create')}
+          onGoStep={(s) => setActiveStep(musicStepToWorkflow(s))}
+        />
+      );
+    }
+
     if (activeStep === 'script') {
       return (
         <>
@@ -2000,12 +2195,15 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
 
       <div className="editor-workspace">
         <aside className="tool-rail" aria-label="Các bước tạo video">
-          {WORKFLOW_STEPS.map((item) => {
+          {railSteps.map((item) => {
             const done = stepDone[item.id];
-            const locked =
-              (item.id === 'voice' && !step1Done) ||
-              (item.id === 'media' && !step1Done) ||
-              (item.id === 'merge' && (!step2Done || !step3Done));
+            const locked = isMusicAnimation
+              ? (item.id === 'voice' && !musicInputDone) ||
+                (item.id === 'media' && !script?.scenes.length) ||
+                (item.id === 'merge' && (!script?.scenes.length || !step3Done))
+              : (item.id === 'voice' && !step1Done) ||
+                (item.id === 'media' && !step1Done) ||
+                (item.id === 'merge' && (!step2Done || !step3Done));
             return (
               <button
                 type="button"

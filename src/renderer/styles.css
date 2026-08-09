@@ -735,6 +735,26 @@ h2 {
   cursor: not-allowed;
 }
 
+.genmax-speed-slider {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 12px;
+  align-items: center;
+  margin-top: 10px;
+}
+
+.genmax-speed-slider input[type='range'] {
+  width: 100%;
+  accent-color: var(--accent);
+}
+
+.genmax-speed-slider strong {
+  min-width: 3.2em;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+}
+
 .irodori-instruct-input {
   width: 100%;
   box-sizing: border-box;
@@ -1951,6 +1971,7 @@ h2 {
 
 .create-row {
   display: flex;
+  flex-wrap: wrap;
   align-items: flex-end;
   gap: 10px;
   margin-bottom: 22px;
