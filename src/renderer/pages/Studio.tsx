@@ -14,14 +14,20 @@ import type {
 } from '../../shared/types';
 import { resolveProjectKind } from '../../shared/types';
 import {
+  clampTargetSceneCount,
+  DEFAULT_SCENE_DENSITY,
   defaultFamilyForKind,
   defaultModelIdForKind,
   estimateScriptSpokenSeconds,
   formatDurationLabel,
   getModelById,
   maxSingleShotDuration,
+  planSceneChunks,
   planScenesFromDuration,
   resolveModelId,
+  resolveSceneDensity,
+  SCENE_DENSITY_OPTIONS,
+  type SceneDensityId,
 } from '../../shared/models';
 import { toLocalMediaUrl } from '../../shared/media-url';
 import ModelPicker from '../components/ModelPicker';
@@ -62,6 +68,57 @@ function sanitizeDurationMinutes(value: unknown, fallback = DEFAULT_DURATION_MIN
   return n;
 }
 
+/** Popup xác nhận số media sẽ gọi API trước khi gen (tránh gen hàng loạt ngoài ý muốn). */
+function buildMediaGenerateConfirmMessage(options: {
+  mediaKind: MediaKind;
+  script: ScriptDraft;
+  sceneMedia: SceneMediaAsset[];
+  regenerateSceneIds: string[];
+  modelId: string;
+  family: string;
+}): string {
+  const { mediaKind, script, sceneMedia, regenerateSceneIds, modelId, family } = options;
+  const mediaLabel = mediaKind === 'image' ? 'ảnh' : 'video';
+  const total = script.scenes.length;
+  const selected = new Set(regenerateSceneIds);
+  let overwriteCount = 0;
+  for (let i = 0; i < script.scenes.length; i++) {
+    const scene = script.scenes[i];
+    if (!selected.has(scene.id)) continue;
+    const asset = sceneMedia.find((a) => a.sceneId === scene.id) ?? sceneMedia[i];
+    if (asset?.exists) overwriteCount += 1;
+  }
+  const newCount = Math.max(0, regenerateSceneIds.length - overwriteCount);
+  const keepCount = Math.max(0, total - regenerateSceneIds.length);
+
+  let apiCalls = regenerateSceneIds.length;
+  if (mediaKind === 'video') {
+    apiCalls = 0;
+    for (const scene of script.scenes) {
+      if (!selected.has(scene.id)) continue;
+      apiCalls += planSceneChunks(modelId, family, scene.duration_hint).chunks.length;
+    }
+  }
+
+  const lines = [
+    `Xác nhận tạo ${regenerateSceneIds.length} ${mediaLabel} scene` +
+      (mediaKind === 'video' && apiCalls !== regenerateSceneIds.length
+        ? ` (~${apiCalls} shot API).`
+        : '.'),
+    `• Mới: ${newCount}`,
+    `• Ghi đè scene đã có: ${overwriteCount}`,
+    `• Giữ nguyên / không gen: ${keepCount} (tổng ${total} scene)`,
+  ];
+  if (mediaKind === 'image') {
+    lines.push(
+      '',
+      'Ảnh đã có sẽ được loop theo thời lượng scene khi ghép Final — không gen thêm ảnh.'
+    );
+  }
+  lines.push('', 'Tiếp tục?');
+  return lines.join('\n');
+}
+
 type WorkflowStep = 'script' | 'voice' | 'media' | 'merge';
 
 interface Props {
@@ -96,6 +153,18 @@ const MUSIC_WORKFLOW_STEPS: Array<{
   { id: 'voice', step: 2, icon: '2', label: 'Phân cảnh AI', short: 'Phân cảnh', musicStep: 'storyboard' },
   { id: 'media', step: 3, icon: '3', label: 'Tạo video', short: 'Media', musicStep: 'media' },
   { id: 'merge', step: 4, icon: '4', label: 'Ghép nhạc', short: 'Ghép', musicStep: 'merge' },
+];
+
+/** audio-only: chỉ script + TTS (ElevenLabs). */
+const AUDIO_WORKFLOW_STEPS: Array<{
+  id: WorkflowStep;
+  step: number;
+  icon: string;
+  label: string;
+  short: string;
+}> = [
+  { id: 'script', step: 1, icon: '1', label: 'Tạo script', short: 'Script' },
+  { id: 'voice', step: 2, icon: '2', label: 'Tạo audio', short: 'Audio' },
 ];
 
 function workflowStepToMusic(step: WorkflowStep): MusicWorkflowStep {
@@ -138,6 +207,9 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
   const [language, setLanguage] = useState('Tiếng Việt');
   /** Free-text minutes; may be empty while typing. */
   const [durationInput, setDurationInput] = useState(String(DEFAULT_DURATION_MIN));
+  /** dense | normal | economy | custom — kiểm soát số ảnh/video. */
+  const [sceneDensity, setSceneDensity] = useState<SceneDensityId>(DEFAULT_SCENE_DENSITY);
+  const [targetMediaCount, setTargetMediaCount] = useState(20);
   const [aspectRatio, setAspectRatio] = useState('16:9');
   const [outputFormat, setOutputFormat] = useState<OutputFormatId>('youtube');
   const [resolution, setResolution] = useState('720p');
@@ -174,7 +246,12 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
   const [musicDurationSec, setMusicDurationSec] = useState<number | null>(null);
   const [activity, setActivity] = useState<StepActivityState | null>(null);
   const isMusicAnimation = projectKind === 'music-animation';
-  const railSteps = isMusicAnimation ? MUSIC_WORKFLOW_STEPS : WORKFLOW_STEPS;
+  const isAudioOnly = projectKind === 'audio-only';
+  const railSteps = isMusicAnimation
+    ? MUSIC_WORKFLOW_STEPS
+    : isAudioOnly
+      ? AUDIO_WORKFLOW_STEPS
+      : WORKFLOW_STEPS;
   const remuxTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const remuxRunning = useRef(false);
   const remuxPending = useRef<ScriptDraft | null>(null);
@@ -263,10 +340,34 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
       DEFAULT_DURATION_MIN
     );
   }, [durationInput]);
-  const scenePlan = useMemo(
-    () => planScenesFromDuration(targetDurationMin * 60),
-    [targetDurationMin]
+  const densityBeatSec = useMemo(
+    () => SCENE_DENSITY_OPTIONS.find((d) => d.id === sceneDensity)?.beatSec ?? null,
+    [sceneDensity]
   );
+  const scenePlan = useMemo(() => {
+    const durationSec =
+      isMusicAnimation && musicDurationSec && musicDurationSec > 0
+        ? musicDurationSec
+        : targetDurationMin * 60;
+    return planScenesFromDuration(durationSec, {
+      targetSceneCount: sceneDensity === 'custom' ? targetMediaCount : undefined,
+      typicalBeatSec: densityBeatSec ?? undefined,
+      mediaKind,
+    });
+  }, [
+    isMusicAnimation,
+    musicDurationSec,
+    targetDurationMin,
+    sceneDensity,
+    targetMediaCount,
+    densityBeatSec,
+    mediaKind,
+  ]);
+
+  useEffect(() => {
+    if (sceneDensity === 'custom') return;
+    setTargetMediaCount(scenePlan.sceneCountHint);
+  }, [sceneDensity, scenePlan.sceneCountHint]);
   const setTargetDurationMin = (minutes: number) => {
     setDurationInput(String(sanitizeDurationMinutes(minutes)));
   };
@@ -554,6 +655,21 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
           setLanguage(draft.language);
           setTargetDurationMin(minutesFromSeconds(draft.targetDurationSec));
           setMediaKind(draft.mediaKind ?? 'video');
+          {
+            const density = resolveSceneDensity(draft.sceneDensity);
+            setSceneDensity(density);
+            const planned = planScenesFromDuration(draft.targetDurationSec || 60, {
+              targetSceneCount: draft.targetMediaCount,
+              typicalBeatSec:
+                SCENE_DENSITY_OPTIONS.find((d) => d.id === density)?.beatSec ?? undefined,
+              mediaKind: draft.mediaKind ?? 'video',
+            });
+            setTargetMediaCount(
+              draft.targetMediaCount && draft.targetMediaCount > 0
+                ? clampTargetSceneCount(draft.targetDurationSec || 60, draft.targetMediaCount)
+                : planned.sceneCountHint
+            );
+          }
           setFamily(draft.family);
           setModelId(resolveModelId(draft.model));
           setAspectRatio(draft.aspectRatio);
@@ -581,6 +697,9 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
             else if (!draft.script?.scenes.length) setActiveStep('voice');
             else if (!detail.sceneMedia.every((a) => a.exists)) setActiveStep('media');
             else setActiveStep('merge');
+          } else if (kind === 'audio-only') {
+            if (!draft.script?.scenes.length) setActiveStep('script');
+            else setActiveStep('voice');
           } else if (draft.script) {
             if (!detail.audioPath) setActiveStep('voice');
             else if (!detail.sceneMedia.every((a) => a.exists)) setActiveStep('media');
@@ -714,6 +833,13 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
     brief,
     language,
     sceneCount: nextScript?.scenes.length ?? scenePlan.sceneCountHint,
+    targetMediaCount: clampTargetSceneCount(
+      isMusicAnimation && musicDurationSec && musicDurationSec > 0
+        ? musicDurationSec
+        : scenePlan.targetDurationSec,
+      targetMediaCount
+    ),
+    sceneDensity,
     targetDurationSec:
       isMusicAnimation && musicDurationSec && musicDurationSec > 0
         ? Math.round(musicDurationSec)
@@ -1090,13 +1216,18 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
       const id = await ensureProject();
       pushActivityLog(`Dự án sẵn sàng · model ${openaiChatModel}`);
       setActivityPercent(18);
+      const mediaTarget = clampTargetSceneCount(
+        scenePlan.targetDurationSec,
+        scenePlan.sceneCountHint
+      );
       pushActivityLog(
-        `Gọi ChatGPT viết kịch bản (~${formatDurationLabel(scenePlan.targetDurationSec)}, ${language})…`
+        `Gọi ChatGPT viết kịch bản (~${formatDurationLabel(scenePlan.targetDurationSec)}, ~${mediaTarget} ${mediaKind === 'image' ? 'ảnh' : 'video'}, ${language})…`
       );
       const draft = await window.studio.generateScript({
         brief: brief.trim(),
         language,
         targetDurationSec: scenePlan.targetDurationSec,
+        sceneCount: mediaTarget,
         family: family as VideoFamily | ImageFamily,
         model: modelId,
         aspectRatio,
@@ -1107,7 +1238,9 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
         openaiChatModel,
       });
       setActivityPercent(82);
-      pushActivityLog(`Nhận ${draft.scenes.length} scene — đang lưu draft…`);
+      pushActivityLog(
+        `Nhận ${draft.scenes.length} scene (mục tiêu ~${mediaTarget}) — đang lưu draft…`
+      );
       setScript(draft);
       setSelectedScene(0);
       await window.studio.saveProjectDraft(id, draftPayload(draft), {
@@ -1149,6 +1282,11 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
         step: 'audio',
         clearNarrationFirst: mode === 'recreate' || hasNarration,
       });
+      return;
+    }
+    if (isAudioOnly && (step === 'media' || step === 'merge')) {
+      setActiveStep('voice');
+      setError('Dự án chỉ audio — không tạo ảnh/video hay ghép Final.');
       return;
     }
     if (step === 'media') {
@@ -1227,11 +1365,34 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
     clearNarrationFirst?: boolean;
   }) => {
     if (!script || generateRunning.current) return;
+    const step = payload.step || 'media';
+
+    // Xác nhận số lượng trước khi gọi Snapgen (ảnh/video).
+    if (step === 'media') {
+      if (payload.regenerateSceneIds.length === 0) {
+        setToast({
+          type: 'error',
+          text: 'Chưa chọn scene nào để tạo. Dùng «Chọn scene nâng cao…» hoặc chọn scene thiếu.',
+        });
+        return;
+      }
+      const ok = window.confirm(
+        buildMediaGenerateConfirmMessage({
+          mediaKind,
+          script,
+          sceneMedia,
+          regenerateSceneIds: payload.regenerateSceneIds,
+          modelId,
+          family,
+        })
+      );
+      if (!ok) return;
+    }
+
     generateRunning.current = true;
     setBusy(true);
     setError(null);
     setProgress({ phase: 'idle', message: 'Đang chuẩn bị pipeline...', percent: 0 });
-    const step = payload.step || 'media';
     const stepMeta =
       step === 'audio'
         ? {
@@ -1315,7 +1476,9 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
       const mediaLabel = mediaKind === 'image' ? 'ảnh' : 'video';
       const stepToast =
         payload.step === 'audio'
-          ? 'Đã xong bước 1 (audio). Sang bước 2 để tạo ảnh/video.'
+          ? isAudioOnly
+            ? 'Đã xong audio. Mở narration.mp3 trong thư mục dự án khi cần.'
+            : 'Đã xong bước voice. Sang bước Media để tạo ảnh/video.'
           : payload.step === 'remux'
             ? 'Đã ghép lại Final.'
             : payload.step === 'media'
@@ -1336,8 +1499,9 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
               : `Đã generate ${payload.regenerateSceneIds.length} scene.`);
       setToast({ type: 'ok', text: okText });
       finishActivity(true, okText);
-      if (payload.step === 'audio') setActiveStep('media');
-      else if (payload.step === 'media' && !generated.stopped) setActiveStep('merge');
+      if (payload.step === 'audio') {
+        if (!isAudioOnly) setActiveStep('media');
+      } else if (payload.step === 'media' && !generated.stopped) setActiveStep('merge');
       else if (payload.step === 'remux') setActiveStep('merge');
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -1440,8 +1604,10 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
   const step2Done = isMusicAnimation
     ? Boolean(script?.scenes.length)
     : Boolean(hasNarration || resolvedNarrationPath);
-  const step3Done = allScenesHaveMedia;
-  const step4Done = Boolean(result?.videoPath) && !timelineDirty;
+  const step3Done = isAudioOnly ? step2Done : allScenesHaveMedia;
+  const step4Done = isAudioOnly
+    ? step2Done
+    : Boolean(result?.videoPath) && !timelineDirty;
   const stepDone: Record<WorkflowStep, boolean> = {
     script: step1Done,
     voice: step2Done,
@@ -1499,19 +1665,30 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
         blurb: 'ChatGPT lập storyboard theo beat nhạc.',
         firstLog: 'Đang gửi lyric + độ dài nhạc…',
       });
+      const mediaTarget = clampTargetSceneCount(
+        musicDurationSec && musicDurationSec > 0
+          ? musicDurationSec
+          : scenePlan.targetDurationSec,
+        scenePlan.sceneCountHint
+      );
+      pushActivityLog(`Mục tiêu ~${mediaTarget} shot (~${formatDurationLabel(scenePlan.typicalBeatSec)}/scene)…`);
       const result = await window.studio.generateMusicAnimationScript(id, {
         lyricText,
         language,
         stylePrompt,
         openaiChatModel,
         songTitle: projectName,
+        sceneCount: mediaTarget,
       });
       setScript(result.script);
       setMusicStoryNotes(result.notes || '');
-      pushActivityLog(`Đã tạo ${result.script.scenes.length} scene.`, 'ok');
+      pushActivityLog(`Đã tạo ${result.script.scenes.length} scene (mục tiêu ~${mediaTarget}).`, 'ok');
       finishActivity(true, 'Phân cảnh xong');
       setActiveStep('voice');
-      setToast({ type: 'ok', text: `Đã phân cảnh ${result.script.scenes.length} shot.` });
+      setToast({
+        type: 'ok',
+        text: `Đã phân cảnh ${result.script.scenes.length} shot (mục tiêu ~${mediaTarget}).`,
+      });
     } catch (err) {
       finishActivity(false, err instanceof Error ? err.message : String(err));
       setError(err instanceof Error ? err.message : String(err));
@@ -1547,6 +1724,23 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
           step3Done={step3Done}
           step4Done={step4Done}
           busy={busy}
+          sceneDensity={sceneDensity}
+          targetMediaCount={targetMediaCount}
+          sceneCountHint={scenePlan.sceneCountHint}
+          typicalBeatSec={scenePlan.typicalBeatSec}
+          sceneCountMin={scenePlan.sceneCountMin}
+          sceneCountMax={scenePlan.sceneCountMax}
+          onSceneDensityChange={setSceneDensity}
+          onTargetMediaCountChange={(n) =>
+            setTargetMediaCount(
+              clampTargetSceneCount(
+                musicDurationSec && musicDurationSec > 0
+                  ? musicDurationSec
+                  : scenePlan.targetDurationSec,
+                n
+              )
+            )
+          }
           onLyricChange={(v) => {
             setLyricText(v);
             void persistMusicDraft({ lyricText: v }).catch(() => undefined);
@@ -1592,13 +1786,19 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
           <div className="editor-panel-heading">
             <div>
               <span className="panel-kicker">BƯỚC 1</span>
-              <h2>Tạo script</h2>
+              <h2>{isAudioOnly ? 'Viết kịch bản audio' : 'Tạo script'}</h2>
             </div>
             <span className={`step-status-badge ${step1Done ? 'done' : ''}`}>
               {step1Done ? 'Đã có' : 'Chưa'}
             </span>
           </div>
 
+          {isAudioOnly ? (
+            <p className="media-note">
+              Dự án chỉ audio: ChatGPT viết lời thoại → bước 2 tạo giọng ElevenLabs. Không gen
+              ảnh/video.
+            </p>
+          ) : (
           <div className="media-switch">
             <button
               type="button"
@@ -1615,6 +1815,7 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
               Image
             </button>
           </div>
+          )}
 
           <div className="field compact-field">
             <label htmlFor="brief">Mô tả video</label>
@@ -1647,7 +1848,8 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
             <div className="duration-field-head">
               <label htmlFor="target-duration">Thời lượng</label>
               <span className="duration-field-live">
-                {formatDurationLabel(scenePlan.targetDurationSec)} · ~{scenePlan.sceneCountHint} scene
+                {formatDurationLabel(scenePlan.targetDurationSec)} · ~{scenePlan.sceneCountHint}{' '}
+                {mediaLabel}
               </span>
             </div>
             <div className="duration-presets" role="group" aria-label="Preset thời lượng">
@@ -1682,23 +1884,80 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
             </div>
           </div>
 
-          <ModelPicker
-            mediaKind={mediaKind}
-            families={families}
-            models={models}
-            family={family}
-            modelId={modelId}
-            aspectRatio={aspectRatio}
-            outputFormat={outputFormat}
-            resolution={resolution}
-            mode={mode}
-            onFamilyChange={onFamilyChange}
-            onModelChange={onModelChange}
-            onAspectRatioChange={(v) => applyAspectRatio(v, outputFormat)}
-            onOutputFormatChange={setOutputFormat}
-            onResolutionChange={setResolution}
-            onModeChange={setMode}
-          />
+          <div className="field compact-field duration-field scene-density-field">
+            <div className="duration-field-head">
+              <label>
+                {isAudioOnly ? 'Cách chia đoạn lời' : `Số ${mediaLabel} / cách chia scene`}
+              </label>
+              <span className="duration-field-live">
+                ~{scenePlan.sceneCountHint} {isAudioOnly ? 'đoạn' : mediaLabel} · ~
+                {formatDurationLabel(scenePlan.typicalBeatSec)}/đoạn
+              </span>
+            </div>
+            <div className="duration-presets" role="group" aria-label="Mật độ scene">
+              {SCENE_DENSITY_OPTIONS.map((opt) => (
+                <button
+                  key={opt.id}
+                  type="button"
+                  className={`chip-btn ${sceneDensity === opt.id ? 'active' : ''}`}
+                  title={opt.hint}
+                  onClick={() => setSceneDensity(opt.id)}
+                >
+                  {opt.label}
+                </button>
+              ))}
+            </div>
+            <div className="duration-custom scene-count-custom">
+              <div className="duration-input-wrap">
+                <input
+                  id="target-media-count"
+                  type="number"
+                  min={scenePlan.sceneCountMin}
+                  max={scenePlan.sceneCountMax}
+                  value={targetMediaCount}
+                  onChange={(event) => {
+                    setSceneDensity('custom');
+                    const n = Number(event.target.value);
+                    if (!Number.isFinite(n)) return;
+                    setTargetMediaCount(
+                      clampTargetSceneCount(scenePlan.targetDurationSec, n)
+                    );
+                  }}
+                />
+                <span className="duration-unit">{isAudioOnly ? 'đoạn' : mediaLabel}</span>
+              </div>
+              <p className="hint scene-density-hint">
+                {isAudioOnly
+                  ? 'Chia đoạn chỉ để cấu trúc kịch bản — TTS vẫn đọc liền mạch một file audio.'
+                  : `10 phút + Tiết kiệm ≈ 20 ${mediaLabel} (thay vì ~100). Ảnh dài sẽ loop khi ghép Final.`}
+                {!isAudioOnly &&
+                mediaKind === 'video' &&
+                scenePlan.typicalBeatSec > maxShotSec * 1.5
+                  ? ` Video dài hơn ${maxShotSec}s/scene có thể tốn nhiều shot API — cân nhắc Image nếu chỉ cần slideshow.`
+                  : ''}
+              </p>
+            </div>
+          </div>
+
+          {!isAudioOnly ? (
+            <ModelPicker
+              mediaKind={mediaKind}
+              families={families}
+              models={models}
+              family={family}
+              modelId={modelId}
+              aspectRatio={aspectRatio}
+              outputFormat={outputFormat}
+              resolution={resolution}
+              mode={mode}
+              onFamilyChange={onFamilyChange}
+              onModelChange={onModelChange}
+              onAspectRatioChange={(v) => applyAspectRatio(v, outputFormat)}
+              onOutputFormatChange={setOutputFormat}
+              onResolutionChange={setResolution}
+              onModeChange={setMode}
+            />
+          ) : null}
 
           <div className="field compact-field">
             <label htmlFor="script-chat-model">Model viết kịch bản</label>
@@ -1802,7 +2061,7 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
           <div className="editor-panel-heading">
             <div>
               <span className="panel-kicker">BƯỚC 2</span>
-              <h2>Tạo voice</h2>
+              <h2>{isAudioOnly ? 'Tạo audio (ElevenLabs)' : 'Tạo voice'}</h2>
             </div>
             <span className={`step-status-badge ${step2Done ? 'done' : ''}`}>
               {step2Done ? 'Đã có' : 'Chưa'}
@@ -1819,8 +2078,17 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
             </div>
           ) : (
             <>
-              <p className="media-note">Chọn giọng → tạo voice. Muốn làm lại: xóa voice rồi tạo lại.</p>
-              <ProjectVoicePanel value={voice} disabled={busy} onChange={onVoiceChange} />
+              <p className="media-note">
+                {isAudioOnly
+                  ? 'Chọn giọng ElevenLabs (hoặc GenMax) → tạo file narration.mp3. Đây là bước cuối của dự án chỉ audio.'
+                  : 'Chọn giọng → tạo voice. Muốn làm lại: xóa voice rồi tạo lại.'}
+              </p>
+              <ProjectVoicePanel
+                value={voice}
+                disabled={busy}
+                preferElevenLabs={isAudioOnly}
+                onChange={onVoiceChange}
+              />
               <div className="step-actions">
                 {!step2Done ? (
                   <button
@@ -1830,7 +2098,11 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
                     onClick={() => void runStepAction('voice', 'create')}
                   >
                     <span>♫</span>
-                    {busy && activity?.stepId === 'audio' ? 'Đang tạo voice…' : 'Tạo voice'}
+                    {busy && activity?.stepId === 'audio'
+                      ? 'Đang tạo audio…'
+                      : isAudioOnly
+                        ? 'Tạo audio'
+                        : 'Tạo voice'}
                   </button>
                 ) : (
                   <>
@@ -1840,7 +2112,7 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
                       disabled={busy}
                       onClick={() => void clearNarrationAudio()}
                     >
-                      Xóa voice
+                      Xóa audio
                     </button>
                     <button
                       type="button"
@@ -1849,8 +2121,21 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
                       onClick={() => void runStepAction('voice', 'recreate')}
                     >
                       <span>↻</span>
-                      Tạo lại voice
+                      Tạo lại audio
                     </button>
+                    {narrationPath || resolvedNarrationPath ? (
+                      <button
+                        type="button"
+                        className="editor-secondary full-width"
+                        disabled={busy}
+                        onClick={() => {
+                          const p = narrationPath || resolvedNarrationPath;
+                          if (p) void window.studio.showItemInFolder(p);
+                        }}
+                      >
+                        Hiện file audio trong Finder
+                      </button>
+                    ) : null}
                   </>
                 )}
               </div>
@@ -1905,7 +2190,7 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
                   <p className="hint">{fileName(resolvedNarrationPath)}</p>
                 </div>
               ) : null}
-              {step2Done ? (
+              {step2Done && !isAudioOnly ? (
                 <button
                   type="button"
                   className="editor-secondary full-width"
@@ -1948,7 +2233,7 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
               <p className="media-note">
                 {!step2Done
                   ? 'Nên có voice (bước 2) để khớp thời lượng. Vẫn có thể tạo media theo duration_hint.'
-                  : `Tạo ${mediaLabel} từng scene qua Snapgen. Có thể tạo thiếu hoặc tạo lại toàn bộ.`}
+                  : `Trước khi gọi Snapgen, app sẽ hỏi xác nhận số ${mediaLabel}. Dùng «Chọn scene nâng cao…» để gen từng phần / giữ ảnh cũ để loop.`}
               </p>
               <div className="step-actions">
                 <button
@@ -2168,42 +2453,61 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
               {busy ? 'Đang ghép...' : timelineDirty ? 'Ghép lại video ●' : 'Ghép lại video'}
             </button>
           )}
-          <button
-            type="button"
-            className="editor-secondary"
-            disabled={busy || (!result && !hasSceneMedia)}
-            onClick={() => void exportVideo()}
-          >
-            Lưu video...
-          </button>
+          {!isAudioOnly ? (
             <button
+              type="button"
+              className="editor-secondary"
+              disabled={busy || (!result && !hasSceneMedia)}
+              onClick={() => void exportVideo()}
+            >
+              Lưu video...
+            </button>
+          ) : (
+            <button
+              type="button"
+              className="editor-secondary"
+              disabled={busy || !(narrationPath || resolvedNarrationPath)}
+              onClick={() => {
+                const p = narrationPath || resolvedNarrationPath;
+                if (p) void window.studio.showItemInFolder(p);
+              }}
+            >
+              Hiện audio...
+            </button>
+          )}
+          <button
             type="button"
             className="editor-primary"
             disabled={busy}
             onClick={() => void runStepAction(activeStep, stepDone[activeStep] ? 'recreate' : 'create')}
-            title={WORKFLOW_STEPS.find((s) => s.id === activeStep)?.label}
+            title={railSteps.find((s) => s.id === activeStep)?.label}
           >
             <span>✦</span>
             {busy
               ? 'Đang chạy…'
               : stepDone[activeStep]
-                ? `Tạo lại · ${WORKFLOW_STEPS.find((s) => s.id === activeStep)?.short}`
-                : WORKFLOW_STEPS.find((s) => s.id === activeStep)?.label}
+                ? `Tạo lại · ${railSteps.find((s) => s.id === activeStep)?.short}`
+                : railSteps.find((s) => s.id === activeStep)?.label}
           </button>
         </div>
       </header>
 
       <div className="editor-workspace">
-        <aside className="tool-rail" aria-label="Các bước tạo video">
+        <aside
+          className="tool-rail"
+          aria-label={isAudioOnly ? 'Các bước tạo audio' : 'Các bước tạo video'}
+        >
           {railSteps.map((item) => {
             const done = stepDone[item.id];
             const locked = isMusicAnimation
               ? (item.id === 'voice' && !musicInputDone) ||
                 (item.id === 'media' && !script?.scenes.length) ||
                 (item.id === 'merge' && (!script?.scenes.length || !step3Done))
-              : (item.id === 'voice' && !step1Done) ||
-                (item.id === 'media' && !step1Done) ||
-                (item.id === 'merge' && (!step2Done || !step3Done));
+              : isAudioOnly
+                ? item.id === 'voice' && !step1Done
+                : (item.id === 'voice' && !step1Done) ||
+                  (item.id === 'media' && !step1Done) ||
+                  (item.id === 'merge' && (!step2Done || !step3Done));
             return (
               <button
                 type="button"

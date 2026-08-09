@@ -1,4 +1,9 @@
 import type { ProjectDraft, ScriptDraft } from '../../shared/types';
+import {
+  formatDurationLabel,
+  SCENE_DENSITY_OPTIONS,
+  type SceneDensityId,
+} from '../../shared/models';
 
 export type MusicWorkflowStep = 'input' | 'storyboard' | 'media' | 'merge';
 
@@ -11,6 +16,14 @@ type Props = {
   step3Done: boolean;
   step4Done: boolean;
   busy: boolean;
+  sceneDensity: SceneDensityId;
+  targetMediaCount: number;
+  sceneCountHint: number;
+  typicalBeatSec: number;
+  sceneCountMin: number;
+  sceneCountMax: number;
+  onSceneDensityChange: (id: SceneDensityId) => void;
+  onTargetMediaCountChange: (count: number) => void;
   onLyricChange: (lyric: string) => void;
   onImportMusic: () => void;
   onClearMusic: () => void;
@@ -31,6 +44,14 @@ export default function MusicAnimationPanel({
   step3Done,
   step4Done,
   busy,
+  sceneDensity,
+  targetMediaCount,
+  sceneCountHint,
+  typicalBeatSec,
+  sceneCountMin,
+  sceneCountMax,
+  onSceneDensityChange,
+  onTargetMediaCountChange,
   onLyricChange,
   onImportMusic,
   onClearMusic,
@@ -149,8 +170,47 @@ export default function MusicAnimationPanel({
         ) : (
           <>
             <p className="media-note">
-              AI đọc lyric + độ dài nhạc để lập storyboard (visual_prompt + lyric theo beat).
+              AI đọc lyric + độ dài nhạc để lập storyboard. Chọn số shot trước để kiểm soát chi phí
+              Snapgen.
             </p>
+            <div className="field compact-field duration-field scene-density-field">
+              <div className="duration-field-head">
+                <label>Số shot / cách chia</label>
+                <span className="duration-field-live">
+                  ~{sceneCountHint} shot · ~{formatDurationLabel(typicalBeatSec)}/scene
+                </span>
+              </div>
+              <div className="duration-presets" role="group" aria-label="Mật độ scene">
+                {SCENE_DENSITY_OPTIONS.map((opt) => (
+                  <button
+                    key={opt.id}
+                    type="button"
+                    className={`chip-btn ${sceneDensity === opt.id ? 'active' : ''}`}
+                    title={opt.hint}
+                    disabled={busy}
+                    onClick={() => onSceneDensityChange(opt.id)}
+                  >
+                    {opt.label}
+                  </button>
+                ))}
+              </div>
+              <div className="duration-custom">
+                <div className="duration-input-wrap">
+                  <input
+                    type="number"
+                    min={sceneCountMin}
+                    max={sceneCountMax}
+                    disabled={busy}
+                    value={targetMediaCount}
+                    onChange={(e) => {
+                      onSceneDensityChange('custom');
+                      onTargetMediaCountChange(Number(e.target.value));
+                    }}
+                  />
+                  <span className="duration-unit">shot</span>
+                </div>
+              </div>
+            </div>
             {draft?.musicStoryNotes ? (
               <p className="hint" style={{ whiteSpace: 'pre-wrap' }}>
                 {draft.musicStoryNotes}
@@ -163,7 +223,11 @@ export default function MusicAnimationPanel({
                 disabled={busy}
                 onClick={onAnalyze}
               >
-                {busy ? 'Đang phân tích…' : hasScript ? 'Phân tích lại lyric' : 'Phân tích lyric → kịch bản'}
+                {busy
+                  ? 'Đang phân tích…'
+                  : hasScript
+                    ? `Phân tích lại (~${sceneCountHint} shot)`
+                    : `Phân tích lyric → ~${sceneCountHint} shot`}
               </button>
               {hasScript ? (
                 <button

@@ -35,10 +35,13 @@ function parseTtsProvider(value: string): TtsProvider {
 export default function ProjectVoicePanel({
   value,
   disabled,
+  preferElevenLabs,
   onChange,
 }: {
   value: ProjectVoiceSettings;
   disabled?: boolean;
+  /** Dự án audio-only: ưu tiên / mặc định ElevenLabs. */
+  preferElevenLabs?: boolean;
   onChange: (next: ProjectVoiceSettings) => void;
 }) {
   const [voices, setVoices] = useState<ElevenLabsVoice[]>([]);
@@ -124,14 +127,20 @@ export default function ProjectVoicePanel({
   }, [elevenLabsReady, value.ttsProvider]);
 
   const patch = (partial: Partial<ProjectVoiceSettings>) => onChange({ ...value, ...partial });
-  const selectableProvider = coerceSelectableTtsProvider(value.ttsProvider);
+  const selectableProvider = preferElevenLabs
+    ? TTS_PROVIDERS_TEMPORARILY_HIDDEN.has(value.ttsProvider)
+      ? 'elevenlabs'
+      : value.ttsProvider === 'openai' || value.ttsProvider === 'qwen'
+        ? 'elevenlabs'
+        : value.ttsProvider
+    : coerceSelectableTtsProvider(value.ttsProvider);
 
   useEffect(() => {
     if (value.ttsProvider !== selectableProvider) {
       onChange({ ...value, ttsProvider: selectableProvider });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectableProvider]);
+  }, [selectableProvider, preferElevenLabs]);
 
   return (
     <div className="project-voice-panel">
@@ -141,26 +150,50 @@ export default function ProjectVoicePanel({
           id="project-tts-provider"
           value={selectableProvider}
           disabled={disabled}
-          onChange={(e) =>
-            patch({ ttsProvider: coerceSelectableTtsProvider(parseTtsProvider(e.target.value)) })
-          }
+          onChange={(e) => {
+            const next = parseTtsProvider(e.target.value);
+            patch({
+              ttsProvider: preferElevenLabs
+                ? next === 'openai' || next === 'qwen'
+                  ? 'elevenlabs'
+                  : next
+                : coerceSelectableTtsProvider(next),
+            });
+          }}
         >
-          {!TTS_PROVIDERS_TEMPORARILY_HIDDEN.has('openai') ? (
-            <option value="openai">OpenAI TTS</option>
-          ) : null}
-          <option value="elevenlabs" disabled={!elevenLabsReady}>
-            ElevenLabs {!elevenLabsReady ? '(cần API key ở Settings)' : ''}
-          </option>
-          {!TTS_PROVIDERS_TEMPORARILY_HIDDEN.has('qwen') ? (
-            <option value="qwen" disabled={!qwenReady}>
-              Irodori TTS {!qwenReady ? '(cần RunPod key ở Settings)' : ''}
-            </option>
-          ) : null}
-          <option value="genmax" disabled={!genmaxReady}>
-            GenMax TTS {!genmaxReady ? '(cần GenMax key ở Settings)' : ''}
-          </option>
+          {preferElevenLabs ? (
+            <>
+              <option value="elevenlabs" disabled={!elevenLabsReady}>
+                ElevenLabs {!elevenLabsReady ? '(cần API key ở Settings)' : ''}
+              </option>
+              <option value="genmax" disabled={!genmaxReady}>
+                GenMax TTS {!genmaxReady ? '(cần GenMax key ở Settings)' : ''}
+              </option>
+            </>
+          ) : (
+            <>
+              {!TTS_PROVIDERS_TEMPORARILY_HIDDEN.has('openai') ? (
+                <option value="openai">OpenAI TTS</option>
+              ) : null}
+              <option value="elevenlabs" disabled={!elevenLabsReady}>
+                ElevenLabs {!elevenLabsReady ? '(cần API key ở Settings)' : ''}
+              </option>
+              {!TTS_PROVIDERS_TEMPORARILY_HIDDEN.has('qwen') ? (
+                <option value="qwen" disabled={!qwenReady}>
+                  Irodori TTS {!qwenReady ? '(cần RunPod key ở Settings)' : ''}
+                </option>
+              ) : null}
+              <option value="genmax" disabled={!genmaxReady}>
+                GenMax TTS {!genmaxReady ? '(cần GenMax key ở Settings)' : ''}
+              </option>
+            </>
+          )}
         </select>
-        {TTS_PROVIDERS_TEMPORARILY_HIDDEN.size > 0 ? (
+        {preferElevenLabs ? (
+          <p className="hint" style={{ marginTop: 6 }}>
+            Dự án chỉ audio — mặc định ElevenLabs. Cần API key ở Settings → ElevenLabs.
+          </p>
+        ) : TTS_PROVIDERS_TEMPORARILY_HIDDEN.size > 0 ? (
           <p className="hint" style={{ marginTop: 6 }}>
             Tạm chỉ dùng GenMax / ElevenLabs (OpenAI TTS &amp; Irodori đang tắt).
           </p>

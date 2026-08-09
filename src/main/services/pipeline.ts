@@ -721,7 +721,11 @@ export async function remuxProject(projectId: string): Promise<GenerateJobResult
     let srtPath = path.join(projectDir, 'subs.srt');
     let durations = script.scenes.map((s) => Math.max(1, s.duration_hint));
 
-    const isMusicRemux = resolveProjectKind(draft.projectKind ?? detail.meta.projectKind) === 'music-animation';
+    const remuxKind = resolveProjectKind(draft.projectKind ?? detail.meta.projectKind);
+    if (remuxKind === 'audio-only') {
+      throw new Error('Dự án chỉ audio — không ghép video. Mở file narration.mp3 trong thư mục dự án.');
+    }
+    const isMusicRemux = remuxKind === 'music-animation';
     const hasRawNarration =
       !isMusicRemux && fs.existsSync(path.join(projectDir, RAW_NARRATION_FILE));
     if (hasRawNarration) {
@@ -869,6 +873,7 @@ export async function runGenerateJob(input: GenerateJobInput): Promise<GenerateJ
     getProject(meta.id).draft?.projectKind ?? getProject(meta.id).meta.projectKind
   );
   const isMusicAnimation = projectKind === 'music-animation';
+  const isAudioOnlyProject = projectKind === 'audio-only';
 
   if (!isMusicAnimation) {
     if (voice.ttsProvider === 'openai' && !keys.openaiApiKey) {
@@ -910,10 +915,11 @@ export async function runGenerateJob(input: GenerateJobInput): Promise<GenerateJ
     const refreshNarration = input.refreshNarration !== false;
     /** Bước Voice trong Studio: skipMerge + không gen scene → % TTS phải là 0–100. */
     const audioOnlyStep =
-      Boolean(input.skipMerge) &&
-      refreshNarration &&
-      Array.isArray(input.regenerateSceneIds) &&
-      input.regenerateSceneIds.length === 0;
+      isAudioOnlyProject ||
+      (Boolean(input.skipMerge) &&
+        refreshNarration &&
+        Array.isArray(input.regenerateSceneIds) &&
+        input.regenerateSceneIds.length === 0);
     const draftTarget = getProject(meta.id).draft?.targetDurationSec;
     const hintSum = input.script.scenes.reduce(
       (sum, s) => sum + Math.max(0, s.duration_hint || 0),
@@ -1087,12 +1093,14 @@ export async function runGenerateJob(input: GenerateJobInput): Promise<GenerateJ
       };
     }
 
-    // Bước Voice: xong TTS là xong — không đi media pool (tránh % kẹt 3% rồi nhảy 96%).
+    // Bước Voice / dự án audio-only: xong TTS là xong — không đi media pool.
     if (audioOnlyStep) {
       updateProjectStatus(meta.id, 'ready', { hasVideo: false, lastError: '' });
       emitProgress({
         phase: 'done',
-        message: `Đã tạo voiceover ${formatDurationLabel(rawAudioDuration)} — sang bước Media khi sẵn sàng.`,
+        message: isAudioOnlyProject
+          ? `Đã tạo audio ${formatDurationLabel(rawAudioDuration)} (dự án chỉ voice — không gen ảnh/video).`
+          : `Đã tạo voiceover ${formatDurationLabel(rawAudioDuration)} — sang bước Media khi sẵn sàng.`,
         percent: 100,
         detailPercent: 100,
       });

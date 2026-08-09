@@ -14,6 +14,7 @@ import type {
   GenerateIdeaInput,
   GenerateJobInput,
   GenerateJobResult,
+  GenerateMusicAnimationScriptInput,
   ImageFamily,
   JobFinishedEvent,
   JobProgress,
@@ -136,14 +137,7 @@ const api = {
     ipcRenderer.invoke(IPC.generateScript, input),
   generateMusicAnimationScript: (
     projectId: string,
-    input?: Partial<{
-      lyricText: string;
-      language: string;
-      musicDurationSec: number;
-      stylePrompt: string;
-      openaiChatModel: string;
-      songTitle: string;
-    }>
+    input?: Partial<GenerateMusicAnimationScriptInput>
   ): Promise<{ script: ScriptDraft; notes: string }> =>
     ipcRenderer.invoke(IPC.generateMusicAnimationScript, projectId, input),
   importMusicAudio: (

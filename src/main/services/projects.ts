@@ -103,6 +103,11 @@ function readDraft(id: string): ProjectDraft | null {
       brief: raw.brief ?? '',
       language: raw.language ?? 'Tiếng Việt',
       sceneCount,
+      targetMediaCount:
+        typeof raw.targetMediaCount === 'number' && raw.targetMediaCount > 0
+          ? Math.round(raw.targetMediaCount)
+          : undefined,
+      sceneDensity: raw.sceneDensity,
       targetDurationSec: resolveTargetDurationSec(raw, sceneCount),
       family: raw.family ?? defaultFamilyForKind(mediaKind),
       model: raw.model ?? defaultModelIdForKind(mediaKind),
@@ -285,7 +290,12 @@ export function createProject(input: CreateProjectInput): ProjectMeta {
 
   writeMeta(meta);
   const settings = getSettings();
-  const voice = resolveProjectVoice(input, settings);
+  const voiceBase = resolveProjectVoice(input, settings);
+  /** audio-only: mặc định ElevenLabs TTS. */
+  const voice =
+    projectKind === 'audio-only'
+      ? { ...voiceBase, ttsProvider: input.ttsProvider || ('elevenlabs' as const) }
+      : voiceBase;
   writeDraft(id, {
     projectKind,
     brief: meta.brief ?? '',

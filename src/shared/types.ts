@@ -1,11 +1,15 @@
 export type MediaKind = 'video' | 'image';
-/** standard = script→voice→media→merge; music-animation = nhạc+lyric→phân cảnh→Snapgen→ghép nhạc */
-export type ProjectKind = 'standard' | 'music-animation';
+/**
+ * standard = script→voice→media→merge
+ * music-animation = nhạc+lyric→phân cảnh→Snapgen→ghép nhạc
+ * audio-only = script→TTS (ElevenLabs) — không ảnh/video
+ */
+export type ProjectKind = 'standard' | 'music-animation' | 'audio-only';
 export type VideoFamily = 'veo' | 'sora' | 'grok' | 'seedance' | 'kling' | 'meta';
 export type ImageFamily = 'gpt-image' | 'grok-image' | 'snapgen-image';
 
 export function isProjectKind(value: unknown): value is ProjectKind {
-  return value === 'standard' || value === 'music-animation';
+  return value === 'standard' || value === 'music-animation' || value === 'audio-only';
 }
 
 export function resolveProjectKind(value: unknown): ProjectKind {
@@ -208,6 +212,8 @@ export interface GenerateMusicAnimationScriptInput {
   language: string;
   /** Độ dài audio nhạc (giây) — tổng duration_hint các scene ≈ giá trị này. */
   musicDurationSec: number;
+  /** Mục tiêu số shot/ảnh — tránh storyboard quá dày. */
+  sceneCount?: number;
   family: VideoFamily | ImageFamily;
   model: string;
   aspectRatio: string;
@@ -252,6 +258,13 @@ export interface ProjectDraft {
   brief: string;
   language: string;
   sceneCount: number;
+  /**
+   * Mục tiêu số ảnh/video khi gen script (cost control).
+   * Khác sceneCount sau khi đã có script (sceneCount = số scene thực tế).
+   */
+  targetMediaCount?: number;
+  /** dense | normal | economy | custom — cách chia scene. */
+  sceneDensity?: 'dense' | 'normal' | 'economy' | 'custom';
   /** Desired total video length in seconds (drives auto scene split). */
   targetDurationSec: number;
   family: VideoFamily | ImageFamily;

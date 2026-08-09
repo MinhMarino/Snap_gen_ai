@@ -81,11 +81,19 @@ export default function GenerateScenesDialog({
   const [importBusy, setImportBusy] = useState(false);
   const [clearBusy, setClearBusy] = useState(false);
 
-  const mediaIds = useMemo(() => {
-    const ids = new Set(selected);
-    for (const id of missingIds) ids.add(id);
-    return [...ids];
-  }, [selected, missingIds]);
+  /** Chỉ gen scene user chọn — không ép scene thiếu (để kiểm soát số lượng API). */
+  const mediaIds = useMemo(() => [...selected], [selected]);
+
+  const overwriteCount = useMemo(() => {
+    let n = 0;
+    for (let i = 0; i < scenes.length; i++) {
+      const scene = scenes[i];
+      if (!selected.has(scene.id)) continue;
+      const asset = mediaById.get(scene.id) ?? sceneMedia[i];
+      if (asset?.exists) n += 1;
+    }
+    return n;
+  }, [scenes, selected, mediaById, sceneMedia]);
 
   useEffect(() => {
     if (!open) return;
@@ -173,7 +181,7 @@ export default function GenerateScenesDialog({
           ? 'Xóa & tạo lại qua API'
           : 'Tạo audio (TTS API)'
       : step === 'media'
-        ? `Tạo ${mediaIds.length} ${mediaLabel}`
+        ? `Xác nhận tạo ${mediaIds.length} ${mediaLabel}`
         : 'Ghép Final';
 
   const stepCopy =
@@ -192,7 +200,7 @@ export default function GenerateScenesDialog({
             title: busy ? `Đang tạo ${mediaLabel}...` : `Bước 2 — Tạo ${mediaLabel}`,
             blurb: busy
               ? 'Có thể đóng cửa sổ này, job vẫn chạy tiếp ở nền.'
-              : `Chỉ scene được chọn mới gọi Snapgen. Dùng narration hiện có (không TTS lại).`,
+              : `Chọn đúng số scene cần gen — bỏ chọn scene muốn giữ / loop ảnh cũ. Bấm xác nhận sẽ hỏi lại số lượng.`,
           }
         : {
             title: busy ? 'Đang ghép Final...' : 'Bước 3 — Ghép Final',
@@ -386,7 +394,11 @@ export default function GenerateScenesDialog({
                 )}
                 <div className="export-scene-toolbar" style={{ padding: '8px 18px 0' }}>
                   <strong>
-                    {mediaIds.length}/{scenes.length} scene
+                    Sẽ gen {mediaIds.length}/{scenes.length} {mediaLabel}
+                    {overwriteCount > 0 ? ` · ghi đè ${overwriteCount}` : ''}
+                    {missingIds.length > 0
+                      ? ` · thiếu ${missingIds.filter((id) => !selected.has(id)).length} chưa chọn`
+                      : ''}
                   </strong>
                   <div className="row-actions">
                     <button
@@ -406,7 +418,7 @@ export default function GenerateScenesDialog({
                     <button
                       type="button"
                       className="btn ghost"
-                      disabled={selected.size === 0 && missingIds.length === 0}
+                      disabled={selected.size === 0}
                       onClick={() => setSelected(new Set())}
                     >
                       Bỏ chọn tất cả
@@ -418,23 +430,27 @@ export default function GenerateScenesDialog({
                   {scenes.map((scene, index) => {
                     const asset = mediaById.get(scene.id) ?? sceneMedia[index];
                     const exists = Boolean(asset?.exists);
-                    const locked = !exists;
-                    const checked = selected.has(scene.id) || locked;
+                    const checked = selected.has(scene.id);
                     return (
                       <li key={scene.id}>
-                        <label className={locked ? 'locked' : ''}>
+                        <label>
                           <input
                             type="checkbox"
                             checked={checked}
-                            disabled={locked}
-                            onChange={() => toggle(scene.id, locked)}
+                            onChange={() => toggle(scene.id, false)}
                           />
                           <span className="export-scene-meta">
                             <strong>
                               Scene {index + 1}
                               <small>
                                 · {scene.duration_hint}s ·{' '}
-                                {exists ? `đã có ${mediaLabel}` : `chưa có — bắt buộc gen`}
+                                {exists
+                                  ? checked
+                                    ? `đã có — sẽ gen lại`
+                                    : `đã có — giữ / loop`
+                                  : checked
+                                    ? `chưa có — sẽ gen`
+                                    : `chưa có — bỏ qua`}
                               </small>
                             </strong>
                             <em>{scene.visual_prompt || scene.narration_segment || 'Untitled'}</em>
@@ -445,10 +461,11 @@ export default function GenerateScenesDialog({
                   })}
                 </ul>
 
-                {!allHaveMedia && mediaIds.length > 0 && (
+                {mediaIds.length > 0 && (
                   <p className="hint" style={{ padding: '0 18px' }}>
-                    Job chỉ tạo scene đã chọn. Khi còn thiếu clip sẽ chưa ghép Final — chạy tiếp
-                    bước 2 hoặc bước 3 khi đủ.
+                    Job chỉ tạo {mediaIds.length} {mediaLabel} đã chọn. Scene đã có mà bỏ chọn sẽ
+                    được giữ nguyên (loop theo thời lượng khi ghép Final). Scene thiếu chưa chọn
+                    có thể gen sau.
                   </p>
                 )}
               </>

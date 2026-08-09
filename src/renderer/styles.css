@@ -892,6 +892,19 @@ h2 {
   grid-template-columns: minmax(0, 90px);
 }
 
+.scene-density-field {
+  margin-top: 4px;
+}
+
+.scene-density-hint {
+  margin: 8px 0 0;
+  line-height: 1.35;
+}
+
+.scene-count-custom .duration-input-wrap input[type='number'] {
+  width: 5.5rem;
+}
+
 .duration-field {
   gap: 8px;
 }

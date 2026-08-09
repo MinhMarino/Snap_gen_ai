@@ -513,6 +513,42 @@ export const MAX_SCENE_BEAT_SEC = 12;
 export const IDEAL_SCENE_BEAT_SEC = 6;
 /** @deprecated alias — prefer IDEAL_SCENE_BEAT_SEC */
 export const TYPICAL_NARRATIVE_BEAT_SEC = IDEAL_SCENE_BEAT_SEC;
+
+/** Cách chia scene → số ảnh/video (cost control). */
+export type SceneDensityId = 'dense' | 'normal' | 'economy' | 'custom';
+
+export const SCENE_DENSITY_OPTIONS: Array<{
+  id: SceneDensityId;
+  label: string;
+  hint: string;
+  /** null = user nhập số lượng. */
+  beatSec: number | null;
+}> = [
+  { id: 'dense', label: 'Dày', hint: '~6s / scene', beatSec: 6 },
+  { id: 'normal', label: 'Vừa', hint: '~15s / scene', beatSec: 15 },
+  { id: 'economy', label: 'Tiết kiệm', hint: '~30s / scene', beatSec: 30 },
+  { id: 'custom', label: 'Tùy chỉnh', hint: 'Chọn số ảnh/video', beatSec: null },
+];
+
+export const DEFAULT_SCENE_DENSITY: SceneDensityId = 'economy';
+
+export function resolveSceneDensity(raw?: string | null): SceneDensityId {
+  const value = String(raw || '').trim().toLowerCase();
+  if (value === 'dense' || value === 'normal' || value === 'economy' || value === 'custom') {
+    return value;
+  }
+  return DEFAULT_SCENE_DENSITY;
+}
+
+/** Giới hạn số media hợp lệ theo thời lượng (mỗi scene ≤ MAX_SCENE_DURATION_SEC). */
+export function clampTargetSceneCount(targetDurationSec: number, count: number): number {
+  const target = Math.max(MIN_SCENE_BEAT_SEC * 3, Math.round(targetDurationSec));
+  const minCount = Math.max(3, Math.ceil(target / MAX_SCENE_DURATION_SEC));
+  const maxCount = Math.max(minCount, Math.floor(target / MIN_SCENE_BEAT_SEC));
+  const n = Math.round(Number(count));
+  if (!Number.isFinite(n)) return Math.max(minCount, Math.round(target / IDEAL_SCENE_BEAT_SEC));
+  return Math.min(maxCount, Math.max(minCount, n));
+}
 /** Absolute ceiling for one scene (extend/multi-cut covers model shot limits). */
 export const MAX_SCENE_DURATION_SEC = 180;
 export const WORDS_PER_SECOND = 2.5;
@@ -534,42 +570,132 @@ export const MAX_TTS_FIT_ATTEMPTS = 4;
 
 export interface SceneDurationPlan {
   targetDurationSec: number;
-  /** Ước lượng mềm cho UI / chi phí — không ép AI đúng số này. */
+  /** Số media mục tiêu (ảnh/video) — dùng để kiểm soát chi phí. */
   sceneCountHint: number;
   sceneCountMin: number;
   sceneCountMax: number;
   typicalBeatSec: number;
+  /** Trần khi tách narration local (có thể > MAX_SCENE_BEAT_SEC khi tiết kiệm). */
+  maxBeatSec: number;
   /** Soft average nếu chia đều — chỉ để hiển thị. */
   secondsPerScene: number;
   /** Total words needed ≈ target * WORDS_PER_SECOND. */
   targetWordCount: number;
 }
 
+export type PlanScenesOptions = {
+  /** Số ảnh/video mong muốn (ưu tiên hơn beatSec). */
+  targetSceneCount?: number;
+  /** Độ dài beat trung bình khi không chỉ định count. */
+  typicalBeatSec?: number;
+  mediaKind?: MediaKind;
+};
+
 /**
- * Ước lượng mềm số scene từ thời lượng (UI / cost hint).
- * AI chia theo beat nội dung; không hardcode N scene × T giây.
+ * Ước lượng số scene từ thời lượng (+ tùy chọn mật độ / số media).
+ * Dùng cho UI cost hint và chia narration khi gen script.
  */
 export function planScenesFromDuration(
   targetDurationSec: number,
-  _legacyDurationPerScene?: number
+  optionsOrLegacy?: number | PlanScenesOptions
 ): SceneDurationPlan & { sceneCount: number; durationPerScene: number } {
   const target = Math.max(MIN_SCENE_BEAT_SEC * 3, Math.round(targetDurationSec));
-  const typicalBeatSec = IDEAL_SCENE_BEAT_SEC;
-  const sceneCountHint = Math.max(3, Math.round(target / typicalBeatSec));
-  const sceneCountMin = Math.max(3, Math.round(target / MAX_SCENE_BEAT_SEC));
-  const sceneCountMax = Math.max(sceneCountHint, Math.round(target / MIN_SCENE_BEAT_SEC));
-  const secondsPerScene = Math.round((target / sceneCountHint) * 10) / 10;
+  const options: PlanScenesOptions =
+    typeof optionsOrLegacy === 'number'
+      ? { typicalBeatSec: optionsOrLegacy > 0 ? optionsOrLegacy : IDEAL_SCENE_BEAT_SEC }
+      : optionsOrLegacy || {};
+
+  const sceneCountMin = Math.max(3, Math.ceil(target / MAX_SCENE_DURATION_SEC));
+  const sceneCountMax = Math.max(sceneCountMin, Math.floor(target / MIN_SCENE_BEAT_SEC));
+
+  let sceneCountHint: number;
+  let typicalBeatSec: number;
+
+  if (options.targetSceneCount != null && Number(options.targetSceneCount) > 0) {
+    sceneCountHint = clampTargetSceneCount(target, options.targetSceneCount);
+    typicalBeatSec = Math.round((target / sceneCountHint) * 10) / 10;
+  } else {
+    const beat = Math.max(
+      MIN_SCENE_BEAT_SEC,
+      Number(options.typicalBeatSec) > 0 ? Number(options.typicalBeatSec) : IDEAL_SCENE_BEAT_SEC
+    );
+    sceneCountHint = clampTargetSceneCount(target, Math.round(target / beat));
+    typicalBeatSec = Math.round((target / sceneCountHint) * 10) / 10;
+  }
+
+  const maxBeatSec = Math.min(
+    MAX_SCENE_DURATION_SEC,
+    Math.max(MAX_SCENE_BEAT_SEC, Math.round(typicalBeatSec * 1.35))
+  );
+  const secondsPerScene = typicalBeatSec;
+
   return {
     targetDurationSec: target,
     sceneCountHint,
     sceneCountMin,
     sceneCountMax,
     typicalBeatSec,
+    maxBeatSec,
     secondsPerScene,
     targetWordCount: Math.round(target * WORDS_PER_SECOND),
     sceneCount: sceneCountHint,
     durationPerScene: secondsPerScene,
   };
+}
+
+/**
+ * Gộp scene kề nhau để không vượt quá số media mục tiêu (tiết kiệm API ảnh/video).
+ */
+export function coalesceScenesToTargetCount<
+  T extends {
+    id?: string;
+    section?: string;
+    chapter?: string;
+    narration_segment?: string;
+    visual_prompt?: string;
+    duration_hint?: number;
+  },
+>(scenes: T[], targetCount: number): T[] {
+  const target = Math.max(3, Math.round(targetCount));
+  if (scenes.length <= target) return scenes;
+
+  const out = scenes.map((scene) => ({ ...scene }));
+  while (out.length > target) {
+    let bestI = -1;
+    let bestScore = Number.POSITIVE_INFINITY;
+    for (let i = 0; i < out.length - 1; i++) {
+      const a = out[i];
+      const b = out[i + 1];
+      const sameChapter =
+        (a.chapter || '').trim().toLowerCase() === (b.chapter || '').trim().toLowerCase();
+      const sameSection = (a.section || '') === (b.section || '');
+      const spoken =
+        estimateSpokenSeconds(a.narration_segment || '', 0) +
+        estimateSpokenSeconds(b.narration_segment || '', 0);
+      const score = spoken + (sameChapter ? 0 : 800) + (sameSection ? 0 : 200);
+      if (score < bestScore) {
+        bestScore = score;
+        bestI = i;
+      }
+    }
+    if (bestI < 0) break;
+
+    const a = out[bestI];
+    const b = out[bestI + 1];
+    a.narration_segment = `${(a.narration_segment || '').trim()} ${(b.narration_segment || '').trim()}`.trim();
+    const prevVisual = (a.visual_prompt || '').trim();
+    const nextVisual = (b.visual_prompt || '').trim();
+    if (nextVisual && nextVisual !== prevVisual) {
+      a.visual_prompt = prevVisual ? `${prevVisual}. Also: ${nextVisual}` : nextVisual;
+    }
+    const da = Number(a.duration_hint) || 0;
+    const db = Number(b.duration_hint) || 0;
+    if (da > 0 || db > 0) {
+      a.duration_hint = Math.min(MAX_SCENE_DURATION_SEC, Math.round((da + db) * 10) / 10);
+    }
+    out.splice(bestI + 1, 1);
+  }
+  return out;
 }
 
 const CJK_CHAR_RE =

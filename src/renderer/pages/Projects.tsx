@@ -17,6 +17,7 @@ const STATUS_LABEL: Record<string, string> = {
 const KIND_LABEL: Record<ProjectKind, string> = {
   standard: 'Thường',
   'music-animation': 'Nhạc hoạt hình',
+  'audio-only': 'Chỉ audio',
 };
 
 export default function Projects({ onOpenProject, onCreateAndOpen }: Props) {
@@ -143,14 +144,15 @@ export default function Projects({ onOpenProject, onCreateAndOpen }: Props) {
             }}
           />
         </div>
-        <div className="field" style={{ width: 200, marginBottom: 0 }}>
+        <div className="field" style={{ width: 220, marginBottom: 0 }}>
           <label htmlFor="new-project-kind">Loại dự án</label>
           <select
             id="new-project-kind"
             value={newKind}
             onChange={(e) => setNewKind(resolveProjectKind(e.target.value))}
           >
-            <option value="standard">Bình thường</option>
+            <option value="standard">Bình thường (video)</option>
+            <option value="audio-only">Chỉ audio (ElevenLabs)</option>
             <option value="music-animation">Video hoạt hình nhạc</option>
           </select>
         </div>

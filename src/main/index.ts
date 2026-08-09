@@ -313,6 +313,11 @@ function registerIpc(): void {
           lyricText,
           language: input?.language || draft.language || 'Tiếng Việt',
           musicDurationSec,
+          sceneCount:
+            input?.sceneCount ||
+            draft.targetMediaCount ||
+            (draft.script?.scenes?.length ? undefined : draft.sceneCount) ||
+            undefined,
           family: input?.family || draft.family,
           model: input?.model || draft.model,
           aspectRatio: input?.aspectRatio || draft.aspectRatio,

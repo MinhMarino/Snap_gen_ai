@@ -7,6 +7,8 @@ import type {
 } from '../../shared/types';
 import {
   assertNarrationCoversTarget,
+  clampTargetSceneCount,
+  coalesceScenesToTargetCount,
   countSpokenBudgetUnits,
   estimateScriptSpokenSeconds,
   estimateSpokenSeconds,
@@ -153,9 +155,10 @@ function needsNarrationExpansion(scenes: SceneDraft[], targetDurationSec: number
   return findScenesWithShortNarration(scenes).length > 0;
 }
 
-function needsBeatSplit(scenes: SceneDraft[]): boolean {
+function needsBeatSplit(scenes: SceneDraft[], maxBeatSec = MAX_SCENE_BEAT_SEC): boolean {
+  const cap = Math.max(MIN_SCENE_BEAT_SEC, maxBeatSec);
   return scenes.some(
-    (s) => estimateSpokenSeconds(s.narration_segment || '', 0) > MAX_SCENE_BEAT_SEC
+    (s) => estimateSpokenSeconds(s.narration_segment || '', 0) > cap
   );
 }
 
@@ -358,10 +361,12 @@ function splitNarrationFallback(
   narration: string,
   chapter: ChapterOutline,
   typicalBeatSec: number,
-  language?: string
+  language?: string,
+  maxBeatSec = MAX_SCENE_BEAT_SEC
 ): SceneDraft[] {
   const text = narration.trim();
   if (!text) return [];
+  const beatCap = Math.max(MIN_SCENE_BEAT_SEC, maxBeatSec);
 
   const sentences = text
     .split(/(?<=[.!?…。！？])\s+|(?<=[.!?…。！？])(?=[^\s])/)
@@ -376,7 +381,7 @@ function splitNarrationFallback(
     for (const sentence of sentences) {
       const next = buf ? `${buf} ${sentence}` : sentence;
       const nextSec = estimateSpokenSeconds(next, 0);
-      if (buf && nextSec > MAX_SCENE_BEAT_SEC) {
+      if (buf && nextSec > beatCap) {
         chunks.push(buf);
         buf = sentence;
       } else {
@@ -386,11 +391,12 @@ function splitNarrationFallback(
     if (buf) chunks.push(buf);
   }
 
-  // Gộp quá ngắn
+  // Gộp quá ngắn — với beat dài thì gộp đến ~60% typical để giảm số scene.
+  const minKeepSec = Math.min(typicalBeatSec * 0.55, Math.max(MIN_SCENE_BEAT_SEC, beatCap * 0.35));
   const merged: string[] = [];
   for (const chunk of chunks) {
     const spoken = estimateSpokenSeconds(chunk, 0);
-    if (merged.length && spoken < MIN_SCENE_BEAT_SEC) {
+    if (merged.length && spoken < minKeepSec) {
       merged[merged.length - 1] = `${merged[merged.length - 1]} ${chunk}`.trim();
     } else {
       merged.push(chunk);
@@ -430,8 +436,12 @@ export async function generateScript(
   openaiModel: string,
   input: GenerateIdeaInput
 ): Promise<ScriptDraft> {
-  const plan = planScenesFromDuration(input.targetDurationSec);
+  const plan = planScenesFromDuration(input.targetDurationSec, {
+    targetSceneCount: input.sceneCount,
+    mediaKind: input.mediaKind,
+  });
   const targetDurationSec = plan.targetDurationSec;
+  const targetMediaCount = clampTargetSceneCount(targetDurationSec, plan.sceneCountHint);
   const totalBudget = spokenBudgetForDurationSec(targetDurationSec, input.language);
   const styleHint = input.stylePrompt?.trim()
     ? `Style: ${input.stylePrompt.trim()}`
@@ -582,23 +592,30 @@ Do not restart. Do not summarize the previous text.`,
     previousNarrationTail.push(narration);
   }
 
-  const allScenes: SceneDraft[] = [];
+  let allScenes: SceneDraft[] = [];
   for (const { chapter, narration } of chapterNarrations) {
     let chapterScenes = splitNarrationFallback(
       narration,
       chapter,
       plan.typicalBeatSec,
-      input.language
+      input.language,
+      plan.maxBeatSec
     );
-    if (needsBeatSplit(chapterScenes)) {
+    if (needsBeatSplit(chapterScenes, plan.maxBeatSec)) {
       chapterScenes = splitNarrationFallback(
         chapterScenes.map((s) => s.narration_segment).join(' ') || narration,
         chapter,
         plan.typicalBeatSec,
-        input.language
+        input.language,
+        plan.maxBeatSec
       );
     }
     allScenes.push(...chapterScenes);
+  }
+
+  // Ép số media ≤ mục tiêu (vd. 10 phút → 20 ảnh thay vì ~100).
+  if (allScenes.length > targetMediaCount) {
+    allScenes = coalesceScenesToTargetCount(allScenes, targetMediaCount);
   }
 
   let draft = finalizeDraft({ title, narration: '', scenes: allScenes }, targetDurationSec);
@@ -642,7 +659,8 @@ Return { "continuation": "<new sentences only, ≥ ${deficitBudget.amount} ${def
       targetChapter.narration,
       targetChapter.chapter,
       plan.typicalBeatSec,
-      input.language
+      input.language,
+      plan.maxBeatSec
     );
     const nextScenes: SceneDraft[] = [];
     let replaced = false;
@@ -657,8 +675,23 @@ Return { "continuation": "<new sentences only, ≥ ${deficitBudget.amount} ${def
       nextScenes.push(scene);
     }
     if (!replaced) nextScenes.push(...rebuilt);
+    let mergedScenes = nextScenes;
+    if (mergedScenes.length > targetMediaCount) {
+      mergedScenes = coalesceScenesToTargetCount(mergedScenes, targetMediaCount);
+    }
     draft = finalizeDraft(
-      { title: draft.title, narration: '', scenes: nextScenes },
+      { title: draft.title, narration: '', scenes: mergedScenes },
+      targetDurationSec
+    );
+  }
+
+  if (draft.scenes.length > targetMediaCount) {
+    draft = finalizeDraft(
+      {
+        title: draft.title,
+        narration: '',
+        scenes: coalesceScenesToTargetCount(draft.scenes, targetMediaCount),
+      },
       targetDurationSec
     );
   }
@@ -809,6 +842,11 @@ export async function generateMusicAnimationScript(
   characterImages?: Array<{ dataUrl: string; name?: string }>
 ): Promise<{ script: ScriptDraft; notes: string }> {
   const musicSec = Math.max(8, Math.round(input.musicDurationSec || 60));
+  const plan = planScenesFromDuration(musicSec, {
+    targetSceneCount: input.sceneCount,
+    mediaKind: input.mediaKind,
+  });
+  const targetMediaCount = clampTargetSceneCount(musicSec, plan.sceneCountHint);
   const styleLine = input.stylePrompt?.trim()
     ? `Global animated style (apply every visual_prompt): ${input.stylePrompt.trim()}`
     : 'Animated music video look (anime/illustration cinematic), vivid, beat-synced staging.';
@@ -835,7 +873,8 @@ Return ONLY JSON:
   ]
 }
 Rules:
-- Total of duration_hint MUST equal ${musicSec} (±2s ok). Prefer beats of ${MIN_SCENE_BEAT_SEC}–${MAX_SCENE_BEAT_SEC}s.
+- Total of duration_hint MUST equal ${musicSec} (±2s ok).
+- HARD LIMIT: return about ${targetMediaCount} scenes (range ${Math.max(3, targetMediaCount - 2)}–${targetMediaCount + 2}). Typical beat ~${plan.typicalBeatSec}s (max ~${plan.maxBeatSec}s). Do NOT create one scene per lyric line if that exceeds the limit — group lines.
 - narration_segment = the lyric lines / vocal phrases that play during that scene (language: ${input.language}). Keep lyric wording faithful; you may lightly punctuate.
 - visual_prompt = ONE detailed animated shot in English (45–90 words): subject, action synced to lyric mood, environment, camera, lighting, palette. Hard-cut friendly. No multi-panel.
 - Sync energy: slow/emotional lines → intimate slow camera; chorus → wider motion / stronger color.
@@ -845,6 +884,7 @@ Rules:
 - Media: ${input.mediaKind} · ${input.family}/${input.model} · ${input.aspectRatio} · ${input.resolution}`;
 
   const userText = `Song duration: ${musicSec}s (${formatDurationLabel(musicSec)})
+Target media count: ~${targetMediaCount} scenes (~${plan.typicalBeatSec}s each)
 Language / lyric language: ${input.language}
 ${input.songTitle ? `Title hint: ${input.songTitle}` : ''}
 
@@ -853,7 +893,7 @@ LYRICS / SCRIPT:
 ${input.lyricText.trim()}
 """
 
-Plan an animated music-video storyboard that fits the song length exactly.`;
+Plan an animated music-video storyboard that fits the song length exactly within the media-count budget.`;
 
   const model = openaiModel.trim() || 'gpt-4o-mini';
   const raw =
@@ -899,11 +939,16 @@ Plan an animated music-video storyboard that fits the song length exactly.`;
     throw new Error('ChatGPT không trả về scene nào từ lyric.');
   }
 
+  const limited =
+    scenes.length > targetMediaCount
+      ? coalesceScenesToTargetCount(assignSections(scenes), targetMediaCount)
+      : assignSections(scenes);
+
   const draft = finalizeDraft(
     {
       title: String(raw.title || input.songTitle || 'Music Animation').trim() || 'Music Animation',
-      narration: scenes.map((s) => s.narration_segment).join('\n'),
-      scenes: assignSections(scenes),
+      narration: limited.map((s) => s.narration_segment).join('\n'),
+      scenes: limited,
     },
     musicSec,
     { requireStructure: false }
