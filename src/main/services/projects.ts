@@ -20,7 +20,14 @@ import type {
   ImageFamily,
 } from '../../shared/types';
 import { resolveProjectKind } from '../../shared/types';
-import { DEFAULT_DURATION_PER_SCENE, defaultFamilyForKind, defaultModelIdForKind, getModelById } from '../../shared/models';
+import {
+  DEFAULT_DURATION_PER_SCENE,
+  DEFAULT_PROJECT_LANGUAGE,
+  defaultFamilyForKind,
+  defaultModelIdForKind,
+  defaultStylePromptForProjectKind,
+  getModelById,
+} from '../../shared/models';
 import { resolveProjectChatModel, resolveProjectVoice, projectDraftHasVoice } from '../../shared/voice';
 
 const META_FILE = 'meta.json';
@@ -98,10 +105,11 @@ function readDraft(id: string): ProjectDraft | null {
     const mediaKind = raw.mediaKind ?? 'video';
     const voice = resolveProjectVoice(raw, getSettings());
     const settings = getSettings();
+    const projectKind = resolveProjectKind(raw.projectKind);
     const draft: ProjectDraft = {
-      projectKind: resolveProjectKind(raw.projectKind),
+      projectKind,
       brief: raw.brief ?? '',
-      language: raw.language ?? 'Tiếng Việt',
+      language: raw.language ?? DEFAULT_PROJECT_LANGUAGE,
       sceneCount,
       targetMediaCount:
         typeof raw.targetMediaCount === 'number' && raw.targetMediaCount > 0
@@ -117,7 +125,7 @@ function readDraft(id: string): ProjectDraft | null {
       mode: raw.mode,
       script: raw.script ?? null,
       mediaKind,
-      stylePrompt: raw.stylePrompt ?? '',
+      stylePrompt: raw.stylePrompt ?? defaultStylePromptForProjectKind(projectKind),
       openaiChatModel: resolveProjectChatModel(raw.openaiChatModel, settings.openaiModel),
       outputFormat: raw.outputFormat,
       lyricText: String(raw.lyricText || ''),
@@ -126,6 +134,7 @@ function readDraft(id: string): ProjectDraft | null {
         ? raw.characterRelativePaths.map(String).filter(Boolean)
         : [],
       musicStoryNotes: String(raw.musicStoryNotes || ''),
+      musicCastLock: String(raw.musicCastLock || ''),
       ...voice,
     };
     // Dự án cũ chưa có voice / chat model → snapshot vào draft một lần.
@@ -269,7 +278,7 @@ export function createProject(input: CreateProjectInput): ProjectMeta {
     status: 'draft',
     projectKind,
     brief: input.brief ?? '',
-    language: input.language ?? 'Tiếng Việt',
+    language: input.language ?? DEFAULT_PROJECT_LANGUAGE,
     family: input.family ?? defaultFamilyForKind(mediaKind),
     model: input.model ?? defaultModelIdForKind(mediaKind),
     aspectRatio: input.aspectRatio ?? defaultModel?.defaultAspectRatio ?? '16:9',
@@ -281,11 +290,7 @@ export function createProject(input: CreateProjectInput): ProjectMeta {
       (input.sceneCount ?? 3) * DEFAULT_DURATION_PER_SCENE,
     hasVideo: false,
     mediaKind,
-    stylePrompt:
-      input.stylePrompt ??
-      (projectKind === 'music-animation'
-        ? 'Animated music video, cinematic anime/illustration style, lip-sync friendly staging, vivid colors'
-        : ''),
+    stylePrompt: input.stylePrompt ?? defaultStylePromptForProjectKind(projectKind),
   };
 
   writeMeta(meta);
@@ -299,7 +304,7 @@ export function createProject(input: CreateProjectInput): ProjectMeta {
   writeDraft(id, {
     projectKind,
     brief: meta.brief ?? '',
-    language: meta.language ?? 'Tiếng Việt',
+    language: meta.language ?? DEFAULT_PROJECT_LANGUAGE,
     sceneCount: meta.sceneCount ?? 3,
     targetDurationSec: meta.targetDurationSec ?? DEFAULT_TARGET_DURATION_SEC,
     family: (meta.family ?? defaultFamilyForKind(mediaKind)) as VideoFamily | ImageFamily,
@@ -309,11 +314,12 @@ export function createProject(input: CreateProjectInput): ProjectMeta {
     mode: meta.mode,
     script: null,
     mediaKind,
-    stylePrompt: meta.stylePrompt ?? '',
+    stylePrompt: meta.stylePrompt ?? defaultStylePromptForProjectKind(projectKind),
     openaiChatModel: resolveProjectChatModel(input.openaiChatModel, settings.openaiModel),
     lyricText: '',
     characterRelativePaths: [],
     musicStoryNotes: '',
+    musicCastLock: '',
     ...voice,
   });
 
@@ -409,10 +415,16 @@ export function ensureProject(options: {
       const prevDraft = readDraft(options.projectId);
       const settings = getSettings();
       const voice = resolveProjectVoice(prevDraft, settings);
+      const keptKind = resolveProjectKind(prevDraft?.projectKind ?? existing.projectKind);
       writeDraft(options.projectId, {
+        // writeDraft ghi đè NGUYÊN file draft.json → phải mang theo mọi field
+        // không nằm trong options, nếu không dự án nhạc mất lyric / cast lock.
+        projectKind: keptKind,
         brief: existing.brief ?? '',
-        language: existing.language ?? 'Tiếng Việt',
+        language: existing.language ?? DEFAULT_PROJECT_LANGUAGE,
         sceneCount: options.script.scenes.length,
+        targetMediaCount: prevDraft?.targetMediaCount,
+        sceneDensity: prevDraft?.sceneDensity,
         targetDurationSec:
           existing.targetDurationSec ?? DEFAULT_TARGET_DURATION_SEC,
         family: options.family,
@@ -422,11 +434,17 @@ export function ensureProject(options: {
         mode: options.mode,
         script: options.script,
         mediaKind: existing.mediaKind ?? 'video',
-        stylePrompt: existing.stylePrompt ?? '',
+        stylePrompt: existing.stylePrompt ?? defaultStylePromptForProjectKind(keptKind),
         openaiChatModel: resolveProjectChatModel(
           prevDraft?.openaiChatModel,
           settings.openaiModel
         ),
+        outputFormat: prevDraft?.outputFormat,
+        lyricText: prevDraft?.lyricText,
+        musicRelativePath: prevDraft?.musicRelativePath,
+        characterRelativePaths: prevDraft?.characterRelativePaths ?? [],
+        musicStoryNotes: prevDraft?.musicStoryNotes,
+        musicCastLock: prevDraft?.musicCastLock,
         ...voice,
       });
       return existing;
@@ -464,7 +482,7 @@ export function ensureProject(options: {
   const voice = resolveProjectVoice(readDraft(created.id), getSettings());
   writeDraft(created.id, {
     brief: options.brief ?? '',
-    language: options.language ?? 'Tiếng Việt',
+    language: options.language ?? DEFAULT_PROJECT_LANGUAGE,
     sceneCount: options.script.scenes.length,
     targetDurationSec: scriptDuration || DEFAULT_TARGET_DURATION_SEC,
     family: options.family,
@@ -474,7 +492,7 @@ export function ensureProject(options: {
     mode: options.mode,
     script: options.script,
     mediaKind: options.mediaKind ?? 'video',
-    stylePrompt: options.stylePrompt ?? '',
+    stylePrompt: options.stylePrompt ?? defaultStylePromptForProjectKind(created.projectKind),
     openaiChatModel: resolveProjectChatModel(undefined, getSettings().openaiModel),
     ...voice,
   });

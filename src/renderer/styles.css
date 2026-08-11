@@ -2283,6 +2283,138 @@ h2 {
   color: #8fd4a8;
 }
 
+/* Header bước 3: badge đếm clip + nút tạo lại cảnh lỗi */
+.panel-heading-actions {
+  display: flex;
+  flex-shrink: 0;
+  gap: 8px;
+  align-items: center;
+}
+
+.editor-secondary.heading-action {
+  padding: 4px 10px;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+/* Hộp ước tính credit Snapgen */
+.credit-estimate {
+  margin: 12px 0 4px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #12141a;
+}
+
+/* Panel hẹp: xếp dọc nhãn / giá trị, tránh vỡ dòng giữa chừng */
+.credit-estimate-row {
+  display: grid;
+  gap: 1px;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.credit-estimate-row + .credit-estimate-row {
+  margin-top: 7px;
+  padding-top: 7px;
+  border-top: 1px solid var(--line-soft);
+}
+
+.credit-estimate-row strong {
+  color: var(--accent);
+  font-size: 12.5px;
+}
+
+.credit-estimate-row.muted strong {
+  color: var(--muted);
+  font-weight: 500;
+}
+
+.credit-estimate .hint {
+  margin: 8px 0 0;
+  font-size: 10px;
+  line-height: 1.45;
+}
+
+/* Danh sách trạng thái từng scene (bước 3 · Snapgen) */
+.scene-state-list {
+  margin: 14px 0 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 4px;
+}
+
+.scene-state-list li {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  padding: 7px 8px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: #12141a;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.scene-state-list li.ok {
+  border-color: #3a6b4a;
+  color: #8fd4a8;
+}
+
+.scene-state-list li.failed {
+  border-color: #7a3b3b;
+  color: #e79a9a;
+  background: rgba(122, 59, 59, 0.12);
+}
+
+.scene-state-list li.running {
+  border-color: rgba(37, 224, 208, 0.4);
+  color: var(--accent);
+}
+
+.scene-state-mark {
+  flex-shrink: 0;
+  width: 14px;
+  text-align: center;
+  font-weight: 700;
+}
+
+.scene-state-body {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+}
+
+.scene-state-title {
+  font-weight: 600;
+}
+
+.scene-state-sub,
+.scene-state-error {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+}
+
+.scene-state-sub {
+  color: var(--muted);
+  opacity: 0.75;
+}
+
+.scene-state-error {
+  color: #e79a9a;
+}
+
+.scene-state-retry {
+  flex-shrink: 0;
+  padding: 2px 8px;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
 .step-scene-summary {
   margin-top: 16px;
   padding-top: 12px;

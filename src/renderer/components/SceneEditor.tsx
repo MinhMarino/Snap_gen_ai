@@ -116,7 +116,8 @@ export default function SceneEditor({ script, onChange, modelId, mediaKind }: Pr
             />
             {mediaKind === 'video' && scene.duration_hint > maxShot && (
               <p className="hint">
-                &gt;{maxShot}s → cảnh này sẽ auto-extend / chia đoạn (không nối sang cảnh khác).
+                &gt;{maxShot}s → cảnh này sẽ auto-extend / chia đoạn; scene sau (nếu model hỗ trợ)
+                nối liền mạch qua ref_history.
               </p>
             )}
           </div>

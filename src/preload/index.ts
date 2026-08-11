@@ -138,7 +138,7 @@ const api = {
   generateMusicAnimationScript: (
     projectId: string,
     input?: Partial<GenerateMusicAnimationScriptInput>
-  ): Promise<{ script: ScriptDraft; notes: string }> =>
+  ): Promise<{ script: ScriptDraft; notes: string; castLock: string }> =>
     ipcRenderer.invoke(IPC.generateMusicAnimationScript, projectId, input),
   importMusicAudio: (
     projectId: string
@@ -176,6 +176,15 @@ const api = {
     ipcRenderer.on(IPC.jobFinished, listener);
     return () => ipcRenderer.removeListener(IPC.jobFinished, listener);
   },
+  /** Hộp thoại nhiều nút — trả index nút đã bấm (Esc → cancelId). */
+  showChoiceDialog: (options: {
+    title?: string;
+    message: string;
+    detail?: string;
+    buttons: string[];
+    defaultId?: number;
+    cancelId?: number;
+  }): Promise<number> => ipcRenderer.invoke(IPC.showChoiceDialog, options),
   openPath: (target: string): Promise<string> => ipcRenderer.invoke(IPC.openPath, target),
   showItemInFolder: (target: string): Promise<void> =>
     ipcRenderer.invoke(IPC.showItemInFolder, target),
@@ -200,6 +209,7 @@ const api = {
 
   listProjects: (): Promise<ProjectMeta[]> => ipcRenderer.invoke(IPC.listProjects),
   getProject: (id: string): Promise<ProjectDetail> => ipcRenderer.invoke(IPC.getProject, id),
+  getProjectsRoot: (): Promise<string> => ipcRenderer.invoke(IPC.getProjectsRoot),
   createProject: (input: CreateProjectInput): Promise<ProjectMeta> =>
     ipcRenderer.invoke(IPC.createProject, input),
   renameProject: (id: string, name: string): Promise<ProjectMeta> =>

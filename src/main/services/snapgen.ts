@@ -10,8 +10,13 @@ export interface SnapgenHistory {
   uuid: string;
   status: number;
   status_percentage?: number;
+  status_desc?: string | null;
   error_code?: string;
   error_message?: string;
+  input_text?: string | null;
+  model_name?: string | null;
+  type?: string | null;
+  created_at?: string | null;
   generated_video?: Array<{
     video_url?: string | null;
     duration?: number | null;
@@ -326,6 +331,145 @@ export async function getHistory(apiKey: string, uuid: string): Promise<SnapgenH
   return data;
 }
 
+/**
+ * Google chặn prompt vì chính sách nội dung (RAI).
+ * Thử lại y nguyên prompt là vô ích — phải sửa mô tả rồi mới gọi lại.
+ */
+export function isSafetyBlockedError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  return /GEMINI_RAI|RAI_MEDIA_FILTERED|UNSAFE_GENERATION|SAFETY|bị Google chặn|describe children|celebrity|third-party content/i.test(
+    msg
+  );
+}
+
+export function normalizeSnapgenPrompt(prompt: string): string {
+  return String(prompt || '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+}
+
+/**
+ * Tỉ lệ tối thiểu giữa prompt ngắn/dài để coi là "cùng một prompt bị cắt đuôi".
+ * Cao vì hai scene khác nhau vẫn có thể chung tiền tố rất dài.
+ */
+const PROMPT_TRUNCATION_MIN_RATIO = 0.9;
+
+/**
+ * So khớp prompt gửi Snapgen với input_text trên history.
+ *
+ * CHỈ chấp nhận: giống hệt, hoặc cái ngắn là TIỀN TỐ của cái dài và giữ được
+ * ≥90% độ dài (Snapgen cắt đuôi input_text).
+ *
+ * KHÔNG được so theo N ký tự đầu: prompt nối cảnh mở đầu bằng câu
+ * "Continue seamlessly from the previous shot… continuation into: " dài 158 ký
+ * tự, nên so 160 ký tự đầu làm MỌI scene nối cảnh khớp lẫn nhau → 28 scene tải
+ * về cùng một video cũ thay vì gen mới.
+ */
+export function snapgenPromptsMatch(a: string, b: string): boolean {
+  const na = normalizeSnapgenPrompt(a);
+  const nb = normalizeSnapgenPrompt(b);
+  if (!na || !nb) return false;
+  if (na === nb) return true;
+
+  const [shorter, longer] = na.length <= nb.length ? [na, nb] : [nb, na];
+  if (shorter.length < 48) return false;
+  if (!longer.startsWith(shorter)) return false;
+  return shorter.length / longer.length >= PROMPT_TRUNCATION_MIN_RATIO;
+}
+
+export interface ListHistoriesOptions {
+  filterBy?: string;
+  page?: number;
+  itemsPerPage?: number;
+}
+
+export async function listHistories(
+  apiKey: string,
+  options: ListHistoriesOptions = {}
+): Promise<{ total: number | null; result: SnapgenHistory[] }> {
+  const url = new URL(`${BASE}/uapi/v1/histories`);
+  url.searchParams.set('filter_by', options.filterBy || 'all');
+  url.searchParams.set('page', String(options.page ?? 1));
+  url.searchParams.set('items_per_page', String(options.itemsPerPage ?? 20));
+  const res = await fetch(url, {
+    headers: { 'x-api-key': apiKey, Accept: 'application/json' },
+  });
+  const text = await res.text();
+  let data: {
+    success?: boolean;
+    total?: number | null;
+    result?: SnapgenHistory[];
+    detail?: unknown;
+  } = {};
+  try {
+    data = JSON.parse(text) as typeof data;
+  } catch {
+    data = {};
+  }
+  if (!res.ok) {
+    throw new Error(`Không lấy được danh sách history Snapgen: HTTP ${res.status}`);
+  }
+  return {
+    total: typeof data.total === 'number' ? data.total : null,
+    result: Array.isArray(data.result) ? data.result : [],
+  };
+}
+
+export type ReusableHistoryKind = 'video' | 'image';
+
+/**
+ * Tìm history Snapgen trùng prompt để tái sử dụng (đã xong hoặc đang chạy).
+ * Ưu tiên COMPLETED (status=2), rồi PROCESSING — tránh gọi generate lại tốn credit.
+ */
+export async function findReusableHistoryByPrompt(
+  apiKey: string,
+  prompt: string,
+  kind: ReusableHistoryKind,
+  options?: { maxPages?: number; pageSize?: number }
+): Promise<SnapgenHistory | null> {
+  const maxPages = options?.maxPages ?? 3;
+  const pageSize = options?.pageSize ?? 25;
+  const filterBy = kind === 'image' ? 'image' : 'video';
+  let bestProcessing: SnapgenHistory | null = null;
+
+  for (let page = 1; page <= maxPages; page++) {
+    let rows: SnapgenHistory[] = [];
+    try {
+      const listed = await listHistories(apiKey, { filterBy, page, itemsPerPage: pageSize });
+      rows = listed.result;
+      if (!rows.length) break;
+    } catch {
+      break;
+    }
+
+    for (const row of rows) {
+      if (!row?.uuid) continue;
+      const input = String(row.input_text || '');
+      if (!snapgenPromptsMatch(prompt, input)) continue;
+      if (row.status === 3) continue;
+      if (row.status === 2) {
+        // List endpoint thường thiếu nested media — lấy chi tiết khi cần.
+        try {
+          const detail = await getHistory(apiKey, row.uuid);
+          if (detail.status === 2) return detail;
+          if (detail.status === 0 || detail.status === 1) {
+            bestProcessing = bestProcessing || detail;
+          }
+        } catch {
+          return row;
+        }
+      } else if (row.status === 0 || row.status === 1) {
+        bestProcessing = bestProcessing || row;
+      }
+    }
+
+    if (rows.length < pageSize) break;
+  }
+
+  return bestProcessing;
+}
+
 function extractErrorCode(message?: string | null, explicit?: string | null): string | undefined {
   if (explicit?.trim()) return explicit.trim();
   const m = message?.match(/Error code:\s*([A-Z0-9_]+)/i);
@@ -350,6 +494,7 @@ export async function waitForMedia(
 ): Promise<SnapgenHistory> {
   const started = Date.now();
   let delay = 4000;
+  let completedWithoutUrlSince: number | null = null;
 
   while (Date.now() - started < timeoutMs) {
     if (shouldAbort?.()) {
@@ -364,16 +509,18 @@ export async function waitForMedia(
 
     if (hist.status === 2) {
       const url = extractMediaUrl(hist, kind);
-      if (!url) {
+      if (url) return hist;
+      // Status completed nhưng URL chưa sẵn — đợi thêm một lúc rồi mới fail.
+      if (completedWithoutUrlSince == null) completedWithoutUrlSince = Date.now();
+      if (Date.now() - completedWithoutUrlSince > 90_000) {
         throw new Error(
           kind === 'video'
             ? 'Video đã xong nhưng thiếu video_url trong lịch sử Snapgen.'
             : 'Ảnh đã xong nhưng thiếu image_url trong lịch sử Snapgen.'
         );
       }
-      return hist;
-    }
-    if (hist.status === 3) {
+      onProgress?.(Math.max(pct, 95), hist.status);
+    } else if (hist.status === 3) {
       throw new Error(
         localizeSnapgenError(
           hist.error_message,
@@ -381,6 +528,8 @@ export async function waitForMedia(
           kind
         )
       );
+    } else {
+      completedWithoutUrlSince = null;
     }
 
     const until = Date.now() + delay;

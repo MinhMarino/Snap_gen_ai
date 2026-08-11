@@ -15,10 +15,14 @@ import type {
 import { resolveProjectKind } from '../../shared/types';
 import {
   clampTargetSceneCount,
+  DEFAULT_PROJECT_LANGUAGE,
   DEFAULT_SCENE_DENSITY,
+  DEFAULT_STYLE_PROMPT,
   defaultFamilyForKind,
   defaultModelIdForKind,
+  estimateGenerationCredits,
   estimateScriptSpokenSeconds,
+  formatCreditEstimate,
   formatDurationLabel,
   getModelById,
   maxSingleShotDuration,
@@ -100,15 +104,32 @@ function buildMediaGenerateConfirmMessage(options: {
     }
   }
 
-  const lines = [
-    `Xác nhận tạo ${regenerateSceneIds.length} ${mediaLabel} scene` +
-      (mediaKind === 'video' && apiCalls !== regenerateSceneIds.length
-        ? ` (~${apiCalls} shot API).`
-        : '.'),
-    `• Mới: ${newCount}`,
-    `• Ghi đè scene đã có: ${overwriteCount}`,
-    `• Giữ nguyên / không gen: ${keepCount} (tổng ${total} scene)`,
-  ];
+  const splitNote =
+    mediaKind === 'video' && apiCalls !== regenerateSceneIds.length
+      ? ` (~${apiCalls} lượt gọi API — scene dài được chia thành nhiều shot).`
+      : '.';
+  const lines = [`Xác nhận tạo ${regenerateSceneIds.length} ${mediaLabel} scene${splitNote}`];
+
+  // Chi phí ước tính theo bảng giá Snapgen — cho biết trước khi tốn credit.
+  const estimate = estimateGenerationCredits({
+    mediaKind,
+    modelId,
+    family,
+    durations: script.scenes
+      .filter((scene) => selected.has(scene.id))
+      .map((scene) => scene.duration_hint),
+  });
+  lines.push(`• Chi phí ước tính: ${formatCreditEstimate(estimate)}`);
+
+  // Chưa có media nào thì đừng nhắc "ghi đè: 0" — chỉ gây hoang mang.
+  if (overwriteCount > 0) {
+    lines.push(`• Mới: ${newCount}`, `• Ghi đè ${mediaLabel} đã có: ${overwriteCount}`);
+  } else {
+    lines.push(`• Tất cả ${newCount} scene đều chưa có ${mediaLabel} — không ghi đè gì.`);
+  }
+  if (keepCount > 0) {
+    lines.push(`• Giữ nguyên / không gen: ${keepCount} (tổng ${total} scene)`);
+  }
   if (mediaKind === 'image') {
     lines.push(
       '',
@@ -203,8 +224,8 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
   const [family, setFamily] = useState<string>(defaultFamilyForKind('video'));
   const [modelId, setModelId] = useState(defaultModelIdForKind('video'));
   const [brief, setBrief] = useState('');
-  const [stylePrompt, setStylePrompt] = useState('');
-  const [language, setLanguage] = useState('Tiếng Việt');
+  const [stylePrompt, setStylePrompt] = useState(DEFAULT_STYLE_PROMPT);
+  const [language, setLanguage] = useState(DEFAULT_PROJECT_LANGUAGE);
   /** Free-text minutes; may be empty while typing. */
   const [durationInput, setDurationInput] = useState(String(DEFAULT_DURATION_MIN));
   /** dense | normal | economy | custom — kiểm soát số ảnh/video. */
@@ -243,6 +264,7 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
   const [musicRelativePath, setMusicRelativePath] = useState<string | undefined>();
   const [characterRelativePaths, setCharacterRelativePaths] = useState<string[]>([]);
   const [musicStoryNotes, setMusicStoryNotes] = useState('');
+  const [musicCastLock, setMusicCastLock] = useState('');
   const [musicDurationSec, setMusicDurationSec] = useState<number | null>(null);
   const [activity, setActivity] = useState<StepActivityState | null>(null);
   const isMusicAnimation = projectKind === 'music-animation';
@@ -676,7 +698,7 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
           setOutputFormat(inferOutputFormatId(draft.aspectRatio, draft.outputFormat));
           setResolution(draft.resolution);
           setMode(draft.mode ?? '');
-          setStylePrompt(draft.stylePrompt ?? '');
+          setStylePrompt(draft.stylePrompt?.trim() ? draft.stylePrompt : DEFAULT_STYLE_PROMPT);
           setScript(draft.script);
           setVoice(resolveProjectVoice(draft));
           setOpenaiChatModel(
@@ -688,6 +710,7 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
           setMusicRelativePath(draft.musicRelativePath);
           setCharacterRelativePaths(draft.characterRelativePaths || []);
           setMusicStoryNotes(draft.musicStoryNotes || '');
+          setMusicCastLock(draft.musicCastLock || '');
           if (kind === 'music-animation' && detail.audioPath) {
             // duration sẽ cập nhật khi import; ước từ draft nếu có
             setMusicDurationSec(draft.targetDurationSec || null);
@@ -1265,7 +1288,16 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
     }
   };
 
-  const runStepAction = async (step: WorkflowStep, mode: 'create' | 'recreate' = 'create') => {
+  /**
+   * mode cho bước media:
+   *  create   → tự hỏi phạm vi nếu đã có media (bù cảnh thiếu / ghi đè hết)
+   *  missing  → chỉ gen cảnh còn thiếu, không hỏi
+   *  recreate → ghi đè toàn bộ, không hỏi
+   */
+  const runStepAction = async (
+    step: WorkflowStep,
+    mode: 'create' | 'recreate' | 'missing' = 'create'
+  ) => {
     if (step === 'script') {
       await createScript();
       return;
@@ -1290,6 +1322,7 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
       return;
     }
     if (step === 'media') {
+      const allIds = script.scenes.map((scene) => scene.id);
       const missing = script.scenes
         .filter((scene, index) => {
           const asset =
@@ -1297,14 +1330,52 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
           return !asset?.exists;
         })
         .map((scene) => scene.id);
-      const ids =
-        mode === 'recreate' || missing.length === 0
-          ? script.scenes.map((scene) => scene.id)
-          : missing;
+      const existingCount = allIds.length - missing.length;
+      const mediaWord = mediaKind === 'image' ? 'ảnh' : 'video';
+
+      let ids: string[];
+      let asked = false;
+
+      if (mode === 'recreate') {
+        ids = allIds;
+      } else if (mode === 'missing') {
+        ids = missing.length ? missing : allIds;
+      } else if (existingCount > 0) {
+        // Đã có media → phải hỏi rõ: bù cảnh thiếu hay ghi đè hết.
+        // window.confirm chỉ có OK/Cancel nên dùng hộp thoại nhiều nút của Electron.
+        const canFillMissing = missing.length > 0;
+        const buttons = canFillMissing
+          ? [
+              `Chỉ tạo ${missing.length} cảnh còn thiếu`,
+              `Ghi đè toàn bộ ${allIds.length} cảnh`,
+              'Hủy',
+            ]
+          : [`Ghi đè toàn bộ ${allIds.length} cảnh`, 'Hủy'];
+        const choice = await window.studio.showChoiceDialog({
+          title: `Tạo ${mediaWord} scene`,
+          message: canFillMissing
+            ? `Đã có ${existingCount}/${allIds.length} cảnh, còn thiếu ${missing.length}.`
+            : `Cả ${allIds.length} cảnh đều đã có ${mediaWord}.`,
+          detail: canFillMissing
+            ? `«Chỉ tạo cảnh còn thiếu» giữ nguyên ${existingCount} cảnh đã xong — không tốn credit gen lại.`
+            : `Ghi đè sẽ gen lại toàn bộ ${allIds.length} cảnh và tốn credit như lần đầu.`,
+          buttons,
+          defaultId: 0,
+          cancelId: buttons.length - 1,
+        });
+        if (choice === buttons.length - 1) return;
+        ids = canFillMissing && choice === 0 ? missing : allIds;
+        asked = true;
+      } else {
+        ids = allIds;
+      }
+
       await confirmGenerate({
         regenerateSceneIds: ids,
         refreshNarration: false,
         step: 'media',
+        // Đã chọn phạm vi ở hộp thoại trên rồi → không hỏi lần hai.
+        skipConfirm: asked,
       });
       return;
     }
@@ -1363,19 +1434,22 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
     refreshNarration: boolean;
     step?: 'audio' | 'media' | 'remux';
     clearNarrationFirst?: boolean;
+    /** true khi người gọi đã hỏi xác nhận rồi — tránh hiện 2 hộp thoại liên tiếp. */
+    skipConfirm?: boolean;
   }) => {
     if (!script || generateRunning.current) return;
     const step = payload.step || 'media';
 
+    if (step === 'media' && payload.regenerateSceneIds.length === 0) {
+      setToast({
+        type: 'error',
+        text: 'Chưa chọn scene nào để tạo. Dùng «Chọn scene nâng cao…» hoặc chọn scene thiếu.',
+      });
+      return;
+    }
+
     // Xác nhận số lượng trước khi gọi Snapgen (ảnh/video).
-    if (step === 'media') {
-      if (payload.regenerateSceneIds.length === 0) {
-        setToast({
-          type: 'error',
-          text: 'Chưa chọn scene nào để tạo. Dùng «Chọn scene nâng cao…» hoặc chọn scene thiếu.',
-        });
-        return;
-      }
+    if (step === 'media' && !payload.skipConfirm) {
       const ok = window.confirm(
         buildMediaGenerateConfirmMessage({
           mediaKind,
@@ -1620,11 +1694,13 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
     musicRelativePath?: string | undefined;
     characterRelativePaths?: string[];
     musicStoryNotes?: string;
+    musicCastLock?: string;
   }) => {
     if (patch?.lyricText !== undefined) setLyricText(patch.lyricText);
     if (patch && 'musicRelativePath' in patch) setMusicRelativePath(patch.musicRelativePath);
     if (patch?.characterRelativePaths) setCharacterRelativePaths(patch.characterRelativePaths);
     if (patch?.musicStoryNotes !== undefined) setMusicStoryNotes(patch.musicStoryNotes);
+    if (patch?.musicCastLock !== undefined) setMusicCastLock(patch.musicCastLock);
     const id = await ensureProject();
     await window.studio.saveProjectDraft(id, {
       ...draftPayload(script),
@@ -1633,6 +1709,7 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
         patch && 'musicRelativePath' in patch ? patch.musicRelativePath : musicRelativePath,
       characterRelativePaths: patch?.characterRelativePaths ?? characterRelativePaths,
       musicStoryNotes: patch?.musicStoryNotes ?? musicStoryNotes,
+      musicCastLock: patch?.musicCastLock ?? musicCastLock,
       projectKind: 'music-animation',
     });
     return id;
@@ -1682,6 +1759,7 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
       });
       setScript(result.script);
       setMusicStoryNotes(result.notes || '');
+      setMusicCastLock(result.castLock || '');
       pushActivityLog(`Đã tạo ${result.script.scenes.length} scene (mục tiêu ~${mediaTarget}).`, 'ok');
       finishActivity(true, 'Phân cảnh xong');
       setActiveStep('voice');
@@ -1716,9 +1794,27 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
             musicRelativePath,
             characterRelativePaths,
             musicStoryNotes,
+            musicCastLock,
             projectKind: 'music-animation',
           }}
           script={script}
+          sceneMedia={sceneMedia}
+          sceneStatuses={progress?.sceneStatuses}
+          mediaKind={mediaKind}
+          families={families}
+          models={models}
+          family={family}
+          modelId={modelId}
+          aspectRatio={aspectRatio}
+          outputFormat={outputFormat}
+          resolution={resolution}
+          mode={mode}
+          onFamilyChange={onFamilyChange}
+          onModelChange={onModelChange}
+          onAspectRatioChange={(v) => applyAspectRatio(v, outputFormat)}
+          onOutputFormatChange={(v) => setOutputFormat(v as typeof outputFormat)}
+          onResolutionChange={setResolution}
+          onModeChange={setMode}
           audioPath={resolvedNarrationPath || narrationPath}
           musicDurationSec={musicDurationSec}
           step3Done={step3Done}
@@ -1772,8 +1868,22 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
               setCharacterRelativePaths([]);
             })();
           }}
+          // Panel nhạc chỉ có 1 nút → để hộp thoại hỏi phạm vi (thiếu / ghi đè).
+          onCastLockChange={(v) => {
+            setMusicCastLock(v);
+            void persistMusicDraft({ musicCastLock: v }).catch(() => undefined);
+          }}
           onAnalyze={() => void runMusicAnalyze()}
-          onGenerateMedia={() => void runStepAction('media', step3Done ? 'recreate' : 'create')}
+          onGenerateMedia={() => void runStepAction('media', 'create')}
+          onRegenerateScenes={(ids) => {
+            if (!ids.length) return;
+            setActiveStep('media');
+            void confirmGenerate({
+              regenerateSceneIds: ids,
+              refreshNarration: false,
+              step: 'media',
+            });
+          }}
           onMerge={() => void runStepAction('merge', step4Done ? 'recreate' : 'create')}
           onGoStep={(s) => setActiveStep(musicStepToWorkflow(s))}
         />
@@ -1823,7 +1933,7 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
               id="brief"
               value={brief}
               onChange={(event) => setBrief(event.target.value)}
-              placeholder="A 30-second cinematic coffee shop story by the sea..."
+              placeholder="Colors for kids: red apple, blue ball, yellow sun..."
             />
           </div>
           <div className="field compact-field">
@@ -1833,16 +1943,20 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
               className="small-textarea"
               value={stylePrompt}
               onChange={(event) => setStylePrompt(event.target.value)}
-              placeholder="Warm film look, soft light..."
+              placeholder="Simple Pingpong-style kids learning cartoon..."
             />
           </div>
           <div className="field compact-field">
-            <label htmlFor="language">Language</label>
+            <label htmlFor="language">Language (script / TTS)</label>
             <input
               id="language"
               value={language}
               onChange={(event) => setLanguage(event.target.value)}
+              placeholder="English"
             />
+            <small className="field-hint">
+              Script & voiceover language. Visuals stay English, no on-screen text.
+            </small>
           </div>
           <div className="field compact-field duration-field">
             <div className="duration-field-head">
@@ -2240,7 +2354,12 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
                   type="button"
                   className="editor-primary full-width"
                   disabled={busy}
-                  onClick={() => void runStepAction('media', 'create')}
+                  onClick={() =>
+                    void runStepAction(
+                      'media',
+                      missingMediaIds.length > 0 ? 'missing' : 'recreate'
+                    )
+                  }
                 >
                   <span>▧</span>
                   {busy && activity?.stepId === 'media'
@@ -2744,8 +2863,8 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
                   currentScene.duration_hint > Math.max(...selectedModel.durations) && (
                     <p className="hint">
                       Cảnh dài hơn giới hạn model ({Math.max(...selectedModel.durations)}s) →
-                      hệ thống auto-extend / chia đoạn trong cảnh này. Cảnh kế tiếp vẫn gen
-                      mới (hard cut).
+                      hệ thống auto-extend / chia đoạn trong cảnh này. Scene kế tiếp (Veo/Grok/
+                      Seedance/Kling) nối liền mạch qua video-extend ref_history.
                     </p>
                   )}
               </div>

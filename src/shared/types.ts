@@ -286,6 +286,11 @@ export interface ProjectDraft {
   /** music-animation: ghi chú phân tích từ ChatGPT (optional). */
   musicStoryNotes?: string;
   /**
+   * music-animation: cast/style bible ngắn do ChatGPT viết, lặp vào MỌI prompt scene
+   * để nhân vật không bị vẽ lại khác nhau ở từng scene.
+   */
+  musicCastLock?: string;
+  /**
    * Output Format UI (youtube, tiktok, …).
    * API vẫn dùng `aspectRatio`; field này chỉ để nhớ preset khi nhiều format cùng ratio.
    */
@@ -393,6 +398,12 @@ export interface GenerateJobInput {
   skipMerge?: boolean;
   /** Override số worker song song (mặc định lấy từ Settings). */
   maxConcurrentScenes?: number;
+  /**
+   * Nối scene video liền mạch qua Snapgen video-extend (`ref_history`).
+   * Default: true khi mediaKind=video và family hỗ trợ extend (veo/grok/seedance/kling).
+   * Khi bật → generate tuần tự theo thứ tự scene.
+   */
+  chainScenes?: boolean;
   /** Voiceover theo dự án (ưu tiên hơn AppSettings). */
   ttsProvider?: TtsProvider;
   openaiTtsModel?: string;

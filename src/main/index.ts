@@ -2,7 +2,7 @@ import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron';
 import fs from 'node:fs';
 import path from 'node:path';
 import { IPC } from '../shared/ipc';
-import { IMAGE_FAMILIES, IMAGE_MODELS, VIDEO_FAMILIES, VIDEO_MODELS } from '../shared/models';
+import { IMAGE_FAMILIES, IMAGE_MODELS, VIDEO_FAMILIES, VIDEO_MODELS, DEFAULT_PROJECT_LANGUAGE } from '../shared/models';
 import type {
   ApiKeys,
   AppSettings,
@@ -14,7 +14,7 @@ import type {
   LoadMoreUsageHistoryRequest,
   ProjectDraft,
 } from '../shared/types';
-import { ensureGenmaxApiKey, getKeys, getSettings, saveKeys, saveSettings } from './store';
+import { ensureGenmaxApiKey, getKeys, getProjectsRoot, getSettings, saveKeys, saveSettings } from './store';
 import { testAccount } from './services/snapgen';
 import { generateMusicAnimationScript, generateScript, testOpenAI } from './services/openai';
 import {
@@ -311,7 +311,7 @@ function registerIpc(): void {
         chatModel,
         {
           lyricText,
-          language: input?.language || draft.language || 'Tiếng Việt',
+          language: input?.language || draft.language || DEFAULT_PROJECT_LANGUAGE,
           musicDurationSec,
           sceneCount:
             input?.sceneCount ||
@@ -338,6 +338,7 @@ function registerIpc(): void {
         sceneCount: result.script.scenes.length,
         targetDurationSec: Math.round(musicDurationSec),
         musicStoryNotes: result.notes,
+        musicCastLock: result.castLock,
       });
       return result;
     }
@@ -492,6 +493,7 @@ function registerIpc(): void {
 
   ipcMain.handle(IPC.listProjects, () => listProjects());
   ipcMain.handle(IPC.getProject, (_e, id: string) => getProject(id));
+  ipcMain.handle(IPC.getProjectsRoot, () => getProjectsRoot());
   ipcMain.handle(IPC.createProject, (_e, input: CreateProjectInput) => createProject(input));
   ipcMain.handle(IPC.renameProject, (_e, id: string, name: string) => renameProject(id, name));
   ipcMain.handle(IPC.deleteProject, (_e, id: string) => deleteProject(id));
@@ -499,6 +501,57 @@ function registerIpc(): void {
     IPC.saveProjectDraft,
     (_e, id: string, draft: ProjectDraft, patch?: { name?: string }) =>
       saveProjectDraft(id, draft, patch)
+  );
+
+  /**
+   * Hộp thoại nhiều lựa chọn (window.confirm chỉ có OK/Cancel).
+   * Trả về index của nút đã bấm; đóng bằng Esc → cancelId.
+   */
+  ipcMain.handle(
+    IPC.showChoiceDialog,
+    async (
+      _e,
+      options: {
+        title?: string;
+        message: string;
+        detail?: string;
+        buttons: string[];
+        defaultId?: number;
+        cancelId?: number;
+      }
+    ) => {
+      const buttons = options.buttons?.length ? options.buttons : ['OK'];
+      const cancelId =
+        options.cancelId != null && options.cancelId >= 0 && options.cancelId < buttons.length
+          ? options.cancelId
+          : buttons.length - 1;
+      const defaultId =
+        options.defaultId != null && options.defaultId >= 0 && options.defaultId < buttons.length
+          ? options.defaultId
+          : 0;
+      const result = mainWindow
+        ? await dialog.showMessageBox(mainWindow, {
+            type: 'question',
+            title: options.title || 'Xác nhận',
+            message: options.message,
+            detail: options.detail,
+            buttons,
+            defaultId,
+            cancelId,
+            noLink: true,
+          })
+        : await dialog.showMessageBox({
+            type: 'question',
+            title: options.title || 'Xác nhận',
+            message: options.message,
+            detail: options.detail,
+            buttons,
+            defaultId,
+            cancelId,
+            noLink: true,
+          });
+      return result.response;
+    }
   );
 
   ipcMain.handle(IPC.openPath, async (_e, target: string) => shell.openPath(target));

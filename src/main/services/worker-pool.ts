@@ -84,7 +84,7 @@ export async function runPool<T>(
 
 export function isRetryableMediaError(err: unknown): boolean {
   const msg = err instanceof Error ? err.message : String(err);
-  return /429|rate.?limit|timeout|etimedout|econnreset|enotfound|eai_again|503|502|504|524|temporar|try again|overloaded|too many requests|gateway|network|fetch failed|socket/i.test(
+  return /429|rate.?limit|timeout|etimedout|econnreset|enotfound|eai_again|503|502|504|524|temporar|try again|overloaded|too many requests|gateway|network|fetch failed|socket|thiếu video_url|thiếu image_url|file tải về rỗng|tải file thất bại|download/i.test(
     msg
   );
 }
@@ -97,6 +97,8 @@ export async function withRetries<T>(
     baseDelayMs?: number;
     onRetry?: (attempt: number, err: unknown, delayMs: number) => void;
     shouldAbort?: () => boolean;
+    /** Mặc định isRetryableMediaError; override để retry cả lỗi khác (vd. đã sửa prompt). */
+    isRetryable?: (err: unknown, attempt: number) => boolean;
   }
 ): Promise<T> {
   const maxAttempts = Math.max(1, options?.maxAttempts ?? 3);
@@ -114,7 +116,9 @@ export async function withRetries<T>(
       if (options?.shouldAbort?.()) {
         throw new Error(`${label}: đã dừng bởi người dùng`);
       }
-      const retryable = isRetryableMediaError(err);
+      const retryable = options?.isRetryable
+        ? options.isRetryable(err, attempt)
+        : isRetryableMediaError(err);
       if (!retryable || attempt >= maxAttempts) break;
       const delayMs = Math.min(30_000, baseDelayMs * 2 ** (attempt - 1));
       options?.onRetry?.(attempt, err, delayMs);

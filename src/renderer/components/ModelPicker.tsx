@@ -128,7 +128,7 @@ export default function ModelPicker(props: Props) {
       <p className="hint">
         {props.mediaKind === 'image'
           ? `Thời lượng mỗi slide gợi ý: ${(selected?.durations ?? []).join(', ')}s — ảnh sẽ ghép thành slideshow theo narration.`
-          : `Mỗi lần gen tối đa ${Math.max(...(selected?.durations ?? [8]))}s. Cảnh dài hơn sẽ auto-extend trong cùng cảnh; cảnh khác là hard cut mới.`}
+          : `Mỗi lần gen tối đa ${Math.max(...(selected?.durations ?? [8]))}s. Cảnh dài hơn sẽ auto-extend. Với Veo/Grok/Seedance/Kling, scene kế tiếp nối liền mạch qua ref_history (chain extend).`}
       </p>
     </div>
   );

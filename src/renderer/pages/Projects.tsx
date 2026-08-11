@@ -31,8 +31,15 @@ export default function Projects({ onOpenProject, onCreateAndOpen }: Props) {
   const [liveJobId, setLiveJobId] = useState<string | null>(null);
   const [livePercent, setLivePercent] = useState<number | null>(null);
 
+  const [projectsRoot, setProjectsRoot] = useState<string | null>(null);
+
   const refresh = useCallback(async () => {
     setProjects(await window.studio.listProjects());
+    try {
+      setProjectsRoot(await window.studio.getProjectsRoot());
+    } catch {
+      setProjectsRoot(null);
+    }
     try {
       const job = await window.studio.getActiveJob();
       setLiveJobId(job.active ? job.projectId : null);
@@ -42,6 +49,27 @@ export default function Projects({ onOpenProject, onCreateAndOpen }: Props) {
       setLivePercent(null);
     }
   }, []);
+
+  const openProjectsFolder = async () => {
+    try {
+      const root = projectsRoot || (await window.studio.getProjectsRoot());
+      setProjectsRoot(root);
+      const err = await window.studio.openPath(root);
+      if (err) setError(err);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  const openOneProjectFolder = async (projectId: string) => {
+    try {
+      const detail = await window.studio.getProject(projectId);
+      const err = await window.studio.openPath(detail.projectDir);
+      if (err) setError(err);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  };
 
   useEffect(() => {
     void refresh();
@@ -129,6 +157,21 @@ export default function Projects({ onOpenProject, onCreateAndOpen }: Props) {
         <p className="eyebrow">Library</p>
         <h1>Dự án</h1>
         <p className="sub">Tạo dự án mới với tên riêng, mở lại, đổi tên hoặc xóa.</p>
+        <div className="create-row" style={{ marginTop: 12, marginBottom: 0, alignItems: 'center' }}>
+          <button
+            type="button"
+            className="btn"
+            onClick={() => void openProjectsFolder()}
+            title={projectsRoot || 'Mở thư mục chứa tất cả dự án trong Finder'}
+          >
+            Mở thư mục dự án
+          </button>
+          {projectsRoot ? (
+            <span className="muted" style={{ fontSize: 12, wordBreak: 'break-all' }}>
+              {projectsRoot}
+            </span>
+          ) : null}
+        </div>
       </div>
 
       <div className="create-row">
@@ -229,6 +272,14 @@ export default function Projects({ onOpenProject, onCreateAndOpen }: Props) {
                   <>
                     <button type="button" className="btn primary" onClick={() => onOpenProject(p.id)}>
                       Mở
+                    </button>
+                    <button
+                      type="button"
+                      className="btn"
+                      title="Mở thư mục dự án này trong Finder"
+                      onClick={() => void openOneProjectFolder(p.id)}
+                    >
+                      Thư mục
                     </button>
                     <button
                       type="button"

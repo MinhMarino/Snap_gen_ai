@@ -222,6 +222,14 @@ export async function getDurationSafe(filePath: string, fallback: number): Promi
   }
 }
 
+/**
+ * `-vn` là BẮT BUỘC cho mọi output chỉ-audio.
+ * mp3/m4a bài hát thường nhúng ảnh bìa album như một stream video (mjpeg);
+ * không chặn thì ffmpeg tự map nó, cố encode ra h264 và muxer m4a/mp3 chết với
+ * "Could not write header (incorrect codec parameters ?)" → Conversion failed.
+ */
+const AUDIO_ONLY = '-vn';
+
 /** Convert any ffmpeg-readable audio (wav/… ) → mp3 mono 44.1k. */
 export async function convertAudioToMp3(inputPath: string, outputPath: string): Promise<string> {
   fs.mkdirSync(path.dirname(outputPath), { recursive: true });
@@ -229,6 +237,7 @@ export async function convertAudioToMp3(inputPath: string, outputPath: string): 
     ffmpeg()
       .input(inputPath)
       .outputOptions([
+        AUDIO_ONLY,
         '-c:a',
         'libmp3lame',
         '-q:a',
@@ -302,7 +311,7 @@ export async function concatAudioFiles(
     ffmpeg()
       .input(listFile)
       .inputOptions(['-f', 'concat', '-safe', '0'])
-      .outputOptions(['-c:a', 'libmp3lame', '-q:a', '4', '-ar', '44100', '-ac', '1'])
+      .outputOptions([AUDIO_ONLY, '-c:a', 'libmp3lame', '-q:a', '4', '-ar', '44100', '-ac', '1'])
       .output(outputPath),
     { timeoutMs: 10 * 60 * 1000, label: 'concat-audio' }
   );
@@ -354,6 +363,7 @@ export async function buildNarrationTrack(options: {
         ffmpeg(sourcePath)
           .inputOptions(['-ss', item.start.toFixed(3)])
           .outputOptions([
+            AUDIO_ONLY,
             '-t',
             length.toFixed(3),
             '-c:a',
@@ -457,8 +467,15 @@ async function probeSceneInfo(filePath: string): Promise<SceneProbeInfo | null> 
       });
     });
 
-    const video = data?.streams?.find((stream: VideoStreamInfo) => stream.width && stream.height) || null;
-    const audio = data?.streams?.find((stream: AudioStreamInfo) => stream.codec_name) || null;
+    const streams: (VideoStreamInfo & AudioStreamInfo & { codec_type?: string })[] =
+      data?.streams ?? [];
+    const video =
+      streams.find((stream) => stream.codec_type === 'video') ||
+      streams.find((stream) => stream.width && stream.height) ||
+      null;
+    // Phải lọc theo codec_type: file chỉ có video thì stream đầu tiên cũng có
+    // codec_name → nhận nhầm là audio ⇒ mọi clip đều bị coi là "không đạt chuẩn".
+    const audio = streams.find((stream) => stream.codec_type === 'audio') || null;
     if (!video) return null;
 
     const fps = parseFrameRate(video.r_frame_rate ?? data?.streams?.[0]?.r_frame_rate) ?? 0;
@@ -732,7 +749,7 @@ export async function prepareFinalAudio(options: {
     const meta = await probeSceneInfo(src);
     if (isAudioStreamAlreadyTarget(meta)) {
       await run(
-        ffmpeg().input(src).outputOptions(['-c:a', 'copy']).output(outputPath),
+        ffmpeg().input(src).outputOptions([AUDIO_ONLY, '-c:a', 'copy']).output(outputPath),
         { timeoutMs: 2 * 60 * 1000, label: 'final-audio-copy' }
       );
       return outputPath;
@@ -740,7 +757,7 @@ export async function prepareFinalAudio(options: {
     await run(
       ffmpeg()
         .input(src)
-        .outputOptions(['-c:a', 'aac', '-ar', '48000', '-ac', '2'])
+        .outputOptions([AUDIO_ONLY, '-c:a', 'aac', '-ar', '48000', '-ac', '2'])
         .output(outputPath),
       { timeoutMs: 10 * 60 * 1000, label: 'final-audio' }
     );
@@ -761,6 +778,15 @@ export async function prepareFinalAudio(options: {
   return outputPath;
 }
 
+/** SRT trống (hoặc chỉ khoảng trắng) thì burn chỉ tốn 1 lần encode mà không hiện gì. */
+function hasSubtitleCues(srtPath: string): boolean {
+  try {
+    return fs.readFileSync(srtPath, 'utf8').includes('-->');
+  } catch {
+    return false;
+  }
+}
+
 export async function muxFinalVideo(options: {
   videoPath: string;
   audioPath: string;
@@ -772,7 +798,8 @@ export async function muxFinalVideo(options: {
   const { videoPath, audioPath, outputPath, burnSubtitles = false, srtPath, onProgress } = options;
   fs.mkdirSync(path.dirname(outputPath), { recursive: true });
 
-  if (burnSubtitles && srtPath) {
+  // Burn = re-encode toàn bộ video (bước đắt nhất) → không làm khi SRT rỗng.
+  if (burnSubtitles && srtPath && hasSubtitleCues(srtPath)) {
     const encoder = await resolveVideoEncoder();
     report(onProgress, {
       stage: 'FINALIZING',
@@ -902,37 +929,81 @@ export async function assembleFinalVideo(options: {
   clipDurations?: number[];
   /** When clips are already 1080p@60 (e.g. Ken Burns slides), skip re-scale — vẫn encode fade chuyển cảnh. */
   skipClipNormalize?: boolean;
+  /**
+   * false → cắt cảnh thẳng (không fade đen). Clip nào đã đúng chuẩn + đúng độ dài
+   * sẽ được dùng nguyên bản, bỏ hẳn pass encode lại (music-animation).
+   */
+  sceneTransitions?: boolean;
   onProgress?: StageReporter;
 }): Promise<string> {
   const { clipPaths, audioPath, srtPath, outputPath, burnSubtitles, workDir, onProgress } = options;
   if (!clipPaths.length) throw new Error('No clips to assemble.');
 
   fs.mkdirSync(workDir, { recursive: true });
+  const withTransitions = options.sceneTransitions !== false;
 
   // Fit mỗi clip theo duration + fade đen vào/ra, rồi concat -c copy (không re-encode lần 2).
   const encoder = await resolveVideoEncoder();
   report(onProgress, {
     stage: 'NORMALIZING',
-    message: `Preparing ${clipPaths.length} clip(s) with transitions`,
+    message: withTransitions
+      ? `Preparing ${clipPaths.length} clip(s) with transitions`
+      : `Preparing ${clipPaths.length} clip(s) — hard cuts, no fade`,
     reencoding: true,
-    reason: 'scene fade transitions / duration fit',
+    reason: withTransitions ? 'scene fade transitions / duration fit' : 'duration fit only',
     encoder: encoder.name,
   });
 
   const normalized: string[] = [];
+  let reencoded = 0;
   for (let i = 0; i < clipPaths.length; i++) {
     const out = path.join(workDir, `clip-${i}.mp4`);
     const fadeOpts = { fadeIn: true, fadeOut: true };
+    const plannedDur = options.clipDurations?.[i];
+    const naturalDur = await getDurationSafe(clipPaths[i], plannedDur ?? 8);
+    const needsDurationFit =
+      plannedDur != null && Math.abs(plannedDur - naturalDur) > 0.05;
+
+    // Không fade + không phải fit lại độ dài → không có gì để encode.
+    if (!withTransitions && !needsDurationFit) {
+      const reuse = async (): Promise<boolean> => {
+        if (options.skipClipNormalize) {
+          // Clip do chính ta render (Ken Burns / ảnh tĩnh): đã 1080p@60, -an.
+          normalized.push(clipPaths[i]);
+          return true;
+        }
+        const info = await probeSceneInfo(clipPaths[i]);
+        if (!isSceneCompatible(info)) return false;
+        // Stream-copy để bỏ audio → concat demuxer thấy các clip cùng cấu trúc.
+        await run(
+          ffmpeg(clipPaths[i])
+            .outputOptions(['-map', '0:v:0', '-c:v', 'copy', '-an', '-movflags', '+faststart'])
+            .output(out),
+          { timeoutMs: 5 * 60 * 1000, label: `Copy clip ${i + 1}/${clipPaths.length}` }
+        );
+        normalized.push(out);
+        return true;
+      };
+      if (await reuse()) {
+        report(onProgress, {
+          stage: 'NORMALIZING',
+          message: `Reused clip ${i + 1}/${clipPaths.length} (no re-encode)`,
+          progress: Math.round(((i + 1) / clipPaths.length) * 100),
+          reencoding: false,
+        });
+        continue;
+      }
+    }
 
     if (options.skipClipNormalize) {
-      const planned = options.clipDurations?.[i];
-      const natural = await getDurationSafe(clipPaths[i], planned ?? 8);
+      const planned = plannedDur;
+      const natural = naturalDur;
       const targetDur = planned ?? natural;
       const filters: string[] = [];
       if (planned != null && planned > natural + 0.05) {
         filters.push(`tpad=stop_mode=clone:stop_duration=${(planned - natural).toFixed(3)}`);
       }
-      filters.push(...sceneTransitionFades(targetDur, fadeOpts));
+      if (withTransitions) filters.push(...sceneTransitionFades(targetDur, fadeOpts));
       const cmd = ffmpeg(clipPaths[i]).outputOptions([
         '-an',
         ...encoder.outputArgs,
@@ -948,6 +1019,7 @@ export async function assembleFinalVideo(options: {
         label: `Prepare clip ${i + 1}/${clipPaths.length}`,
       });
       normalized.push(out);
+      reencoded += 1;
       report(onProgress, {
         stage: 'NORMALIZING',
         message: `Prepared clip ${i + 1}/${clipPaths.length}`,
@@ -958,8 +1030,8 @@ export async function assembleFinalVideo(options: {
       continue;
     }
 
-    const natural = await getDurationSafe(clipPaths[i], options.clipDurations?.[i] ?? 8);
-    const planned = options.clipDurations?.[i];
+    const natural = naturalDur;
+    const planned = plannedDur;
     const targetDur = planned ?? natural;
     const filters = [
       `scale=${FINAL_WIDTH}:${FINAL_HEIGHT}:force_original_aspect_ratio=decrease`,
@@ -970,7 +1042,7 @@ export async function assembleFinalVideo(options: {
     if (planned != null && planned > natural + 0.05) {
       filters.push(`tpad=stop_mode=clone:stop_duration=${(planned - natural).toFixed(3)}`);
     }
-    filters.push(...sceneTransitionFades(targetDur, fadeOpts));
+    if (withTransitions) filters.push(...sceneTransitionFades(targetDur, fadeOpts));
 
     const cmd = ffmpeg(clipPaths[i]).videoFilters(filters).outputOptions([
       '-an',
@@ -986,6 +1058,7 @@ export async function assembleFinalVideo(options: {
       label: `Normalize clip ${i + 1}/${clipPaths.length}`,
     });
     normalized.push(out);
+    reencoded += 1;
     report(onProgress, {
       stage: 'NORMALIZING',
       message: `Prepared clip ${i + 1}/${clipPaths.length}`,
@@ -997,7 +1070,10 @@ export async function assembleFinalVideo(options: {
 
   report(onProgress, {
     stage: 'CONCATENATING',
-    message: `Concatenating ${normalized.length} clip(s)`,
+    message:
+      reencoded === 0
+        ? `Concatenating ${normalized.length} clip(s) — stream copy only`
+        : `Concatenating ${normalized.length} clip(s) (${reencoded} re-encoded)`,
     reencoding: false,
   });
   const mergedVideo = path.join(workDir, 'merged-video.mp4');
@@ -1012,7 +1088,7 @@ export async function assembleFinalVideo(options: {
 
   report(onProgress, { stage: 'MIXING_AUDIO', message: 'Preparing final audio track' });
   const finalAudio = path.join(workDir, 'final-audio.m4a');
-  const audioOutOpts = ['-c:a', 'aac', '-ar', '48000', '-ac', '2'];
+  const audioOutOpts = [AUDIO_ONLY, '-c:a', 'aac', '-ar', '48000', '-ac', '2'];
   if (videoDuration > 0) audioOutOpts.push('-t', videoDuration.toFixed(3));
   await run(
     ffmpeg().input(audioPath).audioFilters('apad').outputOptions(audioOutOpts).output(finalAudio),
@@ -1074,6 +1150,25 @@ function kenBurnsFilters(durationSec: number): string[] {
   ];
 }
 
+/**
+ * Ảnh tĩnh — chỉ fit khung, không zoompan.
+ *
+ * `-loop 1` sẽ giải mã PNG + scale lại cho TỪNG frame (600 lần cho clip 10s).
+ * Ở đây chỉ nhận 1 frame, scale 1 lần, rồi `loop` phát lại frame đã scale từ
+ * bộ đệm → output y hệt từng byte nhưng nhanh ~2x. (Ken Burns không dùng được
+ * cách này vì zoompan phải vẽ lại mỗi frame.)
+ */
+function staticFrameFilters(): string[] {
+  return [
+    `scale=${FINAL_WIDTH}:${FINAL_HEIGHT}:force_original_aspect_ratio=increase:flags=fast_bilinear`,
+    `crop=${FINAL_WIDTH}:${FINAL_HEIGHT}`,
+    'setsar=1',
+    'format=yuv420p',
+    'loop=loop=-1:size=1:start=0',
+    `fps=${FINAL_FPS}`,
+  ];
+}
+
 export async function assembleSlideshowFromImages(options: {
   imagePaths: string[];
   audioPath: string;
@@ -1084,6 +1179,10 @@ export async function assembleSlideshowFromImages(options: {
   durations?: number[];
   /** Strip nano-banana watermark on each still before Ken Burns (safe, isolated). */
   stripCornerLogo?: boolean;
+  /** 'static' = ảnh đứng yên (music-animation); 'kenburns' = zoom chậm (mặc định). */
+  motion?: 'kenburns' | 'static';
+  /** false → cắt cảnh thẳng, không fade đen giữa các ảnh. */
+  sceneTransitions?: boolean;
   onProgress?: StageReporter;
 }): Promise<string> {
   const {
@@ -1095,8 +1194,10 @@ export async function assembleSlideshowFromImages(options: {
     workDir,
     durations,
     stripCornerLogo = false,
+    motion = 'kenburns',
     onProgress,
   } = options;
+  const isStatic = motion === 'static';
   if (!imagePaths.length) throw new Error('No images to assemble.');
 
   fs.mkdirSync(workDir, { recursive: true });
@@ -1109,6 +1210,7 @@ export async function assembleSlideshowFromImages(options: {
   // this keeps quality/behavior unchanged) — hardware encoding is reserved
   // for the heavier normalize/subtitle-burn passes above.
   const clips: string[] = [];
+  const clipDurations: number[] = [];
   for (let i = 0; i < imagePaths.length; i++) {
     const imagePath = imagePaths[i];
     if (!fs.existsSync(imagePath)) {
@@ -1123,8 +1225,9 @@ export async function assembleSlideshowFromImages(options: {
     try {
       await run(
         ffmpeg(imagePath)
-          .inputOptions(['-loop', '1', '-framerate', String(FINAL_FPS)])
-          .videoFilters(kenBurnsFilters(dur))
+          // Ảnh tĩnh: KHÔNG `-loop 1` — filter `loop` lo phần lặp frame (xem staticFrameFilters).
+          .inputOptions(isStatic ? [] : ['-loop', '1', '-framerate', String(FINAL_FPS)])
+          .videoFilters(isStatic ? staticFrameFilters() : kenBurnsFilters(dur))
           .outputOptions([
             '-frames:v',
             String(outFrames),
@@ -1132,7 +1235,8 @@ export async function assembleSlideshowFromImages(options: {
             '-c:v',
             'libx264',
             '-preset',
-            FINAL_X264_PRESET,
+            isStatic ? 'veryfast' : FINAL_X264_PRESET,
+            ...(isStatic ? ['-tune', 'stillimage'] : []),
             '-crf',
             FINAL_CRF,
             '-pix_fmt',
@@ -1149,9 +1253,14 @@ export async function assembleSlideshowFromImages(options: {
       );
     }
     clips.push(out);
+    // Độ dài thật của clip = số frame / fps — dùng chính con số này ở bước ghép
+    // để không phải encode lại chỉ vì lệch vài phần trăm giây.
+    clipDurations.push(outFrames / FINAL_FPS);
     report(onProgress, {
       stage: 'NORMALIZING',
-      message: `Ken Burns clip ${i + 1}/${imagePaths.length}`,
+      message: isStatic
+        ? `Ảnh tĩnh clip ${i + 1}/${imagePaths.length}`
+        : `Ken Burns clip ${i + 1}/${imagePaths.length}`,
       progress: Math.round(((i + 1) / imagePaths.length) * 100),
     });
   }
@@ -1166,8 +1275,9 @@ export async function assembleSlideshowFromImages(options: {
     burnSubtitles,
     workDir,
     estimatedTotalSeconds: estimatedTotal,
-    clipDurations: durations,
+    clipDurations: isStatic ? clipDurations : durations,
     skipClipNormalize: true,
+    sceneTransitions: options.sceneTransitions,
     onProgress,
   });
 

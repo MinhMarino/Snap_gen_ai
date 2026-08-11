@@ -19,6 +19,35 @@ export const DEFAULT_VIDEO_FAMILY: VideoFamily = 'veo';
 export const DEFAULT_VIDEO_MODEL_ID = 'veo-3.1-fast';
 export const DEFAULT_IMAGE_FAMILY: ImageFamily = 'snapgen-image';
 export const DEFAULT_IMAGE_MODEL_ID = 'nano-banana-2';
+/** Ngôn ngữ kịch bản/TTS mặc định; visual prompt luôn English, không chữ trên màn hình. */
+export const DEFAULT_PROJECT_LANGUAGE = 'English';
+
+/**
+ * Style mặc định: video học tập đơn giản cho trẻ nhỏ, cảm hứng Pingpong / kids cartoon.
+ * Visual: mascot động vật & đồ vật — KHÔNG mô tả trẻ em (Snapgen/Google chặn).
+ */
+export const DEFAULT_STYLE_PROMPT =
+  'Simple Pingpong-style kids learning cartoon: bright flat colors, soft rounded shapes, ' +
+  'cute animal or toy mascots, big friendly expressions, playful gentle bounce motion, ' +
+  'clean uncluttered backgrounds, warm cheerful lighting. No readable text on screen. ' +
+  'Never depict real children or babies — only animals, toys, and everyday objects as characters.';
+
+/**
+ * Style mặc định cho dự án hoạt hình nhạc.
+ * DEFAULT_STYLE_PROMPT (kids cartoon) hoàn toàn sai cho music video — nếu user
+ * không tự sửa thì mọi scene MV đều bị bọc style "mascot học chữ cho trẻ".
+ */
+export const MUSIC_ANIMATION_STYLE_PROMPT =
+  'Cinematic anime music-video illustration: painterly key-frame quality, expressive characters, ' +
+  'rich rim lighting and bloom, atmospheric depth (foreground / midground / background layers), ' +
+  'saturated but harmonious palette, film grain, dramatic sky and weather as emotional backdrop. ' +
+  'No readable text on screen.';
+
+export function defaultStylePromptForProjectKind(kind?: string | null): string {
+  return String(kind || '') === 'music-animation'
+    ? MUSIC_ANIMATION_STYLE_PROMPT
+    : DEFAULT_STYLE_PROMPT;
+}
 
 export function defaultFamilyForKind(kind: MediaKind): VideoFamily | ImageFamily {
   return kind === 'image' ? DEFAULT_IMAGE_FAMILY : DEFAULT_VIDEO_FAMILY;
@@ -349,7 +378,7 @@ export function familySupportsExtend(family: string): boolean {
  * - long + supports extend → first generate, then extend chunks (same scene continuity)
  * - long + no extend → multiple independent generates (hard cuts inside scene)
  *
- * Scenes are NEVER chain-extended into each other.
+ * Across scenes: pipeline may chain via video-extend `ref_history` when familySupportsExtend.
  */
 export function planSceneChunks(
   modelId: string,
@@ -422,57 +451,47 @@ export function resolveVisualLocaleHint(language?: string | null): string | null
   return `Cultural setting matching language "${String(language).trim()}"; people and places must match that locale and the narration`;
 }
 
-/**
- * Khóa chữ trên ảnh: chỉ được hiện script của Language đã chọn (hoặc không có chữ).
- * Cấm mọi ngôn ngữ / bảng chữ khác.
- */
-export function resolveVisualLanguageLock(language?: string | null): string {
-  const label = String(language || '').trim() || 'the selected language';
+/** Chỉ câu luật văn hóa — dùng chung cho standard lock và music wrapper. */
+function resolveCultureRule(language?: string | null): string {
+  const label = String(language || '').trim() || DEFAULT_PROJECT_LANGUAGE;
   const value = label.toLowerCase();
 
-  let allowedScript: string;
-  let forbidExtra: string;
   if (/japan|日本語|nihongo|tiếng nhật|nhật bản|\bja\b/.test(value)) {
-    allowedScript = 'Japanese only (hiragana, katakana, and/or kanji)';
-    forbidExtra =
-      'no English Latin letters, no Vietnamese, no Korean Hangul, no Simplified/Traditional Chinese-only signage, no Thai, no other languages';
-  } else if (/việt|vietnam|tiếng việt|\bvi\b/.test(value)) {
-    allowedScript = 'Vietnamese only (Latin with Vietnamese diacritics)';
-    forbidExtra =
-      'no English-only signs, no Japanese, no Korean, no Chinese, no Thai, no other languages';
-  } else if (/korean|한국어|hangul|tiếng hàn|hàn quốc|\bko\b/.test(value)) {
-    allowedScript = 'Korean Hangul only';
-    forbidExtra =
-      'no English Latin letters, no Japanese, no Chinese, no Vietnamese, no Thai, no other languages';
-  } else if (/chinese|中文|mandarin|cantonese|tiếng trung|trung quốc|\bzh\b/.test(value)) {
-    allowedScript = 'Chinese characters only';
-    forbidExtra =
-      'no English Latin letters, no Japanese kana, no Korean Hangul, no Vietnamese, no Thai, no other languages';
-  } else if (/english|tiếng anh|\ben\b/.test(value)) {
-    allowedScript = 'English only';
-    forbidExtra =
-      'no Japanese, no Korean, no Chinese, no Vietnamese, no Thai, no other non-English languages';
-  } else if (/thai|ไทย|tiếng thái|\bth\b/.test(value)) {
-    allowedScript = 'Thai script only';
-    forbidExtra =
-      'no English Latin letters, no Japanese, no Korean, no Chinese, no Vietnamese, no other languages';
-  } else {
-    allowedScript = `${label} only`;
-    forbidExtra = `no text in any language other than ${label}`;
+    return 'People, places, props, clothing, and atmosphere MUST match Japanese culture when applicable.';
   }
+  if (/việt|vietnam|tiếng việt|\bvi\b/.test(value)) {
+    return 'People, places, props, clothing, and atmosphere MUST match Vietnamese culture when applicable.';
+  }
+  if (/korean|한국어|hangul|tiếng hàn|hàn quốc|\bko\b/.test(value)) {
+    return 'People, places, props, clothing, and atmosphere MUST match Korean culture when applicable.';
+  }
+  if (/chinese|中文|mandarin|cantonese|tiếng trung|trung quốc|\bzh\b/.test(value)) {
+    return 'People, places, props, clothing, and atmosphere MUST match Chinese culture when applicable.';
+  }
+  if (/english|tiếng anh|\ben\b/.test(value)) {
+    return 'People, places, props, clothing, and atmosphere should match Western/English cultural context when applicable.';
+  }
+  if (/thai|ไทย|tiếng thái|\bth\b/.test(value)) {
+    return 'People, places, props, clothing, and atmosphere MUST match Thai culture when applicable.';
+  }
+  return `People, places, props, clothing, and atmosphere should match the "${label}" cultural context when applicable.`;
+}
 
+/**
+ * Khóa visual: khớp văn hóa theo Language (kịch bản/TTS) nhưng không hiện chữ trên màn hình.
+ */
+export function resolveVisualLanguageLock(language?: string | null): string {
   return (
-    `LANGUAGE LOCK (mandatory): Selected language is "${label}". ` +
-    `All people, places, props, clothing, and atmosphere MUST match this language/culture. ` +
-    `If any readable text appears (signs, labels, screens, books, posters, UI), it MUST be ${allowedScript}. ` +
-    `Prefer no text when unsure. Strictly forbid mixed-language text: ${forbidExtra}.`
+    `VISUAL RULE (mandatory): ${resolveCultureRule(language)} ` +
+    `Do NOT show any readable text, subtitles, captions, signs, labels, screens, books, posters, or UI text in the frame. ` +
+    `Purely visual storytelling — no written language on screen.`
   );
 }
 
 /**
  * Prompt gửi Snapgen: visual + style + locale + khóa language.
  * Không gắn narration — lời thoại chỉ dùng cho TTS/subtitle, không đưa vào prompt gen media.
- * visual_prompt ưu tiên English mô tả hình; chữ trong ảnh chỉ theo Language đã chọn.
+ * visual_prompt ưu tiên English mô tả hình; không hiện chữ trên màn hình.
  */
 export function buildSceneImagePrompt(options: {
   visualPrompt: string;
@@ -494,11 +513,314 @@ export function buildSceneImagePrompt(options: {
     }
   }
 
-  if (!lower.includes('language lock')) {
+  if (!lower.includes('visual rule') && !lower.includes('language lock')) {
     prompt = `${prompt.trim()} ${languageLock}`;
   }
 
   return prompt.trim();
+}
+
+// ---------------------------------------------------------------------------
+// Prompt wrapper riêng cho hoạt hình nhạc (music-animation)
+// ---------------------------------------------------------------------------
+
+/**
+ * Cỡ cảnh luân phiên theo scene index.
+ * MV mà mọi shot cùng cỡ thì xem rất chán — nhất là khi ảnh đã không zoom/pan nữa.
+ * Chỉ áp dụng khi visual_prompt CHƯA tự nói cỡ cảnh.
+ */
+const MUSIC_SHOT_LADDER = [
+  'wide establishing shot, full environment visible, subject small in frame',
+  'medium shot, subject waist-up, balanced headroom',
+  'intimate close-up on face and hands, shallow depth of field',
+  'wide dynamic angle with a strong foreground element framing the subject',
+  'low-angle hero shot looking up at the subject',
+  'over-the-shoulder shot looking past the subject into the scene',
+];
+
+const FRAMING_ALREADY_RE =
+  /close-?up|wide shot|wide angle|medium shot|establishing|extreme close|aerial|bird'?s[- ]eye|over[- ]the[- ]shoulder|low[- ]angle|high[- ]angle|macro|full[- ]body|two[- ]shot|profile shot/i;
+
+/** Cấm cứng: chữ/lyric, watermark, ghép nhiều khung — 3 lỗi hay gặp nhất ở MV AI. */
+const MUSIC_HARD_RULES =
+  'HARD RULES: absolutely no readable text of any kind — no lyrics, captions, subtitles, ' +
+  'song titles, credits, signs, logos, watermarks, timecodes or UI overlays; ' +
+  'no split screen, collage, grid, comic panels, film strip, borders, frames or letterboxing; ' +
+  'one single continuous image, edge to edge.';
+
+/**
+ * Một khung ĐỨNG YÊN: sau khi bỏ Ken Burns, ảnh phải tự đứng vững như một
+ * key frame — mô tả chuyển động camera chỉ làm model vẽ blur / motion streak vô ích.
+ */
+const MUSIC_STILL_FRAME_RULE =
+  'This is ONE HELD STILL FRAME (no camera movement, no zoom, no pan): ' +
+  'sharp focus on the subject, no motion blur or speed lines, ' +
+  'composition must read as a finished poster key-frame on its own.';
+
+export interface MusicScenePromptOptions {
+  visualPrompt: string;
+  language?: string | null;
+  stylePrompt?: string;
+  /**
+   * Cast/style bible ngắn, LẶP NGUYÊN VĂN ở mọi scene — cách rẻ nhất để chống
+   * nhân vật "biến hình" giữa các scene (mỗi scene là một lần gen độc lập).
+   */
+  castLock?: string;
+  /** Index scene (0-based) → luân phiên cỡ cảnh. */
+  sceneIndex?: number;
+  /** intro/body/outro → mức năng lượng của shot. */
+  section?: string;
+  /** true khi ảnh sẽ đứng yên trong video (music-animation + mediaKind image). */
+  stillFrame?: boolean;
+}
+
+function musicEnergyLine(section?: string): string | null {
+  const value = String(section || '').toLowerCase();
+  if (value === 'introduction') {
+    return 'Energy: restrained and establishing — softer, cooler light, more negative space.';
+  }
+  if (value === 'conclusion') {
+    return 'Energy: resolving final beat — warm fading light, calm settled staging.';
+  }
+  return null;
+}
+
+/**
+ * Prompt gửi Snapgen cho hoạt hình nhạc.
+ *
+ * Khác `buildSceneImagePrompt` ở 4 điểm:
+ *  1. Cast lock đứng ĐẦU prompt (model ưu tiên phần đầu) → nhân vật nhất quán.
+ *  2. Luân phiên cỡ cảnh khi storyboard không nói rõ → đỡ đơn điệu.
+ *  3. Yêu cầu "một khung đứng yên" khi ảnh không còn Ken Burns.
+ *  4. Cấm cứng chữ/lyric/watermark/ghép khung, không nhắc "narration"
+ *     (MV không có narration — chỉ có lyric, và lyric KHÔNG được hiện lên hình).
+ */
+export function buildMusicSceneImagePrompt(options: MusicScenePromptOptions): string {
+  const parts: string[] = [];
+
+  const cast = options.castLock?.trim();
+  if (cast) {
+    parts.push(`CAST LOCK (identical in every shot, do not redesign): ${cast.slice(0, 600)}`);
+  }
+
+  const visual = options.visualPrompt?.trim() || '';
+  parts.push(visual);
+
+  if (options.sceneIndex != null && visual && !FRAMING_ALREADY_RE.test(visual)) {
+    parts.push(
+      `Framing: ${MUSIC_SHOT_LADDER[options.sceneIndex % MUSIC_SHOT_LADDER.length]}.`
+    );
+  }
+
+  const energy = musicEnergyLine(options.section);
+  if (energy) parts.push(energy);
+
+  const style = options.stylePrompt?.trim();
+  // Chỉ bỏ style khi nó thực sự đã nằm trong visual_prompt — style quá ngắn
+  // (vài ký tự) rất dễ "trùng" ngẫu nhiên nên không dùng để loại.
+  const styleAlready =
+    !!style && style.length >= 12 && visual.toLowerCase().includes(style.toLowerCase());
+  if (style && !styleAlready) {
+    parts.push(`Style: ${style}`);
+  }
+
+  parts.push(resolveCultureRule(options.language));
+
+  if (options.stillFrame) parts.push(MUSIC_STILL_FRAME_RULE);
+
+  parts.push(MUSIC_HARD_RULES, SAFE_SUBJECT_RULE);
+
+  return parts
+    .map((p) => p.trim())
+    .filter(Boolean)
+    .join(' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+// ---------------------------------------------------------------------------
+// Chống prompt bị Google chặn (GEMINI_RAI_MEDIA_FILTERED)
+// ---------------------------------------------------------------------------
+
+/**
+ * Luật an toàn gắn vào mọi prompt.
+ * Google chặn: trẻ em/em bé, người thật & người nổi tiếng, nhân vật có bản quyền,
+ * logo thương hiệu. Nhạc thiếu nhi rất dễ dính vì storyboard hay viết "a little boy".
+ */
+export const SAFE_SUBJECT_RULE =
+  'SAFETY: all characters are original stylized adult cartoon characters or friendly ' +
+  'animal / toy mascots. No children, babies or toddlers. No real people, celebrities ' +
+  'or public figures. No copyrighted, branded or third-party characters, no brand logos.';
+
+/** Số mức làm sạch prompt (0 = prompt gốc). */
+export const MAX_PROMPT_SAFETY_LEVEL = 2;
+
+/** Danh từ chỉ trẻ em (dùng chung cho biến thể có/không mạo từ). */
+const CHILD_NOUNS =
+  'boys?|girls?|kids?|child|children|schoolchildren|toddlers?|babies|baby|infants?|' +
+  'schoolboys?|schoolgirls?|preschoolers?|pupils?|little sisters?|little brothers?|' +
+  'sons?|daughters?|teenagers?|teens?|youngsters?|minors?';
+const CHILD_QUALIFIERS = '(?:little\\s+|small\\s+|young\\s+|cute\\s+|baby\\s+|tiny\\s+)*';
+
+/**
+ * Mốc tuổi bị XÓA HẲN (không thay bằng "adult") — thay chữ sẽ đẻ ra
+ * "a cheerful adult a cartoon mascot"; xóa rồi gộp khoảng trắng thì câu còn sạch.
+ */
+const AGE_PATTERNS: RegExp[] = [
+  /\b\d{1,2}\s*[- ]?years?[- ]?old\b/gi,
+  /\baged?\s+\d{1,2}\b/gi,
+];
+
+/** Từ chỉ trẻ em → mascot. Bắt luôn mạo từ đứng trước để câu không vỡ. */
+const CHILD_TERM_REPLACEMENTS: Array<[RegExp, string]> = [
+  [new RegExp(`\\b(?:a|an|the)\\s+${CHILD_QUALIFIERS}(?:${CHILD_NOUNS})\\b`, 'gi'),
+    'a friendly cartoon mascot'],
+  [new RegExp(`\\b${CHILD_QUALIFIERS}(?:${CHILD_NOUNS})\\b`, 'gi'), 'friendly cartoon mascots'],
+  [/\b(kindergarten|nursery|playschool|elementary school|primary school|school bus)\b/gi,
+    'colourful town setting'],
+  [/\b(childlike|childish|youthful innocence)\b/gi, 'playful'],
+];
+
+/** Người thật / nhân vật bản quyền — Google chặn chắc chắn, xử ngay từ mức 1. */
+const LIKENESS_TERM_REPLACEMENTS: Array<[RegExp, string]> = [
+  [/\b(celebrity|celebrities|famous singer|pop star|movie star|influencer)\b/gi,
+    'original character'],
+  [/\b(real person|real people|photorealistic person|lookalike|resembling)\b/gi,
+    'original character'],
+  [
+    /\b(disney|pixar|marvel|dc comics|pokemon|pokémon|hello kitty|doraemon|mickey mouse|elsa|spider-?man|batman|superman)\b/gi,
+    'original design',
+  ],
+  [/\b(brand\s+)?(logos?|branded|trademark|brand name)\b/gi, 'unbranded'],
+];
+
+/** Dọn rác do thay từ: mạo từ lặp, "mascot mascot", khoảng trắng thừa. */
+const CLEANUP_REPLACEMENTS: Array<[RegExp, string]> = [
+  [/\b(a|an|the)\s+(a|an|the)\b/gi, '$1'],
+  [/\bfriendly cartoon mascots?\s+friendly cartoon mascots?\b/gi, 'friendly cartoon mascots'],
+  [/\banimal mascot\s+animal mascot\b/gi, 'animal mascots'],
+  [/\s+([,.;:])/g, '$1'],
+  [/([,.;:])\1+/g, '$1'],
+];
+
+function applyReplacements(text: string, pairs: Array<[RegExp, string]>): string {
+  let out = text;
+  for (const [re, to] of pairs) out = out.replace(re, to);
+  return out;
+}
+
+/**
+ * Viết lại prompt an toàn hơn sau khi bị RAI chặn.
+ *  level 1 — xóa mốc tuổi, đổi từ chỉ trẻ em → mascot, bỏ tên thương hiệu /
+ *            nhân vật bản quyền, gắn SAFE_SUBJECT_RULE.
+ *  level 2 — thêm: ép MỌI chủ thể thành mascot động vật phi-người (phương án cuối).
+ */
+export function sanitizeUnsafePrompt(prompt: string, level: number): string {
+  const src = String(prompt || '').trim();
+  if (!src || level <= 0) return src;
+
+  let out = src;
+  for (const re of AGE_PATTERNS) out = out.replace(re, ' ');
+  out = applyReplacements(out, CHILD_TERM_REPLACEMENTS);
+  out = applyReplacements(out, LIKENESS_TERM_REPLACEMENTS);
+
+  if (level >= 2) {
+    out = applyReplacements(out, [
+      [/\b(men|women|people|humans|persons|characters)\b/gi, 'animal mascots'],
+      [/\b(man|woman|person|human|character)\b/gi, 'animal mascot'],
+    ]);
+    out = `${out} All subjects are non-human friendly animal mascots in a simple cartoon world.`;
+  }
+
+  out = applyReplacements(out, CLEANUP_REPLACEMENTS);
+  if (!out.toUpperCase().includes('SAFETY:')) out = `${out} ${SAFE_SUBJECT_RULE}`;
+  return out.replace(/\s+/g, ' ').trim();
+}
+
+// ---------------------------------------------------------------------------
+// Ước tính credit Snapgen
+// ---------------------------------------------------------------------------
+
+/**
+ * Bảng giá credit MỖI LƯỢT GỌI API, chép từ https://snapgen.ai/pricing (11/08/2026).
+ * Trang chỉ công bố một mức cho mỗi họ model, không tách theo biến thể/độ dài/độ phân giải
+ * → đây là ƯỚC TÍNH, không phải hoá đơn. Model nào Snapgen chưa công bố giá thì trả null
+ * để UI hiện "—" thay vì đoán bừa.
+ */
+export const SNAPGEN_CREDITS_BY_FAMILY: Record<string, number> = {
+  veo: 7,
+  grok: 6,
+  seedance: 16,
+  kling: 21,
+  'snapgen-image': 3,
+  'gpt-image': 9,
+  'grok-image': 1,
+};
+
+/** Model có giá riêng khác mức chung của họ (vd. Omni Flash nằm trong họ Veo). */
+export const SNAPGEN_CREDITS_BY_MODEL: Record<string, number> = {
+  'omni-flash': 5,
+  'nano-banana-2': 3,
+  'nano-banana-2-lite': 3,
+  'nano-banana-pro': 3,
+  'gpt-image-2': 9,
+  'grok-image': 1,
+};
+
+/** $10 = 2.000 credit theo ưu đãi 100% bonus đang chạy trên trang pricing. */
+export const SNAPGEN_USD_PER_CREDIT = 10 / 2000;
+
+/** Giá credit cho 1 lượt gọi API; null = Snapgen chưa công bố (sora, meta…). */
+export function creditsPerApiCall(modelId?: string | null, family?: string | null): number | null {
+  const byModel = SNAPGEN_CREDITS_BY_MODEL[String(modelId || '').trim()];
+  if (byModel != null) return byModel;
+  const byFamily = SNAPGEN_CREDITS_BY_FAMILY[String(family || '').trim()];
+  return byFamily ?? null;
+}
+
+export interface CreditEstimate {
+  /** Số lượt gọi API (video dài bị chia nhiều shot). */
+  calls: number;
+  /** null khi model chưa có giá công bố. */
+  credits: number | null;
+  perCall: number | null;
+  usd: number | null;
+}
+
+/**
+ * Ước tính credit cho một đợt gen.
+ * `durations` = duration_hint của đúng những scene sắp gen (đã lọc).
+ */
+export function estimateGenerationCredits(options: {
+  mediaKind: MediaKind;
+  modelId: string;
+  family: string;
+  durations: number[];
+}): CreditEstimate {
+  const perCall = creditsPerApiCall(options.modelId, options.family);
+  const calls =
+    options.mediaKind === 'image'
+      ? options.durations.length
+      : options.durations.reduce(
+          (sum, dur) =>
+            sum + planSceneChunks(options.modelId, options.family, Math.max(1, dur)).chunks.length,
+          0
+        );
+  const credits = perCall == null ? null : perCall * calls;
+  return {
+    calls,
+    credits,
+    perCall,
+    usd: credits == null ? null : credits * SNAPGEN_USD_PER_CREDIT,
+  };
+}
+
+export function formatCreditEstimate(estimate: CreditEstimate): string {
+  if (estimate.credits == null) {
+    return `${estimate.calls} lượt gọi API · Snapgen chưa công bố giá credit cho model này`;
+  }
+  const usd = estimate.usd == null ? '' : ` ≈ $${estimate.usd.toFixed(2)}`;
+  return `~${estimate.credits.toLocaleString('vi-VN')} credit${usd} · ${estimate.calls} lượt gọi × ${estimate.perCall} credit`;
 }
 
 /** Fallback when a model has no declared durations (not a hard scene length). */

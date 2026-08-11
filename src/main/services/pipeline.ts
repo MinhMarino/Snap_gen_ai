@@ -6,7 +6,9 @@ import { IPC } from '../../shared/ipc';
 import {
   assertNarrationCoversTarget,
   AUDIO_DURATION_TOLERANCE,
+  DEFAULT_PROJECT_LANGUAGE,
   estimateScriptSpokenSeconds,
+  familySupportsExtend,
   findScenesWithShortNarration,
   formatDurationLabel,
   MAX_TTS_FIT_ATTEMPTS,
@@ -80,6 +82,59 @@ import {
 } from './scene-media';
 
 const DEFAULT_MAX_CONCURRENT_SCENES = 5;
+
+interface SceneManifestRow {
+  sceneId: string;
+  sceneIndex: number;
+  prompt?: string;
+  duration?: number;
+  mediaPath?: string | null;
+  mediaKind?: string;
+  state?: string;
+  historyUuid?: string | null;
+}
+
+function sceneManifestPath(projectDir: string): string {
+  return path.join(projectDir, 'scene-manifest.json');
+}
+
+function readSceneManifest(projectDir: string): SceneManifestRow[] {
+  const p = sceneManifestPath(projectDir);
+  if (!fs.existsSync(p)) return [];
+  try {
+    const raw = JSON.parse(fs.readFileSync(p, 'utf8')) as unknown;
+    return Array.isArray(raw) ? (raw as SceneManifestRow[]) : [];
+  } catch {
+    return [];
+  }
+}
+
+function historyUuidFromManifest(
+  rows: SceneManifestRow[],
+  sceneId: string,
+  sceneIndex: number
+): string | undefined {
+  const byId = rows.find((r) => r.sceneId === sceneId)?.historyUuid?.trim();
+  if (byId) return byId;
+  const byIndex = rows.find((r) => r.sceneIndex === sceneIndex)?.historyUuid?.trim();
+  return byIndex || undefined;
+}
+
+function writeSceneManifest(
+  projectDir: string,
+  rows: Array<{
+    sceneId: string;
+    sceneIndex: number;
+    prompt: string;
+    duration: number;
+    mediaPath: string | null;
+    mediaKind: string;
+    state?: string;
+    historyUuid?: string | null;
+  }>
+): void {
+  fs.writeFileSync(sceneManifestPath(projectDir), JSON.stringify(rows, null, 2), 'utf8');
+}
 const MAX_SCENE_GENERATE_ATTEMPTS = 3;
 
 const RAW_NARRATION_FILE = 'narration-raw.mp3';
@@ -668,7 +723,7 @@ async function prepareNarrationFittingTarget(options: {
       apiKey: options.apiKey,
       openaiModel: options.openaiModel,
       script,
-      language: options.language || 'Tiếng Việt',
+      language: options.language || DEFAULT_PROJECT_LANGUAGE,
       targetDurationSec: target,
       actualAudioSec: raw,
     });
@@ -787,10 +842,15 @@ export async function remuxProject(projectId: string): Promise<GenerateJobResult
         audioPath,
         srtPath,
         outputPath,
-        burnSubtitles: settings.burnSubtitles,
+        // Music-animation không có phụ đề thật (subs.srt chỉ là placeholder) →
+        // burn sẽ encode lại toàn bộ video mà chẳng hiện gì.
+        burnSubtitles: settings.burnSubtitles && !isMusicRemux,
         workDir,
         durations,
         stripCornerLogo: isNanoBananaModel(draft.model || detail.meta.model || ''),
+        // Hoạt hình nhạc: ảnh đứng yên, cắt cảnh thẳng → ghép nhanh hơn nhiều.
+        motion: isMusicRemux ? 'static' : 'kenburns',
+        sceneTransitions: !isMusicRemux,
       });
     } else {
       await assembleFinalVideo({
@@ -798,10 +858,11 @@ export async function remuxProject(projectId: string): Promise<GenerateJobResult
         audioPath,
         srtPath,
         outputPath,
-        burnSubtitles: settings.burnSubtitles,
+        burnSubtitles: settings.burnSubtitles && !isMusicRemux,
         workDir,
         estimatedTotalSeconds: durations.reduce((sum, d) => sum + d, 0),
         clipDurations: durations,
+        sceneTransitions: !isMusicRemux,
       });
     }
 
@@ -874,6 +935,10 @@ export async function runGenerateJob(input: GenerateJobInput): Promise<GenerateJ
   );
   const isMusicAnimation = projectKind === 'music-animation';
   const isAudioOnlyProject = projectKind === 'audio-only';
+  /** Cast lock do ChatGPT viết ở bước script — lặp vào mọi prompt scene của MV. */
+  const musicCastLock = isMusicAnimation
+    ? getProject(meta.id).draft?.musicCastLock?.trim() || undefined
+    : undefined;
 
   if (!isMusicAnimation) {
     if (voice.ttsProvider === 'openai' && !keys.openaiApiKey) {
@@ -1145,8 +1210,19 @@ export async function runGenerateJob(input: GenerateJobInput): Promise<GenerateJ
 
     const phase = mediaKind === 'image' ? 'image' : 'video';
     const label = mediaKind === 'image' ? 'ảnh' : 'video';
-    const maxConcurrent = clampConcurrentScenes(
-      input.maxConcurrentScenes ?? settings.maxConcurrentScenes ?? DEFAULT_MAX_CONCURRENT_SCENES
+    const chainScenesEnabled =
+      mediaKind === 'video' &&
+      familySupportsExtend(String(input.family)) &&
+      input.chainScenes !== false;
+    const maxConcurrent = chainScenesEnabled
+      ? 1
+      : clampConcurrentScenes(
+          input.maxConcurrentScenes ?? settings.maxConcurrentScenes ?? DEFAULT_MAX_CONCURRENT_SCENES
+        );
+
+    const priorManifest = readSceneManifest(projectDir);
+    const historyUuids: Array<string | undefined> = scenes.map((scene, index) =>
+      historyUuidFromManifest(priorManifest, scene.id, index)
     );
 
     const sceneStatuses: SceneJobProgress[] = scenes.map((scene, index) => ({
@@ -1179,9 +1255,12 @@ export async function runGenerateJob(input: GenerateJobInput): Promise<GenerateJ
         }, 0);
 
       const focus = focusIndex != null ? sceneStatuses[focusIndex] : active;
+      const modeLabel = chainScenesEnabled
+        ? 'Chain extend (liền mạch)'
+        : `Worker pool (${maxConcurrent})`;
       emitProgress({
         phase,
-        message: `Worker pool (${maxConcurrent}): ${completed}/${scenes.length} ${label} xong${
+        message: `${modeLabel}: ${completed}/${scenes.length} ${label} xong${
           failed ? ` · ${failed} lỗi` : ''
         }${
           focus
@@ -1233,6 +1312,10 @@ export async function runGenerateJob(input: GenerateJobInput): Promise<GenerateJ
         error: 'Bỏ qua — không nằm trong danh sách gen',
       };
     }
+    // Chain cần thứ tự tăng dần để scene N lấy ref_history từ N-1.
+    if (chainScenesEnabled) {
+      workIndexes.sort((a, b) => a - b);
+    }
     emitPoolProgress();
 
     if (workIndexes.length) {
@@ -1241,6 +1324,14 @@ export async function runGenerateJob(input: GenerateJobInput): Promise<GenerateJ
           if (isJobStopRequested()) {
             throw new Error('SKIPPED');
           }
+          // Pause: runPool đã đợi; vẫn check stop.
+          while (isJobPaused() && !isJobStopRequested()) {
+            await new Promise((r) => setTimeout(r, 400));
+          }
+          if (isJobStopRequested()) {
+            throw new Error('SKIPPED');
+          }
+
           const scene = scenes[i];
           sceneStatuses[i] = {
             ...sceneStatuses[i],
@@ -1251,7 +1342,14 @@ export async function runGenerateJob(input: GenerateJobInput): Promise<GenerateJ
           localProgress[i] = 0;
           emitPoolProgress(i);
 
-          const mediaPath = await generateOneSceneMedia(
+          const chainFromHistory =
+            chainScenesEnabled && i > 0
+              ? historyUuids[i - 1] ||
+                historyUuidFromManifest(priorManifest, scenes[i - 1].id, i - 1) ||
+                null
+              : null;
+
+          const result = await generateOneSceneMedia(
             {
               apiKey: keys.snapgenApiKey,
               mediaKind,
@@ -1262,11 +1360,17 @@ export async function runGenerateJob(input: GenerateJobInput): Promise<GenerateJ
               mode: input.mode,
               stylePrompt: input.stylePrompt,
               language: input.language,
+              projectKind,
+              castLock: musicCastLock,
+              // Ảnh của MV giờ đứng yên (không Ken Burns) → prompt phải yêu cầu
+              // bố cục một khung, không mô tả camera move.
+              stillFrame: isMusicAnimation && mediaKind === 'image',
               imagesDir,
               clipsDir,
               workDir,
               maxAttempts: MAX_SCENE_GENERATE_ATTEMPTS,
               shouldAbort: () => isJobStopRequested(),
+              chainFromHistory,
             },
             scene,
             i,
@@ -1279,7 +1383,8 @@ export async function runGenerateJob(input: GenerateJobInput): Promise<GenerateJ
               emitPoolProgress(i);
             }
           );
-          mediaPaths[i] = mediaPath;
+          mediaPaths[i] = result.mediaPath;
+          if (result.historyUuid) historyUuids[i] = result.historyUuid;
           localProgress[i] = 1;
           sceneStatuses[i] = {
             ...sceneStatuses[i],
@@ -1288,7 +1393,7 @@ export async function runGenerateJob(input: GenerateJobInput): Promise<GenerateJ
             error: undefined,
           };
           emitPoolProgress(i);
-          return mediaPath;
+          return result.mediaPath;
         }),
         {
           concurrency: Math.min(maxConcurrent, workIndexes.length),
@@ -1337,12 +1442,8 @@ export async function runGenerateJob(input: GenerateJobInput): Promise<GenerateJ
       });
       emitPoolProgress();
 
-      if (isJobStopRequested() || skippedCount > 0) {
-        const done = sceneStatuses.filter(
-          (s) => s.state === 'completed' || s.state === 'cached'
-        ).length;
-        // Lưu manifest partial — không merge nếu thiếu scene.
-        const partialManifest = scenes.map((scene, index) => ({
+      const buildManifestRows = () =>
+        scenes.map((scene, index) => ({
           sceneId: scene.id,
           sceneIndex: index,
           prompt: scene.visual_prompt,
@@ -1350,12 +1451,15 @@ export async function runGenerateJob(input: GenerateJobInput): Promise<GenerateJ
           mediaPath: mediaPaths[index] || null,
           mediaKind,
           state: sceneStatuses[index]?.state,
+          historyUuid: historyUuids[index] || null,
         }));
-        fs.writeFileSync(
-          path.join(projectDir, 'scene-manifest.json'),
-          JSON.stringify(partialManifest, null, 2),
-          'utf8'
-        );
+
+      if (isJobStopRequested() || skippedCount > 0) {
+        const done = sceneStatuses.filter(
+          (s) => s.state === 'completed' || s.state === 'cached'
+        ).length;
+        // Lưu manifest partial — không merge nếu thiếu scene.
+        writeSceneManifest(projectDir, buildManifestRows());
 
         const existingFinal = path.join(projectDir, 'final.mp4');
         const hasFinal = fs.existsSync(existingFinal);
@@ -1388,6 +1492,7 @@ export async function runGenerateJob(input: GenerateJobInput): Promise<GenerateJ
       }
 
       if (failures.length) {
+        writeSceneManifest(projectDir, buildManifestRows());
         throw new Error(
           `${failures.length}/${workIndexes.length} scene thất bại (các scene khác vẫn chạy xong):\n` +
             failures.slice(0, 8).join('\n') +
@@ -1400,22 +1505,18 @@ export async function runGenerateJob(input: GenerateJobInput): Promise<GenerateJ
       .map((_, index) => index)
       .filter((index) => !mediaPaths[index]);
 
-    fs.writeFileSync(
-      path.join(projectDir, 'scene-manifest.json'),
-      JSON.stringify(
-        scenes.map((scene, index) => ({
-          sceneId: scene.id,
-          sceneIndex: index,
-          prompt: scene.visual_prompt,
-          duration: scene.duration_hint,
-          mediaPath: mediaPaths[index] || null,
-          mediaKind,
-          state: sceneStatuses[index]?.state,
-        })),
-        null,
-        2
-      ),
-      'utf8'
+    writeSceneManifest(
+      projectDir,
+      scenes.map((scene, index) => ({
+        sceneId: scene.id,
+        sceneIndex: index,
+        prompt: scene.visual_prompt,
+        duration: scene.duration_hint,
+        mediaPath: mediaPaths[index] || null,
+        mediaKind,
+        state: sceneStatuses[index]?.state,
+        historyUuid: historyUuids[index] || null,
+      }))
     );
 
     if (missingIndexes.length) {
@@ -1491,8 +1592,9 @@ export async function runGenerateJob(input: GenerateJobInput): Promise<GenerateJ
 
     emitProgress({
       phase: 'merge',
-      message:
-        mediaKind === 'image'
+      message: isMusicAnimation
+        ? 'Đang ghép nhanh (cắt cảnh thẳng, không zoom) + nhạc...'
+        : mediaKind === 'image'
           ? 'Đang ghép slideshow ảnh + audio + subtitle...'
           : 'Đang ghép các cảnh (fade chuyển cảnh) + audio + subtitle...',
       percent: 92,
@@ -1505,10 +1607,13 @@ export async function runGenerateJob(input: GenerateJobInput): Promise<GenerateJ
         audioPath,
         srtPath,
         outputPath,
-        burnSubtitles: input.burnSubtitles ?? settings.burnSubtitles,
+        burnSubtitles: (input.burnSubtitles ?? settings.burnSubtitles) && !isMusicAnimation,
         workDir,
         durations,
         stripCornerLogo: isNanoBananaModel(input.model),
+        // Hoạt hình nhạc: ảnh đứng yên, cắt cảnh thẳng → ghép nhanh hơn nhiều.
+        motion: isMusicAnimation ? 'static' : 'kenburns',
+        sceneTransitions: !isMusicAnimation,
       });
     } else {
       await assembleFinalVideo({
@@ -1516,10 +1621,11 @@ export async function runGenerateJob(input: GenerateJobInput): Promise<GenerateJ
         audioPath,
         srtPath,
         outputPath,
-        burnSubtitles: input.burnSubtitles ?? settings.burnSubtitles,
+        burnSubtitles: (input.burnSubtitles ?? settings.burnSubtitles) && !isMusicAnimation,
         workDir,
         estimatedTotalSeconds: durations.reduce((sum, d) => sum + d, 0),
         clipDurations: durations,
+        sceneTransitions: !isMusicAnimation,
       });
     }
 
