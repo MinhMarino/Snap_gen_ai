@@ -20,6 +20,7 @@ import {
   DEFAULT_STYLE_PROMPT,
   defaultFamilyForKind,
   defaultModelIdForKind,
+  defaultStylePromptForProjectKind,
   estimateGenerationCredits,
   estimateScriptSpokenSeconds,
   formatCreditEstimate,
@@ -80,6 +81,9 @@ function buildMediaGenerateConfirmMessage(options: {
   regenerateSceneIds: string[];
   modelId: string;
   family: string;
+  /** Giá Snapgen phụ thuộc độ phân giải + mode nên phải truyền vào, không đoán. */
+  resolution: string;
+  mode?: string;
 }): string {
   const { mediaKind, script, sceneMedia, regenerateSceneIds, modelId, family } = options;
   const mediaLabel = mediaKind === 'image' ? 'ảnh' : 'video';
@@ -115,6 +119,8 @@ function buildMediaGenerateConfirmMessage(options: {
     mediaKind,
     modelId,
     family,
+    resolution: options.resolution,
+    mode: options.mode,
     durations: script.scenes
       .filter((scene) => selected.has(scene.id))
       .map((scene) => scene.duration_hint),
@@ -698,13 +704,17 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
           setOutputFormat(inferOutputFormatId(draft.aspectRatio, draft.outputFormat));
           setResolution(draft.resolution);
           setMode(draft.mode ?? '');
-          setStylePrompt(draft.stylePrompt?.trim() ? draft.stylePrompt : DEFAULT_STYLE_PROMPT);
+          const kind = resolveProjectKind(draft.projectKind ?? detail.meta.projectKind);
+          // Project chưa lưu style thì lấy default THEO KIND — dùng chung
+          // DEFAULT_STYLE_PROMPT sẽ gán style video học tập cho project nhạc.
+          setStylePrompt(
+            draft.stylePrompt?.trim() ? draft.stylePrompt : defaultStylePromptForProjectKind(kind)
+          );
           setScript(draft.script);
           setVoice(resolveProjectVoice(draft));
           setOpenaiChatModel(
             resolveProjectChatModel(draft.openaiChatModel, undefined)
           );
-          const kind = resolveProjectKind(draft.projectKind ?? detail.meta.projectKind);
           setProjectKind(kind);
           setLyricText(draft.lyricText || '');
           setMusicRelativePath(draft.musicRelativePath);
@@ -1458,6 +1468,8 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
           regenerateSceneIds: payload.regenerateSceneIds,
           modelId,
           family,
+          resolution,
+          mode: mode || undefined,
         })
       );
       if (!ok) return;

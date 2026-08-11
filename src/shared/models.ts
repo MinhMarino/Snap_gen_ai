@@ -1,3 +1,4 @@
+import { resolveAspectRatioForModel } from './output-format';
 import type { ImageFamily, MediaKind, ModelOption, VideoFamily } from './types';
 
 export const VIDEO_FAMILIES: { id: VideoFamily; label: string }[] = [
@@ -26,22 +27,28 @@ export const DEFAULT_PROJECT_LANGUAGE = 'English';
  * Style mặc định: video học tập đơn giản cho trẻ nhỏ, cảm hứng Pingpong / kids cartoon.
  * Visual: mascot động vật & đồ vật — KHÔNG mô tả trẻ em (Snapgen/Google chặn).
  */
-export const DEFAULT_STYLE_PROMPT =
-  'Simple Pingpong-style kids learning cartoon: bright flat colors, soft rounded shapes, ' +
-  'cute animal or toy mascots, big friendly expressions, playful gentle bounce motion, ' +
-  'clean uncluttered backgrounds, warm cheerful lighting. No readable text on screen. ' +
-  'Never depict real children or babies — only animals, toys, and everyday objects as characters.';
+/**
+ * Vẻ ngoài kênh thiếu nhi YouTube: 3D bóng bẩy kiểu đồ chơi (Cocomelon / Kids TV).
+ * Nhân vật là xe cộ - đồ vật - con vật có MẮT TO và miệng cười — thứ làm nên
+ * thể loại này, và cũng là thứ tránh được lệnh chặn của Google vì không có trẻ em.
+ */
+export const KIDS_3D_TOY_STYLE =
+  'bright 3D cartoon animation for young children, glossy toy-like characters with big shiny ' +
+  'cartoon eyes and happy smiles, chunky rounded shapes, bold saturated primary colors, ' +
+  'sunny blue sky with fluffy white clouds, soft even lighting, clean simple background';
+
+/** Bản 2D phẳng — giữ lại để đổi nhanh nếu muốn kiểu vẽ tay. */
+export const KIDS_FLAT_2D_STYLE =
+  'very simple flat 2D kids cartoon, thick clean outlines, bright cheerful colors, ' +
+  'soft rounded shapes, big friendly eyes, minimal detail, plain empty background';
+
+export const DEFAULT_STYLE_PROMPT = KIDS_3D_TOY_STYLE;
 
 /**
- * Style mặc định cho dự án hoạt hình nhạc.
- * DEFAULT_STYLE_PROMPT (kids cartoon) hoàn toàn sai cho music video — nếu user
- * không tự sửa thì mọi scene MV đều bị bọc style "mascot học chữ cho trẻ".
+ * Style mặc định cho dự án hoạt hình nhạc — dùng chung vẻ 3D đồ chơi.
+ * Bản đầu là "cinematic anime, painterly, film grain": tông người lớn, sai hẳn thể loại.
  */
-export const MUSIC_ANIMATION_STYLE_PROMPT =
-  'Cinematic anime music-video illustration: painterly key-frame quality, expressive characters, ' +
-  'rich rim lighting and bloom, atmospheric depth (foreground / midground / background layers), ' +
-  'saturated but harmonious palette, film grain, dramatic sky and weather as emotional backdrop. ' +
-  'No readable text on screen.';
+export const MUSIC_ANIMATION_STYLE_PROMPT = KIDS_3D_TOY_STYLE;
 
 export function defaultStylePromptForProjectKind(kind?: string | null): string {
   return String(kind || '') === 'music-animation'
@@ -56,6 +63,24 @@ export function defaultFamilyForKind(kind: MediaKind): VideoFamily | ImageFamily
 export function defaultModelIdForKind(kind: MediaKind): string {
   return kind === 'image' ? DEFAULT_IMAGE_MODEL_ID : DEFAULT_VIDEO_MODEL_ID;
 }
+
+/** Sora gọi độ phân giải là small/large — hiện nhãn px để chọn được 1080p. */
+const SORA_RESOLUTION_LABELS: Record<string, string> = {
+  small: '720p (small)',
+  large: '1080p (large)',
+};
+
+/**
+ * Kling không nhận `resolution` (openapi.json: video-gen/kling chỉ có
+ * prompt/model/mode/aspect_ratio/duration/ref_*) — mode quyết định độ phân giải.
+ * Thứ tự khóa quan trọng: `modeForResolution` lấy mode ĐẦU TIÊN đạt yêu cầu.
+ */
+const KLING_MODE_RESOLUTIONS: Record<string, string> = {
+  standard: '720p',
+  relax: '720p',
+  professional: '1080p',
+  professional_audio: '1080p',
+};
 
 export const VIDEO_MODELS: ModelOption[] = [
   {
@@ -125,6 +150,7 @@ export const VIDEO_MODELS: ModelOption[] = [
     kind: 'video',
     durations: [10, 15],
     resolutions: ['small'],
+    resolutionLabels: SORA_RESOLUTION_LABELS,
     aspectRatios: ['landscape', 'portrait'],
     defaultDuration: 10,
     defaultResolution: 'small',
@@ -137,18 +163,21 @@ export const VIDEO_MODELS: ModelOption[] = [
     kind: 'video',
     durations: [25],
     resolutions: ['small'],
+    resolutionLabels: SORA_RESOLUTION_LABELS,
     aspectRatios: ['landscape', 'portrait'],
     defaultDuration: 25,
     defaultResolution: 'small',
     defaultAspectRatio: 'landscape',
   },
   {
+    // Biến thể Sora duy nhất cho 1080p (resolution=large).
     id: 'sora-2-pro-hd',
-    label: 'Sora 2 Pro HD',
+    label: 'Sora 2 Pro HD (1080p)',
     family: 'sora',
     kind: 'video',
     durations: [15],
     resolutions: ['large'],
+    resolutionLabels: SORA_RESOLUTION_LABELS,
     aspectRatios: ['landscape', 'portrait'],
     defaultDuration: 15,
     defaultResolution: 'large',
@@ -175,7 +204,8 @@ export const VIDEO_MODELS: ModelOption[] = [
     family: 'seedance',
     kind: 'video',
     durations: [4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
-    resolutions: ['720p'],
+    // openapi.json: video-gen/seedance CÓ param `resolution` (default 720p).
+    resolutions: ['480p', '720p', '1080p'],
     aspectRatios: ['16:9', '9:16', '1:1', '3:4', '4:3', '21:9'],
     defaultDuration: 8,
     defaultResolution: '720p',
@@ -188,7 +218,7 @@ export const VIDEO_MODELS: ModelOption[] = [
     family: 'seedance',
     kind: 'video',
     durations: [4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
-    resolutions: ['720p'],
+    resolutions: ['480p', '720p', '1080p'],
     aspectRatios: ['16:9', '9:16', '1:1', '3:4', '4:3', '21:9'],
     defaultDuration: 10,
     defaultResolution: '720p',
@@ -202,6 +232,7 @@ export const VIDEO_MODELS: ModelOption[] = [
     kind: 'video',
     durations: [5, 8, 10, 15],
     resolutions: ['720p', '1080p'],
+    resolutionFromMode: KLING_MODE_RESOLUTIONS,
     aspectRatios: ['16:9', '9:16', '1:1'],
     defaultDuration: 8,
     defaultResolution: '720p',
@@ -215,6 +246,7 @@ export const VIDEO_MODELS: ModelOption[] = [
     kind: 'video',
     durations: [5, 10],
     resolutions: ['720p', '1080p'],
+    resolutionFromMode: KLING_MODE_RESOLUTIONS,
     aspectRatios: ['16:9', '9:16', '1:1'],
     defaultDuration: 5,
     defaultResolution: '720p',
@@ -228,6 +260,7 @@ export const VIDEO_MODELS: ModelOption[] = [
     kind: 'video',
     durations: [5, 10],
     resolutions: ['720p', '1080p'],
+    resolutionFromMode: KLING_MODE_RESOLUTIONS,
     aspectRatios: ['16:9', '9:16', '1:1'],
     defaultDuration: 5,
     defaultResolution: '720p',
@@ -241,6 +274,7 @@ export const VIDEO_MODELS: ModelOption[] = [
     kind: 'video',
     durations: [5, 10],
     resolutions: ['720p', '1080p'],
+    resolutionFromMode: KLING_MODE_RESOLUTIONS,
     aspectRatios: ['16:9', '9:16', '1:1'],
     defaultDuration: 5,
     defaultResolution: '720p',
@@ -248,16 +282,17 @@ export const VIDEO_MODELS: ModelOption[] = [
     extraFields: { mode: ['standard', 'professional'] },
   },
   {
+    // openapi.json: video-gen/meta dùng `orientation`, không có aspect_ratio/resolution.
     id: 'meta-ai-video',
     label: 'Meta AI Video',
     family: 'meta',
     kind: 'video',
     durations: [5, 10],
     resolutions: ['720p'],
-    aspectRatios: ['16:9', '9:16', '1:1'],
+    aspectRatios: ['landscape', 'portrait', 'square'],
     defaultDuration: 5,
     defaultResolution: '720p',
-    defaultAspectRatio: '16:9',
+    defaultAspectRatio: 'landscape',
   },
 ];
 
@@ -366,6 +401,111 @@ export function maxSingleShotDuration(modelId: string): number {
   const model = getModelById(modelId);
   if (!model?.durations.length) return 8;
   return Math.max(...model.durations);
+}
+
+/** Độ phân giải thực tế của một mode, với model không có param `resolution` (Kling). */
+export function resolutionForMode(modelId: string, mode?: string | null): string | null {
+  const model = getModelById(modelId);
+  if (!model?.resolutionFromMode) return null;
+  return model.resolutionFromMode[String(mode || '').trim()] ?? model.defaultResolution;
+}
+
+/**
+ * Mode đạt được `resolution` mong muốn, cho model không có param `resolution`.
+ * CHỈ nâng cấp (720p→1080p), không bao giờ hạ: project cũ lưu resolution=1080p +
+ * mode=standard sẽ được đẩy lên professional thay vì âm thầm xuất 720p.
+ */
+export function modeForResolution(
+  modelId: string,
+  resolution: string,
+  mode?: string | null
+): string | undefined {
+  const model = getModelById(modelId);
+  const map = model?.resolutionFromMode;
+  const current = String(mode || '').trim() || undefined;
+  if (!map) return current;
+  const want = String(resolution || '').trim();
+  const currentRes = current ? map[current] : undefined;
+  if (!want || currentRes === want || currentRes === '1080p') return current;
+  const upgraded = Object.keys(map).find((m) => map[m] === want);
+  return upgraded ?? current;
+}
+
+/** Các tên khác nhau của cùng một độ phân giải giữa các họ model. */
+const RESOLUTION_SYNONYMS: string[][] = [
+  ['480p'],
+  ['720p', 'small'],
+  ['1080p', 'large'],
+];
+
+/**
+ * Hai giá trị resolution có chỉ cùng một độ phân giải không (720p ↔ small…).
+ * Thiếu một bên → true: dữ liệu không đủ thì đừng loại oan (loại oan = gen lại, tốn credit).
+ */
+export function isSameResolution(a?: string | null, b?: string | null): boolean {
+  const x = String(a || '').trim();
+  const y = String(b || '').trim();
+  if (!x || !y) return true;
+  return x === y || resolutionCandidates(x).includes(y);
+}
+
+function resolutionCandidates(value: string): string[] {
+  const v = String(value || '').trim();
+  const group = RESOLUTION_SYNONYMS.find((g) => g.includes(v));
+  return group ? [v, ...group.filter((x) => x !== v)] : [v];
+}
+
+export interface NormalizedVideoRequest {
+  model: string;
+  duration: number;
+  aspectRatio: string;
+  resolution: string;
+  mode?: string;
+}
+
+/**
+ * Ép tham số về đúng bảng model TRƯỚC khi gọi API.
+ * Cần thiết vì project lưu aspect/resolution độc lập với model: đổi family
+ * (Veo `16:9` → Grok chỉ nhận `landscape`) hoặc đổi model (`1080p` → Sora `large`)
+ * mà không normalize thì API trả INVALID_INPUT, mất một lượt gọi + lock credit.
+ */
+export function normalizeVideoRequest(input: {
+  modelId: string;
+  duration: number;
+  aspectRatio: string;
+  resolution: string;
+  mode?: string;
+}): NormalizedVideoRequest {
+  const modelId = resolveModelId(input.modelId);
+  const model = getModelById(modelId);
+  if (!model) {
+    return {
+      model: modelId,
+      duration: Math.max(1, Math.round(Number(input.duration) || 1)),
+      aspectRatio: input.aspectRatio,
+      resolution: input.resolution,
+      mode: input.mode,
+    };
+  }
+
+  const resolution =
+    resolutionCandidates(input.resolution).find((r) => model.resolutions.includes(r)) ??
+    model.defaultResolution;
+
+  const allowedModes = model.extraFields?.mode;
+  let mode = input.mode?.trim() || undefined;
+  if (allowedModes?.length && (!mode || !allowedModes.includes(mode))) {
+    mode = allowedModes[0];
+  }
+  mode = modeForResolution(modelId, resolution, mode);
+
+  return {
+    model: modelId,
+    duration: clampDuration(modelId, Math.max(1, Number(input.duration) || model.defaultDuration)),
+    aspectRatio: resolveAspectRatioForModel(input.aspectRatio, model.aspectRatios),
+    resolution,
+    mode,
+  };
 }
 
 export function familySupportsExtend(family: string): boolean {
@@ -493,31 +633,236 @@ export function resolveVisualLanguageLock(language?: string | null): string {
  * Không gắn narration — lời thoại chỉ dùng cho TTS/subtitle, không đưa vào prompt gen media.
  * visual_prompt ưu tiên English mô tả hình; không hiện chữ trên màn hình.
  */
+/**
+ * Chỉ thị/meta lọt vào visual_prompt qua các bước viết kịch bản cũ.
+ * Veo nhận nguyên văn những câu này rồi cố VẼ chúng (nhất là narration trong ngoặc
+ * kép — chữ tiếng Việt hay bị render lên màn hình) hoặc rối vì quá nhiều mệnh lệnh.
+ * Cắt sạch ở wrapper để cả project CŨ (visual_prompt đã lưu trong JSON) cũng nhẹ theo.
+ */
+const PROMPT_DIRECTIVE_PATTERNS: RegExp[] = [
+  /\bOPENING (?:beat )?of a continuous[^.]*\./gi,
+  /\bCONTINUATION beat[^.]*\./gi,
+  /\bCONTINUATION from previous narration[^]*?no hard cut\.?/gi,
+  /\b(?:End the shot mid-action|End on a gentle satisfied pose|Leave motion ready for next beat)[^.]*\./gi,
+  /\bGentle closing energy for sequence end\.?/gi,
+  /\bRecurring cast:[^.]*\./gi,
+  /\bStyle bible:[^.]*\./gi,
+  /\bVISUAL RULE \(mandatory\):[^]*?on screen\.?/gi,
+  /\bHARD RULES:[^]*?edge to edge\.?/gi,
+  /\bSTRICT:[^.]*\./gi,
+  /\bVisual locale:[^.]*\./gi,
+  /\bChapter "[^"]*", beat \d+\/\d+\.\s*/gi,
+  // Xóa CẢ câu narration trong ngoặc kép — narration tiếng Việt lọt vào prompt là
+  // lý do Veo vẽ chữ lên màn hình.
+  /\bStory beat to visualize[^"]*"[^"]*"\.?\s*/gi,
+  /\b(?:seamless from previous shot|about) "[^"]*"\.?\s*/gi,
+  // Nhãn viết hoa kiểu "SUBJECT:", "CAMERA:" — bỏ nhãn, giữ nội dung.
+  /\b(SUBJECT|PROP \/ FOCUS OBJECT|PROP|ENVIRONMENT|ACTION \/ MOTION|ACTION|CAMERA|LIGHTING & COLOR|LIGHTING|COMPOSITION)\s*:\s*/g,
+  // Nhãn của storyboard cinematic cũ ("Foreground: …", "Palette: …") — bản kids
+  // không sinh ra nữa nhưng project cũ đã lưu đầy trong visual_prompt.
+  /\b(Foreground|Midground|Background|Palette|Colour palette|Color palette|Motion quality|Framing|Energy)\s*:\s*/g,
+];
+
+/** Độ dài tối đa phần mô tả hình (ký tự) trước khi ghép style. */
+const MAX_VISUAL_PROMPT_CHARS = 260;
+
+/**
+ * Rút prompt về một câu tả hình ngắn: bỏ chỉ thị, bỏ ngoặc kép, cắt theo ranh giới câu.
+ * Prompt ngắn và cụ thể cho kết quả ổn định hơn hẳn trên Veo Fast — prompt dài,
+ * nhiều mệnh lệnh mâu thuẫn là nguyên nhân chính gây lỗi và gen ra hình lộn xộn.
+ */
+export function compactVisualPrompt(
+  visualPrompt: string,
+  maxChars = MAX_VISUAL_PROMPT_CHARS
+): string {
+  let out = String(visualPrompt || '');
+  for (const re of PROMPT_DIRECTIVE_PATTERNS) out = out.replace(re, ' ');
+
+  // Bỏ mệnh lệnh (không phải tả hình) và lời thoại lọt vào. Cắt theo MỆNH ĐỀ
+  // (câu + dấu ;) để câu "a fox mascot; big eyes; pose must act out…" vẫn giữ
+  // được chủ thể, chỉ rụng đúng mệnh đề mệnh lệnh.
+  const isDirective = (s: string) =>
+    /\b(must|do not|don'?t|never|avoid|strictly|no readable|no on-screen)\b/i.test(s);
+  const isLeakedNarration = (s: string) =>
+    /[àáạảãâầấậẩẫăằắặẳẵèéẹẻẽêềếệểễìíịỉĩòóọỏõôồốộổỗơờớợởỡùúụủũưừứựửữỳýỵỷỹđ]/i.test(s) &&
+    s.split(/\s+/).length > 4;
+
+  out = out
+    .split(/(?<=[.!?])\s+/)
+    .map((sentence) => {
+      const kept = sentence
+        .split(';')
+        .map((clause) => clause.trim())
+        .filter((clause) => clause && !isDirective(clause) && !isLeakedNarration(clause));
+      if (!kept.length) return '';
+      const joined = kept.join('; ');
+      return /[.!?]$/.test(joined) ? joined : `${joined}.`;
+    })
+    .filter(Boolean)
+    .join(' ');
+
+  out = out
+    .replace(/["“”]/g, '')
+    .replace(/\s+([,.;:])/g, '$1')
+    .replace(/([,.;:])\1+/g, '$1')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  if (out.length <= maxChars) return out;
+
+  // Cắt ở dấu chấm gần nhất trước giới hạn; không có thì cắt ở khoảng trắng.
+  const head = out.slice(0, maxChars);
+  const lastStop = Math.max(head.lastIndexOf('. '), head.lastIndexOf('! '));
+  if (lastStop > maxChars * 0.5) return head.slice(0, lastStop + 1).trim();
+  const lastSpace = head.lastIndexOf(' ');
+  return `${(lastSpace > 0 ? head.slice(0, lastSpace) : head).trim()}.`;
+}
+
+/** Bối cảnh văn hóa dạng ngắn — bỏ mệnh đề "depict people with accurate age…". */
+function shortLocaleHint(language?: string | null): string | null {
+  const full = resolveVisualLocaleHint(language);
+  if (!full) return null;
+  const head = full.split(';')[0].trim();
+  return /english|western/i.test(head) ? null : head;
+}
+
+// ---------------------------------------------------------------------------
+// Luật "hoạt hình hoá mọi thứ + cực đơn giản" — dùng chung cho cả hai wrapper
+// ---------------------------------------------------------------------------
+
+/**
+ * Style prompt chỉ nói "kids cartoon" thì model hiểu là NHÂN VẬT hoạt hình, còn
+ * bối cảnh vẫn hay ra ảnh thực: ô tô đúng mẫu xe thật, nhà cửa - cây cối chi tiết
+ * như ảnh chụp. Phải liệt kê thẳng những thứ hay bị "thật hoá".
+ *
+ * Luật này TRUNG TÍNH với kiểu vẽ: chỉ cấm "như ảnh thật / như phim người thật",
+ * KHÔNG cấm 3D. Bản trước ghi "no 3D render" nên nó chặn đúng vẻ 3D bóng bẩy kiểu
+ * Cocomelon — tức style prompt đòi một thứ mà luật wrapper lại cấm.
+ */
+export const CARTOON_WORLD_RULE =
+  'everything is cartoon — vehicles, houses, trees, food and props all chunky rounded shapes, ' +
+  'never photoreal, never live-action';
+
+/**
+ * Đơn giản, nhưng cho phép dàn 3–5 nhân vật xếp hàng — đó là bố cục kinh điển của
+ * thể loại này (dàn xe cộ / dàn con vật cùng nhìn vào máy). Cấm là cấm ĐÁM ĐÔNG
+ * người và cảnh rối: đó mới là thứ làm mặt nhân vật bị méo vì model phải chia độ
+ * phân giải cho quá nhiều thứ.
+ */
+export const SIMPLE_STAGING_RULE =
+  'simple staging: 3 to 5 friendly characters at most, never a crowd, few props';
+
+/**
+ * Chuyển động: chỉ nhún / lắc / nhảy nhẹ. Bản trước không nói gì nên model tự thêm
+ * múa, chạy, xoay người — vừa quá sức Veo Fast (ra tay chân dính nhau) vừa không
+ * phải cái người dùng cần.
+ */
+export const SIMPLE_MOTION_RULE =
+  'motion is simple and bouncy — springy bounces, happy wiggles, little hops in place; ' +
+  'no dance routine, no running, no fast action';
+
+/**
+ * Từ chỉ đông người / render thật / chi tiết rườm rà → mệnh đề đơn giản.
+ * Luôn thay bằng cụm SỐ ÍT ("one cartoon friend") để câu không thành
+ * "two characters cheers" — sai ngữ pháp thì model dễ hiểu lệch.
+ */
+const BUSY_SCENE_REPLACEMENTS: Array<[RegExp, string]> = [
+  [
+    /\b(?:a\s+|the\s+)?(?:huge |large |big |whole )?(?:crowd|crowds|mob|throng)(?:\s+of\s+\w+)?\b/gi,
+    'one cartoon friend',
+  ],
+  // "a row of buses" là bố cục ĐÚNG của thể loại → chỉ hạ xuống 3 nhân vật, không
+  // ép về 1. Giữ dạng "a small group of…" để động từ số ít phía sau vẫn đúng ngữ pháp.
+  [
+    /\b(?:a\s+|the\s+)?(?:group|bunch|team|line|row|circle)\s+of\s+(?:many\s+|several\s+)?(?:people|kids|friends|characters|animals|dancers|singers)\b/gi,
+    'a small group of three cartoon friends',
+  ],
+  [
+    /\b(?:many|several|lots of|dozens of|a dozen|hundreds of|numerous)\s+(?:people|kids|friends|characters|animals|dancers|singers)\b/gi,
+    'three cartoon friends',
+  ],
+  [
+    /\b(?:a\s+|the\s+)?(cheering audience|audience|spectators|onlookers|passers-?by|bystanders)\b/gi,
+    'one cartoon friend',
+  ],
+  [/\b(busy|bustling|crowded|packed)\s+(street|city|market|square|stage|room)\b/gi, 'quiet cartoon $2'],
+  // "with photorealistic chrome reflections", "with cinematic rim lighting" — XÓA CẢ
+  // mệnh đề. Chỉ thay từ khóa thì còn lại "a red car with cartoon parked nearby".
+  //
+  // CHÚ Ý: không đụng tới "3D render / CGI" nữa. Style thiếu nhi YouTube chính là 3D
+  // bóng bẩy kiểu đồ chơi; bản trước đổi "3D render" → "flat cartoon" nên nó phá
+  // đúng vẻ ngoài người dùng muốn. Chỉ còn chặn "như ảnh chụp / như phim người thật".
+  [
+    /\s*\b(?:with|and)\s+[^,.;]*\b(?:photo-?realistic|photoreal\w*|hyper-?realistic|realistic|lifelike|live[- ]action|reflections?|film grain|bokeh|lens flare|depth of field|ray[- ]traced|octane)\b[^,.;]*/gi,
+    '',
+  ],
+  // Thuật ngữ nhiếp ảnh đứng lẻ (", film grain", ", bokeh") → xóa hẳn; thay bằng
+  // "cartoon" sẽ ra "a cartoon film grain" vô nghĩa.
+  [/\s*,?\s*\b(film grain|bokeh|lens flare|shallow depth of field|depth of field|chrome reflections?|realistic reflections?)\b/gi, ''],
+  // Từ khóa còn lại đứng độc lập ("photorealistic city street", "realistic bus").
+  [
+    /\b(photo-?realistic|photoreal|hyper-?realistic|realistic|lifelike|live[- ]action|octane render|ray[- ]traced)\b/gi,
+    'cartoon',
+  ],
+  // "cinematic" không sai kiểu vẽ nhưng kéo theo ánh sáng u tối, tương phản mạnh.
+  [/\bcinematic\b/gi, 'bright cheerful'],
+  [/\b(intricate|highly detailed|ultra[- ]detailed|finely detailed|elaborate|ornate|detailed)\b/gi, 'simple'],
+  // Dọn "cartoon cartoon", "simple simple" do thay liên tiếp.
+  [/\b(cartoon)(\s+\1)+\b/gi, '$1'],
+  [/\b(simple)(\s+\1)+\b/gi, '$1'],
+];
+
+/** Vũ đạo / hành động mạnh → nhún nhảy nhẹ. */
+const BUSY_MOTION_REPLACEMENTS: Array<[RegExp, string]> = [
+  [/\b(dance choreography|choreography|dance routine|breakdanc\w*|somersault\w*|backflip\w*|cartwheel\w*)\b/gi,
+    'a gentle bounce'],
+  [/\b(sprint\w*|running fast|dashes?|leaps? high|jumps? high|spins? rapidly|twirls? fast)\b/gi,
+    'bounces gently'],
+];
+
+/**
+ * Rút cảnh về mức "một hai nhân vật, nhún nhún là đủ".
+ * Chạy ở wrapper nên áp cho cả project CŨ (visual_prompt đã lưu trong JSON).
+ */
+function simplifyBusyScene(text: string): string {
+  let out = applyReplacements(String(text || ''), BUSY_SCENE_REPLACEMENTS);
+  out = applyReplacements(out, BUSY_MOTION_REPLACEMENTS);
+  return applyReplacements(out, CLEANUP_REPLACEMENTS).replace(/\s+/g, ' ').trim();
+}
+
+/**
+ * Prompt gửi Snapgen: mô tả hình NGẮN + style + luật hoạt hình + "no text".
+ * Không gắn narration — lời thoại chỉ dùng cho TTS/subtitle.
+ *
+ * Cố tình KHÔNG dùng `resolveVisualLanguageLock` nữa: câu đó liệt kê hàng loạt thứ
+ * cấm ("signs, labels, screens, books, posters…") nên chính nó gợi model vẽ ra,
+ * và mệnh đề "depict people with accurate age" trong locale hint là lý do video
+ * thiếu nhi hay bị Google chặn vì nghi mô tả trẻ em.
+ */
 export function buildSceneImagePrompt(options: {
   visualPrompt: string;
   language?: string | null;
   stylePrompt?: string;
+  /** 'video' → gắn thêm luật chuyển động nhún/lắc. */
+  mediaKind?: string | null;
 }): string {
-  let prompt = withStylePrompt(options.visualPrompt || '', options.stylePrompt);
-  const locale = resolveVisualLocaleHint(options.language);
-  const languageLock = resolveVisualLanguageLock(options.language);
-  const lower = prompt.toLowerCase();
+  const visual = simplifyBusyScene(compactVisualPrompt(options.visualPrompt || ''));
+  const parts = [visual.replace(/\.*$/, '')];
 
-  if (locale) {
-    const localeAlready =
-      /japanese|vietnamese|korean|chinese|thai|english-language|cultural setting|locale/.test(
-        lower
-      ) || lower.includes(locale.slice(0, 24).toLowerCase());
-    if (!localeAlready) {
-      prompt = `${prompt.trim()}. Visual locale: ${locale}.`;
-    }
+  const locale = shortLocaleHint(options.language);
+  if (locale && !new RegExp(locale.split(' ')[0], 'i').test(visual)) {
+    parts.push(locale);
   }
 
-  if (!lower.includes('visual rule') && !lower.includes('language lock')) {
-    prompt = `${prompt.trim()} ${languageLock}`;
+  const style = (options.stylePrompt || DEFAULT_STYLE_PROMPT).trim().replace(/\.*$/, '');
+  if (style && !visual.toLowerCase().includes(style.toLowerCase().slice(0, 30))) {
+    parts.push(style);
   }
 
-  return prompt.trim();
+  parts.push(CARTOON_WORLD_RULE, SIMPLE_STAGING_RULE);
+  if (options.mediaKind === 'video') parts.push(SIMPLE_MOTION_RULE);
+  parts.push('no text');
+  return parts.filter(Boolean).join('. ').replace(/\s+/g, ' ').trim() + '.';
 }
 
 // ---------------------------------------------------------------------------
@@ -528,34 +873,34 @@ export function buildSceneImagePrompt(options: {
  * Cỡ cảnh luân phiên theo scene index.
  * MV mà mọi shot cùng cỡ thì xem rất chán — nhất là khi ảnh đã không zoom/pan nữa.
  * Chỉ áp dụng khi visual_prompt CHƯA tự nói cỡ cảnh.
+ *
+ * Giữ NGẮN và không dùng từ nghề (shallow depth of field, low-angle hero, OTS):
+ * phim thiếu nhi luôn để camera ngang tầm mắt, và mỗi từ nghề thêm vào là một cơ
+ * hội để model đổi style giữa các scene.
  */
 const MUSIC_SHOT_LADDER = [
-  'wide establishing shot, full environment visible, subject small in frame',
-  'medium shot, subject waist-up, balanced headroom',
-  'intimate close-up on face and hands, shallow depth of field',
-  'wide dynamic angle with a strong foreground element framing the subject',
-  'low-angle hero shot looking up at the subject',
-  'over-the-shoulder shot looking past the subject into the scene',
+  'wide shot, whole simple scene visible',
+  'medium shot, character filling most of the frame',
+  'close-up on the happy face and big eyes',
+  'front-on line-up shot, characters side by side facing the camera',
 ];
 
 const FRAMING_ALREADY_RE =
   /close-?up|wide shot|wide angle|medium shot|establishing|extreme close|aerial|bird'?s[- ]eye|over[- ]the[- ]shoulder|low[- ]angle|high[- ]angle|macro|full[- ]body|two[- ]shot|profile shot/i;
 
-/** Cấm cứng: chữ/lyric, watermark, ghép nhiều khung — 3 lỗi hay gặp nhất ở MV AI. */
-const MUSIC_HARD_RULES =
-  'HARD RULES: absolutely no readable text of any kind — no lyrics, captions, subtitles, ' +
-  'song titles, credits, signs, logos, watermarks, timecodes or UI overlays; ' +
-  'no split screen, collage, grid, comic panels, film strip, borders, frames or letterboxing; ' +
-  'one single continuous image, edge to edge.';
+/**
+ * Cấm cứng: chữ/lyric và ghép nhiều khung — 2 lỗi hay gặp nhất.
+ * Bản cũ liệt kê 15 thứ cấm ("lyrics, captions, subtitles, song titles, credits,
+ * signs, logos, watermarks, timecodes…"); chính danh sách đó gợi model vẽ ra chữ,
+ * và nó dài hơn cả phần tả hình nên bị ưu tiên thấp hơn mong đợi.
+ */
+const MUSIC_HARD_RULES = 'no text anywhere, no split screen or collage';
 
 /**
  * Một khung ĐỨNG YÊN: sau khi bỏ Ken Burns, ảnh phải tự đứng vững như một
  * key frame — mô tả chuyển động camera chỉ làm model vẽ blur / motion streak vô ích.
  */
-const MUSIC_STILL_FRAME_RULE =
-  'This is ONE HELD STILL FRAME (no camera movement, no zoom, no pan): ' +
-  'sharp focus on the subject, no motion blur or speed lines, ' +
-  'composition must read as a finished poster key-frame on its own.';
+const MUSIC_STILL_FRAME_RULE = 'one still frame, no camera movement, sharp and clean';
 
 export interface MusicScenePromptOptions {
   visualPrompt: string;
@@ -572,68 +917,101 @@ export interface MusicScenePromptOptions {
   section?: string;
   /** true khi ảnh sẽ đứng yên trong video (music-animation + mediaKind image). */
   stillFrame?: boolean;
+  /** 'video' → gắn luật chuyển động nhún/lắc thay vì để model tự nghĩ vũ đạo. */
+  mediaKind?: string | null;
 }
 
 function musicEnergyLine(section?: string): string | null {
   const value = String(section || '').toLowerCase();
-  if (value === 'introduction') {
-    return 'Energy: restrained and establishing — softer, cooler light, more negative space.';
-  }
-  if (value === 'conclusion') {
-    return 'Energy: resolving final beat — warm fading light, calm settled staging.';
-  }
+  // Tông thiếu nhi: mở đầu nhẹ nhàng, kết bài ấm áp. Không dùng "cooler light /
+  // negative space / fading light" — nghe điện ảnh nhưng làm khung tối và trống trải.
+  if (value === 'introduction') return 'calm gentle mood, soft daylight';
+  if (value === 'conclusion') return 'warm happy ending mood, cosy light';
   return null;
 }
 
+/** Cast lock dài quá thì nó nuốt luôn phần tả hành động của scene. */
+const MAX_MUSIC_CAST_LOCK_CHARS = 220;
+/** Phần mô tả hình của scene MV — nhiều hơn video học tập một chút, vẫn phải ngắn. */
+const MAX_MUSIC_VISUAL_PROMPT_CHARS = 320;
+
 /**
- * Prompt gửi Snapgen cho hoạt hình nhạc.
+ * Prompt gửi Snapgen cho hoạt hình nhạc thiếu nhi.
  *
- * Khác `buildSceneImagePrompt` ở 4 điểm:
+ * Khác `buildSceneImagePrompt` ở 3 điểm:
  *  1. Cast lock đứng ĐẦU prompt (model ưu tiên phần đầu) → nhân vật nhất quán.
  *  2. Luân phiên cỡ cảnh khi storyboard không nói rõ → đỡ đơn điệu.
- *  3. Yêu cầu "một khung đứng yên" khi ảnh không còn Ken Burns.
- *  4. Cấm cứng chữ/lyric/watermark/ghép khung, không nhắc "narration"
- *     (MV không có narration — chỉ có lyric, và lyric KHÔNG được hiện lên hình).
+ *  3. Nói rõ "một khung đứng yên" khi ảnh không còn Ken Burns.
+ *
+ * Bản cũ ghép 6 khối mệnh lệnh viết hoa (CAST LOCK / Framing / Energy / Style /
+ * culture rule / HARD RULES / SAFETY) → prompt ~600 ký tự toàn chỉ thị, phần tả
+ * hình chỉ còn là một mẩu ở giữa. Giờ mọi thứ là mệnh đề ngắn nối bằng dấu phẩy,
+ * đúng cách viết prompt cho ảnh, và tổng độ dài bị chặn cứng.
  */
 export function buildMusicSceneImagePrompt(options: MusicScenePromptOptions): string {
   const parts: string[] = [];
 
-  const cast = options.castLock?.trim();
-  if (cast) {
-    parts.push(`CAST LOCK (identical in every shot, do not redesign): ${cast.slice(0, 600)}`);
-  }
+  // Cast lock cũng phải đi qua compact + bỏ mốc tuổi: storyboard nhạc thiếu nhi rất
+  // hay viết "a 5-year-old duckling", và một chữ "5-year-old" trong prompt là đủ để
+  // Google chặn cả scene (mất credit) — không đợi tới lúc retry mới xử.
+  const cast = simplifyBusyScene(
+    stripAgeMarkers(compactVisualPrompt(options.castLock || '', MAX_MUSIC_CAST_LOCK_CHARS))
+  );
+  if (cast) parts.push(`Same characters in every shot: ${cast.replace(/\.*$/, '')}.`);
 
-  const visual = options.visualPrompt?.trim() || '';
-  parts.push(visual);
+  const visual = simplifyBusyScene(
+    stripAgeMarkers(compactVisualPrompt(options.visualPrompt || '', MAX_MUSIC_VISUAL_PROMPT_CHARS))
+  );
+  if (visual) parts.push(visual.replace(/\.*$/, ''));
 
   if (options.sceneIndex != null && visual && !FRAMING_ALREADY_RE.test(visual)) {
-    parts.push(
-      `Framing: ${MUSIC_SHOT_LADDER[options.sceneIndex % MUSIC_SHOT_LADDER.length]}.`
-    );
+    parts.push(MUSIC_SHOT_LADDER[options.sceneIndex % MUSIC_SHOT_LADDER.length]);
   }
 
   const energy = musicEnergyLine(options.section);
   if (energy) parts.push(energy);
 
-  const style = options.stylePrompt?.trim();
+  const style = options.stylePrompt?.trim().replace(/\.*$/, '');
   // Chỉ bỏ style khi nó thực sự đã nằm trong visual_prompt — style quá ngắn
   // (vài ký tự) rất dễ "trùng" ngẫu nhiên nên không dùng để loại.
   const styleAlready =
     !!style && style.length >= 12 && visual.toLowerCase().includes(style.toLowerCase());
-  if (style && !styleAlready) {
-    parts.push(`Style: ${style}`);
-  }
+  if (style && !styleAlready) parts.push(style);
 
-  parts.push(resolveCultureRule(options.language));
+  // Bối cảnh văn hóa: chỉ một mệnh đề ngắn, và bỏ hẳn với English/Western
+  // (`shortLocaleHint`) — mascot hoạt hình phẳng thì câu này chỉ là nhiễu.
+  const locale = shortLocaleHint(options.language);
+  if (locale && !new RegExp(locale.split(' ')[0], 'i').test(visual)) parts.push(locale);
 
   if (options.stillFrame) parts.push(MUSIC_STILL_FRAME_RULE);
+  else if (options.mediaKind === 'video') parts.push(SIMPLE_MOTION_RULE);
 
-  parts.push(MUSIC_HARD_RULES, SAFE_SUBJECT_RULE);
+  parts.push(CARTOON_WORLD_RULE, SIMPLE_STAGING_RULE, MUSIC_HARD_RULES, KIDS_SAFE_SUBJECT_HINT);
 
-  return parts
-    .map((p) => p.trim())
-    .filter(Boolean)
-    .join(' ')
+  return (
+    parts
+      .map((p) => p.trim())
+      .filter(Boolean)
+      .join(', ')
+      .replace(/\s+/g, ' ')
+      // Cast lock tự kết bằng dấu chấm → "…backpack., Momo waddles" phải thành
+      // "…backpack. Momo waddles".
+      .replace(/\.\s*,\s*/g, '. ')
+      .replace(/,\s*,/g, ',')
+      .trim() + '.'
+  );
+}
+
+/**
+ * Bỏ mốc tuổi khỏi prompt hoạt hình thiếu nhi ("a 5-year-old…", "aged 6").
+ * Xóa hẳn thay vì đổi thành "adult" — mascot con vịt thì không cần tuổi nào cả.
+ */
+function stripAgeMarkers(text: string): string {
+  let out = String(text || '');
+  for (const re of AGE_PATTERNS) out = out.replace(re, ' ');
+  return out
+    .replace(/\b(a|an)\s+(?=[,.;])/gi, '')
+    .replace(/\s+([,.;:])/g, '$1')
     .replace(/\s+/g, ' ')
     .trim();
 }
@@ -651,6 +1029,14 @@ export const SAFE_SUBJECT_RULE =
   'SAFETY: all characters are original stylized adult cartoon characters or friendly ' +
   'animal / toy mascots. No children, babies or toddlers. No real people, celebrities ' +
   'or public figures. No copyrighted, branded or third-party characters, no brand logos.';
+
+/**
+ * Bản NGẮN, viết theo hướng khẳng định — dùng cho prompt bình thường của hoạt hình
+ * nhạc thiếu nhi. SAFE_SUBJECT_RULE đầy đủ (4 câu cấm) chỉ gắn khi đã bị RAI chặn
+ * và phải viết lại prompt: ở lượt đầu nó dài hơn cả phần tả hình.
+ */
+export const KIDS_SAFE_SUBJECT_HINT =
+  'original cartoon vehicles, animals or toys, no children, no real people';
 
 /** Số mức làm sạch prompt (0 = prompt gốc). */
 export const MAX_PROMPT_SAFETY_LEVEL = 2;
@@ -742,40 +1128,171 @@ export function sanitizeUnsafePrompt(prompt: string, level: number): string {
 // ---------------------------------------------------------------------------
 
 /**
- * Bảng giá credit MỖI LƯỢT GỌI API, chép từ https://snapgen.ai/pricing (11/08/2026).
- * Trang chỉ công bố một mức cho mỗi họ model, không tách theo biến thể/độ dài/độ phân giải
- * → đây là ƯỚC TÍNH, không phải hoá đơn. Model nào Snapgen chưa công bố giá thì trả null
- * để UI hiện "—" thay vì đoán bừa.
+ * $10 = 2.000 credit (ưu đãi 100% bonus trên trang pricing) → 1 credit = $0,005.
+ * Đối chiếu với ví dụ trong docs: Veo 2 $0,1/video = 20 credit, Kling 720p 8s
+ * $0,05/s = 80 credit — đúng khớp `estimated_credit` trong response mẫu.
  */
-export const SNAPGEN_CREDITS_BY_FAMILY: Record<string, number> = {
-  veo: 7,
-  grok: 6,
-  seedance: 16,
-  kling: 21,
-  'snapgen-image': 3,
-  'gpt-image': 9,
-  'grok-image': 1,
-};
-
-/** Model có giá riêng khác mức chung của họ (vd. Omni Flash nằm trong họ Veo). */
-export const SNAPGEN_CREDITS_BY_MODEL: Record<string, number> = {
-  'omni-flash': 5,
-  'nano-banana-2': 3,
-  'nano-banana-2-lite': 3,
-  'nano-banana-pro': 3,
-  'gpt-image-2': 9,
-  'grok-image': 1,
-};
-
-/** $10 = 2.000 credit theo ưu đãi 100% bonus đang chạy trên trang pricing. */
 export const SNAPGEN_USD_PER_CREDIT = 10 / 2000;
 
-/** Giá credit cho 1 lượt gọi API; null = Snapgen chưa công bố (sora, meta…). */
-export function creditsPerApiCall(modelId?: string | null, family?: string | null): number | null {
-  const byModel = SNAPGEN_CREDITS_BY_MODEL[String(modelId || '').trim()];
-  if (byModel != null) return byModel;
-  const byFamily = SNAPGEN_CREDITS_BY_FAMILY[String(family || '').trim()];
-  return byFamily ?? null;
+/** Giá tính theo lượt gọi (video/ảnh) hay theo từng giây video. */
+export type SnapgenPriceUnit = 'call' | 'second';
+
+/**
+ * Bảng giá Snapgen, đọc từ https://snapgen.ai/pricing ngày 11/08/2026 —
+ * bung từng nhóm model ra để lấy giá theo BIẾN THỂ (độ phân giải / mode / độ dài).
+ *
+ * CẢNH BÁO LỊCH SỬ: bảng cũ dùng các số 7/6/16/21/3/9/1 tưởng là "credit mỗi lượt",
+ * nhưng đó là SỐ DÒNG trong mỗi nhóm gấp lại của trang pricing (Nano Banana có 3
+ * biến thể, GPT Image 2 có 9…), không phải giá. Vì vậy Seedance/Kling từng bị
+ * ước tính thấp hơn thực tế hơn 10 lần.
+ *
+ * `usd` = đơn giá USD; `unit` = 'call' (mỗi video/ảnh) hoặc 'second' (mỗi giây video).
+ * Tra cứu theo resolution, rồi mode, rồi duration — thiếu khóa nào thì lùi về `default`.
+ */
+interface SnapgenPrice {
+  unit: SnapgenPriceUnit;
+  /** Giá chung khi không phân theo resolution. */
+  usd?: number;
+  /** Theo resolution (720p/1080p/small/large/1K…). */
+  byResolution?: Record<string, number>;
+  /** Theo mode (fast/pro/standard/professional/low/high…), lồng trong resolution nếu cần. */
+  byMode?: Record<string, number | Record<string, number>>;
+  /** Theo độ dài video (giây) — dùng cho model tính giá theo từng mốc thời lượng. */
+  byDuration?: Record<number, number>;
+}
+
+const SNAPGEN_PRICES: Record<string, SnapgenPrice> = {
+  // --- Veo: giá mỗi video, không phụ thuộc 720p/1080p ---
+  'veo-3.1-fast': { unit: 'call', usd: 0.02 },
+  'veo-3.1-lite': { unit: 'call', usd: 0.02 },
+  'veo-3.1': { unit: 'call', usd: 0.5 },
+  'veo-2': { unit: 'call', usd: 0.1 },
+  // Omni Flash: mỗi video, theo mốc thời lượng.
+  'omni-flash': { unit: 'call', byDuration: { 4: 0.075, 6: 0.1, 8: 0.125, 10: 0.15 } },
+
+  // --- Grok: mỗi video, theo resolution × thời lượng ---
+  'grok-3': {
+    unit: 'call',
+    byDuration: { 6: 0.09, 10: 0.12, 15: 0.15 }, // giá 720p; 480p rẻ hơn $0,03 mỗi mốc
+  },
+
+  // --- Seedance: mỗi GIÂY, theo mode × resolution ---
+  'seedance-2': {
+    unit: 'second',
+    byMode: {
+      fast: { '480p': 0.06, '720p': 0.095, '1080p': 0.19 },
+      pro: { '480p': 0.08, '720p': 0.135, '1080p': 0.27 },
+    },
+  },
+  'seedance-2-omni': {
+    unit: 'second',
+    byMode: {
+      // Trang pricing không tách riêng tier `-2`; xếp chung với fast/pro tương ứng.
+      fast: { '480p': 0.095, '720p': 0.095, '1080p': 0.19 },
+      'fast-2': { '480p': 0.095, '720p': 0.095, '1080p': 0.19 },
+      pro: { '480p': 0.135, '720p': 0.135, '1080p': 0.27 },
+      'pro-2': { '480p': 0.135, '720p': 0.135, '1080p': 0.27 },
+      'fast-vip': { '480p': 0.135, '720p': 0.135, '1080p': 0.27 },
+      'pro-vip': { '480p': 0.175, '720p': 0.175, '1080p': 0.345 },
+    },
+  },
+
+  // --- Kling: mỗi GIÂY, theo model × mode (mode quyết định 720p/1080p) ---
+  'kling-video-3-0': { unit: 'second', byMode: { standard: 0.05, professional: 0.06 } },
+  'kling-video-o1': { unit: 'second', byMode: { standard: 0.05, professional: 0.06 } },
+  'kling-video-2-5': {
+    unit: 'second',
+    byMode: { relax: 0.015, standard: 0.03, professional: 0.04 },
+  },
+  'kling-video-2-6': {
+    unit: 'second',
+    byMode: { standard: 0.03, professional: 0.05, professional_audio: 0.07 },
+  },
+
+  // --- Ảnh: mỗi ảnh ---
+  'nano-banana-2': { unit: 'call', usd: 0.015 },
+  'nano-banana-2-lite': { unit: 'call', usd: 0.015 },
+  'nano-banana-pro': { unit: 'call', usd: 0.015 },
+  'grok-image': { unit: 'call', usd: 0.01 },
+  'gpt-image-2': {
+    unit: 'call',
+    byMode: {
+      low: { '1k': 0.03, '2k': 0.035, '4k': 0.04 },
+      medium: { '1k': 0.05, '2k': 0.095, '4k': 0.145 },
+      high: { '1k': 0.16, '2k': 0.315, '4k': 0.47 },
+    },
+  },
+
+  // Sora và Meta AI Video KHÔNG có trên trang pricing → để trống, UI hiện "chưa công bố".
+};
+
+/** Giá 480p của Grok thấp hơn 720p đúng $0,03 ở mọi mốc thời lượng. */
+const GROK_480P_DISCOUNT_USD = 0.03;
+
+function lookupUsd(
+  price: SnapgenPrice,
+  resolution?: string | null,
+  mode?: string | null,
+  duration?: number | null
+): number | null {
+  const res = String(resolution || '').trim().toLowerCase();
+  const md = String(mode || '').trim();
+
+  if (price.byMode) {
+    const entry = price.byMode[md] ?? Object.values(price.byMode)[0];
+    if (typeof entry === 'number') return entry;
+    if (entry) {
+      const keys = Object.keys(entry);
+      const hit = keys.find((k) => k.toLowerCase() === res);
+      return entry[hit ?? keys[0]];
+    }
+  }
+
+  if (price.byDuration && duration != null) {
+    const marks = Object.keys(price.byDuration)
+      .map(Number)
+      .sort((a, b) => a - b);
+    const mark = marks.find((m) => duration <= m) ?? marks[marks.length - 1];
+    const base = price.byDuration[mark];
+    return res === '480p' ? Math.max(0, base - GROK_480P_DISCOUNT_USD) : base;
+  }
+
+  if (price.byResolution) {
+    const keys = Object.keys(price.byResolution);
+    const hit = keys.find((k) => k.toLowerCase() === res);
+    return price.byResolution[hit ?? keys[0]];
+  }
+
+  return price.usd ?? null;
+}
+
+/**
+ * Credit cho MỘT lượt gọi API với đúng thông số đang chọn.
+ * null = Snapgen chưa công bố giá (Sora, Meta) → UI phải hiện "—", không đoán.
+ */
+export function creditsForOneCall(options: {
+  modelId: string;
+  resolution?: string | null;
+  mode?: string | null;
+  /** Thời lượng shot (giây) — bắt buộc với model tính theo giây. */
+  duration?: number | null;
+}): number | null {
+  const modelId = resolveModelId(options.modelId);
+  const price = SNAPGEN_PRICES[modelId];
+  if (!price) return null;
+
+  // Kling không có param resolution: mode quyết định giá. `normalizeVideoRequest`
+  // nâng mode khi người dùng chọn 1080p, nên ước tính phải dùng ĐÚNG mode sẽ gửi đi,
+  // nếu không thì báo giá standard mà bị trừ tiền professional.
+  const mode = getModelById(modelId)?.resolutionFromMode
+    ? modeForResolution(modelId, String(options.resolution || ''), options.mode)
+    : options.mode;
+
+  const usd = lookupUsd(price, options.resolution, mode, options.duration);
+  if (usd == null) return null;
+
+  const seconds = price.unit === 'second' ? Math.max(1, Number(options.duration) || 1) : 1;
+  return Math.round((usd * seconds) / SNAPGEN_USD_PER_CREDIT);
 }
 
 export interface CreditEstimate {
@@ -783,12 +1300,14 @@ export interface CreditEstimate {
   calls: number;
   /** null khi model chưa có giá công bố. */
   credits: number | null;
-  perCall: number | null;
   usd: number | null;
+  /** Đơn giá để giải thích cho người dùng ("×4 credit/video" hay "×27 credit/giây"). */
+  unit: SnapgenPriceUnit | null;
+  unitCredits: number | null;
 }
 
 /**
- * Ước tính credit cho một đợt gen.
+ * Ước tính credit cho một đợt gen, tính từng shot một vì giá phụ thuộc thời lượng.
  * `durations` = duration_hint của đúng những scene sắp gen (đã lọc).
  */
 export function estimateGenerationCredits(options: {
@@ -796,22 +1315,59 @@ export function estimateGenerationCredits(options: {
   modelId: string;
   family: string;
   durations: number[];
+  resolution?: string | null;
+  mode?: string | null;
 }): CreditEstimate {
-  const perCall = creditsPerApiCall(options.modelId, options.family);
-  const calls =
-    options.mediaKind === 'image'
-      ? options.durations.length
-      : options.durations.reduce(
-          (sum, dur) =>
-            sum + planSceneChunks(options.modelId, options.family, Math.max(1, dur)).chunks.length,
-          0
-        );
-  const credits = perCall == null ? null : perCall * calls;
+  const price = SNAPGEN_PRICES[resolveModelId(options.modelId)];
+  const unit = price?.unit ?? null;
+
+  if (options.mediaKind === 'image') {
+    const calls = options.durations.length;
+    const perImage = creditsForOneCall({
+      modelId: options.modelId,
+      resolution: options.resolution,
+      mode: options.mode,
+    });
+    const credits = perImage == null ? null : perImage * calls;
+    return {
+      calls,
+      credits,
+      usd: credits == null ? null : credits * SNAPGEN_USD_PER_CREDIT,
+      unit,
+      unitCredits: perImage,
+    };
+  }
+
+  let calls = 0;
+  let credits: number | null = 0;
+  let unitCredits: number | null = null;
+
+  for (const dur of options.durations) {
+    const plan = planSceneChunks(options.modelId, options.family, Math.max(1, dur));
+    for (const chunk of plan.chunks) {
+      calls += 1;
+      const shot = creditsForOneCall({
+        modelId: options.modelId,
+        resolution: options.resolution,
+        mode: options.mode,
+        duration: chunk,
+      });
+      if (shot == null) {
+        credits = null;
+      } else if (credits != null) {
+        credits += shot;
+        // Đơn giá hiển thị: theo giây thì quy về 1 giây, theo lượt thì là giá 1 shot.
+        unitCredits = unit === 'second' ? Math.round(shot / chunk) : shot;
+      }
+    }
+  }
+
   return {
     calls,
     credits,
-    perCall,
     usd: credits == null ? null : credits * SNAPGEN_USD_PER_CREDIT,
+    unit,
+    unitCredits,
   };
 }
 
@@ -820,7 +1376,13 @@ export function formatCreditEstimate(estimate: CreditEstimate): string {
     return `${estimate.calls} lượt gọi API · Snapgen chưa công bố giá credit cho model này`;
   }
   const usd = estimate.usd == null ? '' : ` ≈ $${estimate.usd.toFixed(2)}`;
-  return `~${estimate.credits.toLocaleString('vi-VN')} credit${usd} · ${estimate.calls} lượt gọi × ${estimate.perCall} credit`;
+  const perUnit =
+    estimate.unitCredits == null
+      ? ''
+      : estimate.unit === 'second'
+        ? ` (~${estimate.unitCredits} credit/giây)`
+        : ` × ${estimate.unitCredits} credit`;
+  return `~${estimate.credits.toLocaleString('vi-VN')} credit${usd} · ${estimate.calls} lượt gọi${perUnit}`;
 }
 
 /** Fallback when a model has no declared durations (not a hard scene length). */
@@ -830,9 +1392,14 @@ export const DEFAULT_DURATION_PER_SCENE = 8;
  * Soft beat guidance — AI chia scene theo ý, không hardcode 8s/15s cố định.
  * Dùng để gợi ý UI + post-process split/merge.
  */
-export const MIN_SCENE_BEAT_SEC = 3;
-export const MAX_SCENE_BEAT_SEC = 12;
-export const IDEAL_SCENE_BEAT_SEC = 6;
+/**
+ * Veo tính tiền MỖI VIDEO, không theo giây: 4s, 6s hay 8s đều là 4 credit.
+ * Nên beat 8s (đúng trần một lần gen của Veo) rẻ hơn beat 6s tới 25% cho cùng
+ * độ dài thành phẩm, lại ít scene hơn → ít lần gọi API, ít chỗ để hỏng.
+ */
+export const MIN_SCENE_BEAT_SEC = 4;
+export const MAX_SCENE_BEAT_SEC = 8;
+export const IDEAL_SCENE_BEAT_SEC = 8;
 /** @deprecated alias — prefer IDEAL_SCENE_BEAT_SEC */
 export const TYPICAL_NARRATIVE_BEAT_SEC = IDEAL_SCENE_BEAT_SEC;
 
@@ -846,7 +1413,7 @@ export const SCENE_DENSITY_OPTIONS: Array<{
   /** null = user nhập số lượng. */
   beatSec: number | null;
 }> = [
-  { id: 'dense', label: 'Dày', hint: '~6s / scene', beatSec: 6 },
+  { id: 'dense', label: 'Dày', hint: '~8s / scene', beatSec: 8 },
   { id: 'normal', label: 'Vừa', hint: '~15s / scene', beatSec: 15 },
   { id: 'economy', label: 'Tiết kiệm', hint: '~30s / scene', beatSec: 30 },
   { id: 'custom', label: 'Tùy chỉnh', hint: 'Chọn số ảnh/video', beatSec: null },
@@ -945,9 +1512,11 @@ export function planScenesFromDuration(
     typicalBeatSec = Math.round((target / sceneCountHint) * 10) / 10;
   }
 
+  // Trước đây nới trần lên 1,35× beat → narration 10,8s nhưng Veo chỉ gen được 8s,
+  // clip hụt so với lời đọc. Giữ trần bằng đúng beat để hình và tiếng khớp nhau.
   const maxBeatSec = Math.min(
     MAX_SCENE_DURATION_SEC,
-    Math.max(MAX_SCENE_BEAT_SEC, Math.round(typicalBeatSec * 1.35))
+    Math.max(MAX_SCENE_BEAT_SEC, Math.round(typicalBeatSec))
   );
   const secondsPerScene = typicalBeatSec;
 

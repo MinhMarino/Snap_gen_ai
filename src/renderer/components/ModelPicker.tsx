@@ -31,8 +31,17 @@ export default function ModelPicker(props: Props) {
   const selected = familyModels.find((m) => m.id === props.modelId) ?? familyModels[0];
   const modes = selected?.extraFields?.mode ?? [];
   const modelAspectRatios = selected?.aspectRatios ?? [];
+  /** Kling: không có param resolution — mode quyết định 720p/1080p. */
+  const resolutionFromMode = selected?.resolutionFromMode;
 
   const selectedFormatId = inferOutputFormatId(props.aspectRatio, props.outputFormat);
+
+  const onModeChange = (nextMode: string) => {
+    props.onModeChange(nextMode);
+    // Giữ resolution hiển thị đúng với mode vừa chọn, khỏi hứa 1080p rồi API xuất 720p.
+    const derived = resolutionFromMode?.[nextMode];
+    if (derived && derived !== props.resolution) props.onResolutionChange(derived);
+  };
 
   const onFormatChange = (formatId: string) => {
     const preset = getOutputFormatPreset(formatId);
@@ -101,24 +110,30 @@ export default function ModelPicker(props: Props) {
           <select
             id="res"
             value={props.resolution}
+            disabled={Boolean(resolutionFromMode)}
             onChange={(e) => props.onResolutionChange(e.target.value)}
           >
             {(selected?.resolutions ?? []).map((r) => (
               <option key={r} value={r}>
-                {r}
+                {selected?.resolutionLabels?.[r] ?? r}
               </option>
             ))}
           </select>
+          {resolutionFromMode && (
+            <p className="hint muted-hint">
+              Model không có tham số resolution — chọn Mode để đổi (1080p = professional).
+            </p>
+          )}
         </div>
       </div>
 
       {modes.length > 0 && (
         <div className="field">
           <label htmlFor="mode">Mode</label>
-          <select id="mode" value={props.mode} onChange={(e) => props.onModeChange(e.target.value)}>
+          <select id="mode" value={props.mode} onChange={(e) => onModeChange(e.target.value)}>
             {modes.map((m) => (
               <option key={m} value={m}>
-                {m}
+                {resolutionFromMode?.[m] ? `${m} — ${resolutionFromMode[m]}` : m}
               </option>
             ))}
           </select>
@@ -128,7 +143,7 @@ export default function ModelPicker(props: Props) {
       <p className="hint">
         {props.mediaKind === 'image'
           ? `Thời lượng mỗi slide gợi ý: ${(selected?.durations ?? []).join(', ')}s — ảnh sẽ ghép thành slideshow theo narration.`
-          : `Mỗi lần gen tối đa ${Math.max(...(selected?.durations ?? [8]))}s. Cảnh dài hơn sẽ auto-extend. Với Veo/Grok/Seedance/Kling, scene kế tiếp nối liền mạch qua ref_history (chain extend).`}
+          : `Mỗi lần gen tối đa ${Math.max(...(selected?.durations ?? [8]))}s. Cảnh dài hơn sẽ auto-extend. Scene kế tiếp nối liền mạch: Veo/Grok/Seedance/Kling qua ref_history (chain extend), Sora/Meta qua keyframe frame cuối.`}
       </p>
     </div>
   );

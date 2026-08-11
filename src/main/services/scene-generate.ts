@@ -30,9 +30,11 @@ import {
   generateVideo,
   getHistory,
   getImageUrl,
+  getLastFrameUrl,
   isSafetyBlockedError,
   snapgenPromptsMatch,
   waitForMedia,
+  type ReusableExpectation,
   type SnapgenHistory,
 } from './snapgen';
 import { isRetryableMediaError, withRetries } from './worker-pool';
@@ -61,8 +63,9 @@ export interface SceneGenerateContext {
   /** true → hủy poll/retry (Stop). Pause không abort scene đang chạy. */
   shouldAbort?: () => boolean;
   /**
-   * UUID history của scene/clip trước — dùng video-extend để nối liền mạch.
-   * Chỉ áp dụng khi family hỗ trợ extend (veo/grok/seedance/kling).
+   * UUID history của scene/clip trước để nối liền mạch:
+   * family hỗ trợ extend → video-extend `ref_history`;
+   * còn lại → lấy `last_frame_url` của history đó làm keyframe mở đầu.
    */
   chainFromHistory?: string | null;
 }
@@ -81,6 +84,8 @@ export interface SceneGenerateResult {
   mediaPath: string;
   /** UUID Snapgen history cuối cùng của scene — dùng chain scene kế tiếp. */
   historyUuid?: string;
+  /** Credit Snapgen báo cho các job MỚI tạo trong lượt này (job tái dùng = 0). */
+  estimatedCredit?: number;
 }
 
 interface ChunkJobCheckpoint {
@@ -90,6 +95,8 @@ interface ChunkJobCheckpoint {
   kind: 'video' | 'image';
   mode: 'generate' | 'extend' | 'reuse';
   updatedAt: string;
+  /** Credit Snapgen báo khi tạo job này. */
+  estimatedCredit?: number;
 }
 
 function normalizeSnapgenPercent(raw?: number): number {
@@ -167,7 +174,9 @@ async function resolveMediaJobUuid(options: {
   chunkIndex: number;
   create: () => Promise<SnapgenHistory>;
   shouldAbort?: () => boolean;
-}): Promise<{ uuid: string; reused: boolean }> {
+  /** Chặn tái dùng history trùng prompt nhưng khác model/tỉ lệ/độ phân giải/thời lượng. */
+  expect?: ReusableExpectation;
+}): Promise<{ uuid: string; reused: boolean; estimatedCredit?: number }> {
   const existing = readChunkJob(options.segmentDir, options.chunkIndex);
   if (existing && existing.promptKey === options.key && existing.uuid) {
     // Checkpoint mode 'reuse' từng được ghi bởi matcher lỏng (khớp theo tiền tố)
@@ -198,7 +207,9 @@ async function resolveMediaJobUuid(options: {
 
   // Tìm trên Snapgen history theo prompt (job đã xong / đang chạy nhưng app chưa tải).
   try {
-    const found = await findReusableHistoryByPrompt(options.apiKey, options.prompt, options.kind);
+    const found = await findReusableHistoryByPrompt(options.apiKey, options.prompt, options.kind, {
+      expect: options.expect,
+    });
     if (found?.uuid) {
       writeChunkJob(options.segmentDir, options.chunkIndex, {
         promptKey: options.key,
@@ -220,6 +231,10 @@ async function resolveMediaJobUuid(options: {
 
   const job = await options.create();
   if (!job.uuid) throw new Error('Snapgen không trả uuid');
+  const estimatedCredit =
+    typeof job.estimated_credit === 'number' && job.estimated_credit >= 0
+      ? job.estimated_credit
+      : undefined;
   writeChunkJob(options.segmentDir, options.chunkIndex, {
     promptKey: options.key,
     prompt: options.prompt.slice(0, 2000),
@@ -227,8 +242,9 @@ async function resolveMediaJobUuid(options: {
     kind: options.kind,
     mode: 'generate',
     updatedAt: new Date().toISOString(),
+    estimatedCredit,
   });
-  return { uuid: job.uuid, reused: false };
+  return { uuid: job.uuid, reused: false, estimatedCredit };
 }
 
 /**
@@ -251,11 +267,13 @@ export async function generateOneSceneMedia(
           sceneIndex,
           section: scene.section,
           stillFrame: ctx.stillFrame,
+          mediaKind: ctx.mediaKind,
         })
       : buildSceneImagePrompt({
           visualPrompt: scene.visual_prompt,
           language: ctx.language,
           stylePrompt: ctx.stylePrompt,
+          mediaKind: ctx.mediaKind,
         });
   const label = `Scene ${sceneIndex + 1}`;
   const maxAttempts = ctx.maxAttempts ?? 3;
@@ -300,7 +318,7 @@ export async function generateOneSceneMedia(
           local01: 0,
         });
 
-        const { uuid, reused } = await resolveMediaJobUuid({
+        const { uuid, reused, estimatedCredit } = await resolveMediaJobUuid({
           apiKey: ctx.apiKey,
           kind: 'image',
           prompt,
@@ -308,6 +326,11 @@ export async function generateOneSceneMedia(
           segmentDir,
           chunkIndex: 0,
           shouldAbort: ctx.shouldAbort,
+          expect: {
+            modelId: ctx.model,
+            resolution: ctx.resolution,
+            aspectRatio: ctx.aspectRatio,
+          },
           create: () =>
             generateImage({
               apiKey: ctx.apiKey,
@@ -357,16 +380,18 @@ export async function generateOneSceneMedia(
           await stripNanoBananaWatermark(imagePath);
         }
         onProgress?.({ state: 'completed', attempt, detailPercent: 100, local01: 1 });
-        return { mediaPath: imagePath, historyUuid: hist.uuid || uuid };
+        return { mediaPath: imagePath, historyUuid: hist.uuid || uuid, estimatedCredit };
       }
 
-      // Video: extend trong scene dài; có thể chain từ scene trước qua ref_history.
+      // Video: extend trong scene dài; có thể chain từ scene trước qua ref_history
+      // (family hỗ trợ extend) hoặc qua keyframe last_frame_url (mọi family).
       const desired = Math.max(1, scene.duration_hint);
       const plan = planSceneChunks(ctx.model, String(ctx.family), desired);
       const canExtend = familySupportsExtend(String(ctx.family));
-      const chainFrom = canExtend ? ctx.chainFromHistory?.trim() || null : null;
+      const chainFrom = ctx.chainFromHistory?.trim() || null;
       const segmentPaths: string[] = [];
       let refHistory: string | null = chainFrom;
+      let creditSpent = 0;
 
       for (let c = 0; c < plan.chunks.length; c++) {
         if (ctx.shouldAbort?.()) {
@@ -375,18 +400,24 @@ export async function generateOneSceneMedia(
         const chunkDur = plan.chunks[c];
         const isFirst = c === 0;
         const chainingIntoScene = Boolean(isFirst && chainFrom);
+
+        const useExtend = Boolean(
+          canExtend && refHistory && (chainingIntoScene || (!isFirst && plan.mode === 'extend'))
+        );
+
+        // Không extend được mà vẫn có clip trước → nối bằng keyframe (frame cuối clip trước).
+        // Đây là đường duy nhất để Sora/Meta liền mạch, và cũng vá chỗ cắt cứng của multi-cut.
+        const useKeyframe = Boolean(refHistory) && !useExtend;
+
         const chunkPrompt = chainingIntoScene
           ? `Continue seamlessly from the previous shot with no hard cut. Keep the same characters, style, palette, and camera language. Natural motion continuation into: ${prompt}`
           : isFirst
             ? prompt
-            : plan.mode === 'extend' || (canExtend && refHistory)
+            : useExtend
               ? `Continue the same shot seamlessly, no cut, natural motion continuation. ${prompt}`
-              : `New beat of the same scene, hard cut ok, keep visual continuity. ${prompt}`;
-
-        const useExtend =
-          canExtend &&
-          refHistory &&
-          (chainingIntoScene || (!isFirst && plan.mode === 'extend'));
+              : useKeyframe
+                ? `Continue the same scene from the provided first frame, no hard cut, natural motion continuation. ${prompt}`
+                : `New beat of the same scene, hard cut ok, keep visual continuity. ${prompt}`;
 
         const key = promptKey({
           kind: 'video',
@@ -398,7 +429,8 @@ export async function generateOneSceneMedia(
           resolution: ctx.resolution,
           mode: ctx.mode,
           extend: useExtend ? '1' : '0',
-          ref: useExtend ? refHistory : '',
+          keyframe: useKeyframe ? '1' : '0',
+          ref: useExtend || useKeyframe ? refHistory : '',
         });
 
         const chunkBase = c / plan.chunks.length;
@@ -411,7 +443,7 @@ export async function generateOneSceneMedia(
           local01: chunkBase,
         });
 
-        const { uuid, reused } = await resolveMediaJobUuid({
+        const { uuid, reused, estimatedCredit } = await resolveMediaJobUuid({
           apiKey: ctx.apiKey,
           kind: 'video',
           prompt: chunkPrompt,
@@ -419,6 +451,13 @@ export async function generateOneSceneMedia(
           segmentDir,
           chunkIndex: c,
           shouldAbort: ctx.shouldAbort,
+          expect: {
+            modelId: ctx.model,
+            resolution: ctx.resolution,
+            aspectRatio: ctx.aspectRatio,
+            duration: chunkDur,
+            withReference: useExtend || useKeyframe ? undefined : false,
+          },
           create: async () => {
             if (useExtend && refHistory) {
               try {
@@ -442,6 +481,11 @@ export async function generateOneSceneMedia(
                 }
               }
             }
+            // Extend không dùng được (không hỗ trợ / vừa fail) → lấy frame cuối clip trước
+            // làm keyframe. Thiếu last_frame_url thì vẫn gen, chỉ mất liền mạch.
+            const keyframeUrl = refHistory
+              ? await getLastFrameUrl(ctx.apiKey, refHistory)
+              : null;
             return generateVideo({
               apiKey: ctx.apiKey,
               family: ctx.family as VideoFamily,
@@ -451,9 +495,11 @@ export async function generateOneSceneMedia(
               aspectRatio: ctx.aspectRatio,
               resolution: ctx.resolution,
               mode: ctx.mode,
+              refImageUrls: keyframeUrl ? [keyframeUrl] : undefined,
             });
           },
         });
+        creditSpent += estimatedCredit ?? 0;
 
         if (reused) {
           onProgress?.({
@@ -547,7 +593,11 @@ export async function generateOneSceneMedia(
         chunkIndex: plan.chunks.length - 1,
         chunkTotal: plan.chunks.length,
       });
-      return { mediaPath: clipPath, historyUuid: refHistory || undefined };
+      return {
+        mediaPath: clipPath,
+        historyUuid: refHistory || undefined,
+        estimatedCredit: creditSpent || undefined,
+      };
       } catch (err) {
         // Bị chặn nội dung → nâng mức làm sạch prompt rồi cho phép retry.
         if (isSafetyBlockedError(err) && safetyLevel < MAX_PROMPT_SAFETY_LEVEL) {

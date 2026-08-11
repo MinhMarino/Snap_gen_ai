@@ -20,8 +20,10 @@ import type {
   JobProgress,
   MediaKind,
   QwenDashScopeRegion,
+  SceneDraft,
   SceneJobProgress,
   ScriptDraft,
+  TimedLyricLine,
   TtsProvider,
 } from '../../shared/types';
 import { DEFAULT_QWEN_TTS_MODEL } from '../../shared/types';
@@ -39,6 +41,8 @@ import {
   resolveProjectVoice,
 } from '../../shared/voice';
 import { rewriteNarrationToMatchDuration } from './openai';
+import { resolveMusicTiming } from './music-timing';
+import { timedLinesToSrt } from '../../shared/music-align';
 import { generateOneSceneMedia } from './scene-generate';
 import { runPool } from './worker-pool';
 import {
@@ -47,6 +51,7 @@ import {
   synthesizeContinuousNarration,
   transcribeWithWords,
   type SceneTiming,
+  type TranscriptWord,
 } from './openai-audio';
 import { synthesizeWithElevenLabs, resolveElevenLabsLanguageCode, resolveElevenLabsModelForLanguage } from './elevenlabs-tts';
 import { synthesizeContinuousNarrationWithQwen, type QwenTtsProgress } from './qwen-tts';
@@ -92,6 +97,8 @@ interface SceneManifestRow {
   mediaKind?: string;
   state?: string;
   historyUuid?: string | null;
+  /** Credit Snapgen báo khi tạo media này (null nếu tái dùng job cũ). */
+  estimatedCredit?: number | null;
 }
 
 function sceneManifestPath(projectDir: string): string {
@@ -131,6 +138,7 @@ function writeSceneManifest(
     mediaKind: string;
     state?: string;
     historyUuid?: string | null;
+    estimatedCredit?: number | null;
   }>
 ): void {
   fs.writeFileSync(sceneManifestPath(projectDir), JSON.stringify(rows, null, 2), 'utf8');
@@ -736,6 +744,145 @@ async function prepareNarrationFittingTarget(options: {
   );
 }
 
+/**
+ * Chốt độ dài cảnh cho hoạt hình nhạc, theo 3 mức ưu tiên:
+ *
+ *  1. `start_sec`/`end_sec` có sẵn trên scene (bước tạo script đã căn theo lời hát)
+ *     và vẫn phủ đúng file nhạc hiện tại → dùng nguyên, không tính lại.
+ *  2. Có mốc lời hát nhưng scene chưa mang mốc (project cũ, hoặc user sửa tay
+ *     kịch bản) → căn lại bằng `computeSceneTimings`: khớp lời từng scene lên
+ *     trục thời gian thật.
+ *  3. Không nghe được lời (nhạc phối dày, mất mạng) → chia theo tỉ lệ chữ như cũ.
+ */
+function resolveMusicSceneTiming(
+  scenes: SceneDraft[],
+  timing: { lines: TimedLyricLine[]; words: TranscriptWord[] },
+  musicDurationSec: number
+): { scenes: SceneDraft[]; source: 'scene-marks' | 'aligned' | 'estimated' } {
+  const target = Math.max(1, musicDurationSec || 0);
+
+  // —— 1. Mốc đã nằm trên scene ——
+  const marks = scenes.map((s) => ({
+    start: Number(s.start_sec),
+    end: Number(s.end_sec),
+  }));
+  const marksUsable =
+    scenes.length > 0 &&
+    marks.every((m, i) => {
+      if (!Number.isFinite(m.start) || !Number.isFinite(m.end) || m.end <= m.start) return false;
+      // Phải liền mạch: cảnh này bắt đầu đúng chỗ cảnh trước kết thúc.
+      return i === 0 ? m.start <= 0.5 : Math.abs(m.start - marks[i - 1].end) <= 0.35;
+    }) &&
+    // Và phủ gần hết bài — đổi nhạc khác độ dài thì mốc cũ vô nghĩa.
+    Math.abs(marks[marks.length - 1].end - target) <= Math.max(1.5, target * 0.02);
+
+  if (marksUsable) {
+    return {
+      source: 'scene-marks',
+      scenes: scenes.map((scene, i) => ({
+        ...scene,
+        duration_hint: Math.max(0.5, Math.round((marks[i].end - marks[i].start) * 10) / 10),
+      })),
+    };
+  }
+
+  // —— 2. Căn lại theo trục thời gian thật ——
+  // LRC không có word-timestamp → dựng trục từ chính các câu hát.
+  const axis: TranscriptWord[] = timing.words.length
+    ? timing.words
+    : timing.lines.map((line) => ({ word: line.text, start: line.start, end: line.end }));
+
+  if (axis.length && scenes.some((s) => (s.narration_segment || '').trim())) {
+    const timings = computeSceneTimings({
+      scenes: scenes.map((s) => ({
+        id: s.id,
+        narration_segment: s.narration_segment,
+        duration_hint: s.duration_hint,
+      })),
+      words: axis,
+      audioDuration: target,
+    });
+    const aligned = scenes.map((scene, i) => ({
+      ...scene,
+      start_sec: timings[i]?.start ?? 0,
+      end_sec: timings[i]?.end ?? target,
+    }));
+    return { source: 'aligned', scenes: finishAlignedScenes(aligned, timing.lines, target) };
+  }
+
+  // —— 3. Không có gì để căn ——
+  return { source: 'estimated', scenes: normalizeSceneDurations(scenes, Math.round(target)) };
+}
+
+/**
+ * Cảnh ngắn hơn mức này coi như không tồn tại — bỏ khỏi kịch bản.
+ * Đúng bằng sàn của bước ghép (`Math.max(1, duration_hint)`): để thấp hơn thì cảnh
+ * 0.6s bị đẩy lên 1s và tổng thời lượng lệch khỏi bài hát.
+ */
+const MIN_RENDERABLE_SCENE_SEC = 1;
+
+/**
+ * Vá kết quả `computeSceneTimings` cho hoạt hình nhạc.
+ *
+ * Hàm đó chia trục theo TỈ LỆ KÝ TỰ lời thoại, nên cảnh không lời (nhạc dạo, nhạc
+ * chen, outro) có 0 ký tự → nhận đúng 0 giây: đã trả credit gen ảnh mà ảnh không
+ * bao giờ hiện, và tổng thời lượng lệch khỏi bài hát.
+ *
+ * Ở đây cảnh không lời được trả lại đúng khoảng lặng của nó: kéo tới lúc câu hát
+ * tiếp theo bắt đầu. Cảnh vẫn còn quá ngắn thì bỏ hẳn rồi nối liền trục.
+ */
+function finishAlignedScenes(
+  scenes: SceneDraft[],
+  lines: TimedLyricLine[],
+  audioEnd: number
+): SceneDraft[] {
+  const out = scenes.map((s) => ({ ...s }));
+
+  for (let i = 0; i < out.length - 1; i++) {
+    const cur = out[i];
+    const start = Number(cur.start_sec) || 0;
+    const end = Number(cur.end_sec) || 0;
+    const hasLyric = Boolean((cur.narration_segment || '').trim());
+    if (hasLyric || end - start > MIN_RENDERABLE_SCENE_SEC) continue;
+
+    // Câu hát đầu tiên vang lên SAU điểm này → khoảng lặng thuộc cảnh không lời.
+    const sung = lines.find((line) => line.start >= start - 0.05);
+    const next = out[i + 1];
+    const limit = (Number(next.end_sec) || audioEnd) - 0.5;
+    const boundary = Math.min(sung ? sung.start : limit, limit);
+    if (boundary > start + MIN_RENDERABLE_SCENE_SEC) {
+      cur.end_sec = boundary;
+      next.start_sec = boundary;
+    }
+  }
+
+  // Bỏ cảnh còn quá ngắn, rồi nối liền mạch để không có lỗ đen giữa video.
+  const kept = out.filter(
+    (s) => (Number(s.end_sec) || 0) - (Number(s.start_sec) || 0) > MIN_RENDERABLE_SCENE_SEC
+  );
+  const final = kept.length ? kept : [out[0]];
+
+  let cursor = 0;
+  return final.map((scene, i) => {
+    const isLast = i === final.length - 1;
+    const end = isLast
+      ? audioEnd
+      : Math.max(Number(scene.end_sec) || 0, cursor + MIN_RENDERABLE_SCENE_SEC);
+    const start = Math.round(cursor * 10) / 10;
+    const stop = Math.round(Math.min(end, audioEnd) * 10) / 10;
+    cursor = stop;
+    return {
+      ...scene,
+      start_sec: start,
+      end_sec: stop,
+      duration_hint: Math.max(
+        MIN_RENDERABLE_SCENE_SEC,
+        Math.round((stop - start) * 10) / 10
+      ),
+    };
+  });
+}
+
 function persistScript(projectId: string, script: ScriptDraft): void {
   const detail = getProject(projectId);
   if (!detail.draft) return;
@@ -1011,20 +1158,34 @@ export async function runGenerateJob(input: GenerateJobInput): Promise<GenerateJ
       }
       const musicDur = await getDurationSafe(audioPath, targetRuntimeSec);
       rawAudioDuration = musicDur;
-      script = {
-        ...input.script,
-        scenes: normalizeSceneDurations(input.script.scenes, Math.round(musicDur || targetRuntimeSec)),
-      };
+
+      // Mốc lời hát thật (cache theo hash audio → thường không gọi API ở đây).
+      const timing = await resolveMusicTiming({
+        projectId: meta.id,
+        apiKey: keys.openaiApiKey,
+        lyricText: getProject(meta.id).draft?.lyricText,
+        language: getProject(meta.id).draft?.language,
+      });
+      const retimed = resolveMusicSceneTiming(input.script.scenes, timing, musicDur);
+      script = { ...input.script, scenes: retimed.scenes };
       durations = script.scenes.map((s) => Math.max(1, s.duration_hint));
-      if (!fs.existsSync(srtPath)) {
-        const body = script.scenes
-          .map((s, i) => `${i + 1}\n00:00:00,000 --> 00:00:02,000\n${(s.narration_segment || '').slice(0, 80)}\n`)
-          .join('\n');
-        fs.writeFileSync(srtPath, body || '', 'utf8');
+
+      // Phụ đề thật từ lời hát đã có mốc — bản cũ ghi mọi dòng là 0→2s nên không
+      // dùng được để soát lệch nhạc.
+      if (timing.lines.length) {
+        fs.writeFileSync(srtPath, timedLinesToSrt(timing.lines), 'utf8');
+      } else if (!fs.existsSync(srtPath)) {
+        fs.writeFileSync(srtPath, '', 'utf8');
       }
       emitProgress({
         phase: 'tts',
-        message: `Dùng nhạc gốc (${formatDurationLabel(musicDur)}) — bỏ qua TTS.`,
+        message:
+          `Dùng nhạc gốc (${formatDurationLabel(musicDur)}) — bỏ qua TTS. ` +
+          (retimed.source === 'scene-marks'
+            ? 'Cảnh đã căn theo lời hát.'
+            : retimed.source === 'aligned'
+              ? `Đã căn lại ${script.scenes.length} cảnh theo ${timing.lines.length} câu hát (${timing.source}).`
+              : 'Chưa nghe được lời hát — chia cảnh theo tỉ lệ chữ.'),
         percent: audioOnlyStep ? 20 : 8,
       });
       persistScript(meta.id, script);
@@ -1210,10 +1371,10 @@ export async function runGenerateJob(input: GenerateJobInput): Promise<GenerateJ
 
     const phase = mediaKind === 'image' ? 'image' : 'video';
     const label = mediaKind === 'image' ? 'ảnh' : 'video';
-    const chainScenesEnabled =
-      mediaKind === 'video' &&
-      familySupportsExtend(String(input.family)) &&
-      input.chainScenes !== false;
+    // Nối cảnh được cho MỌI family video: family có extend thì dùng ref_history,
+    // còn lại nối bằng keyframe last_frame_url của scene trước (Sora/Meta).
+    const chainScenesEnabled = mediaKind === 'video' && input.chainScenes !== false;
+    const chainViaExtend = chainScenesEnabled && familySupportsExtend(String(input.family));
     const maxConcurrent = chainScenesEnabled
       ? 1
       : clampConcurrentScenes(
@@ -1232,6 +1393,9 @@ export async function runGenerateJob(input: GenerateJobInput): Promise<GenerateJ
       detailPercent: 0,
     }));
     const localProgress = new Array(scenes.length).fill(0);
+    /** Credit Snapgen báo cho các job tạo mới trong lượt này (job tái dùng không tính). */
+    const sceneCredits: Array<number | undefined> = new Array(scenes.length);
+    let creditSpent = 0;
 
     const emitPoolProgress = (focusIndex?: number) => {
       const completed = sceneStatuses.filter(
@@ -1256,8 +1420,11 @@ export async function runGenerateJob(input: GenerateJobInput): Promise<GenerateJ
 
       const focus = focusIndex != null ? sceneStatuses[focusIndex] : active;
       const modeLabel = chainScenesEnabled
-        ? 'Chain extend (liền mạch)'
+        ? chainViaExtend
+          ? 'Chain extend (liền mạch)'
+          : 'Chain keyframe (liền mạch)'
         : `Worker pool (${maxConcurrent})`;
+      const creditNote = creditSpent > 0 ? ` · ~${creditSpent.toLocaleString('vi-VN')} credit` : '';
       emitProgress({
         phase,
         message: `${modeLabel}: ${completed}/${scenes.length} ${label} xong${
@@ -1268,7 +1435,7 @@ export async function runGenerateJob(input: GenerateJobInput): Promise<GenerateJ
             : completed >= scenes.length
               ? ''
               : ' · đang xếp hàng'
-        }`,
+        }${creditNote}`,
         sceneIndex: focus?.sceneIndex,
         sceneTotal: scenes.length,
         detailPercent: focus?.detailPercent,
@@ -1385,6 +1552,10 @@ export async function runGenerateJob(input: GenerateJobInput): Promise<GenerateJ
           );
           mediaPaths[i] = result.mediaPath;
           if (result.historyUuid) historyUuids[i] = result.historyUuid;
+          if (result.estimatedCredit) {
+            sceneCredits[i] = result.estimatedCredit;
+            creditSpent += result.estimatedCredit;
+          }
           localProgress[i] = 1;
           sceneStatuses[i] = {
             ...sceneStatuses[i],
@@ -1452,6 +1623,7 @@ export async function runGenerateJob(input: GenerateJobInput): Promise<GenerateJ
           mediaKind,
           state: sceneStatuses[index]?.state,
           historyUuid: historyUuids[index] || null,
+          estimatedCredit: sceneCredits[index] ?? null,
         }));
 
       if (isJobStopRequested() || skippedCount > 0) {
@@ -1516,6 +1688,7 @@ export async function runGenerateJob(input: GenerateJobInput): Promise<GenerateJ
         mediaKind,
         state: sceneStatuses[index]?.state,
         historyUuid: historyUuids[index] || null,
+        estimatedCredit: sceneCredits[index] ?? null,
       }))
     );
 

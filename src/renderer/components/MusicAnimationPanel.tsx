@@ -364,12 +364,16 @@ export default function MusicAnimationPanel({
       mediaKind,
       modelId,
       family,
+      resolution,
+      mode,
       durations: retryRows.map((r) => r.scene.duration_hint),
     });
     const allEstimate = estimateGenerationCredits({
       mediaKind,
       modelId,
       family,
+      resolution,
+      mode,
       durations: scenes.map((s) => s.duration_hint),
     });
 

@@ -28,6 +28,13 @@ export interface ModelOption {
   defaultResolution: string;
   defaultAspectRatio: string;
   extraFields?: Record<string, string[]>;
+  /** Nhãn hiển thị cho resolution khi giá trị API khó đọc (vd. Sora small/large). */
+  resolutionLabels?: Record<string, string>;
+  /**
+   * Model KHÔNG có tham số `resolution` — độ phân giải suy ra từ `mode`
+   * (vd. Kling: standard/relax = 720p, professional* = 1080p).
+   */
+  resolutionFromMode?: Record<string, string>;
 }
 
 export type TtsProvider = 'openai' | 'elevenlabs' | 'qwen' | 'genmax';
@@ -170,6 +177,13 @@ export interface SceneDraft {
   visual_prompt: string;
   narration_segment: string;
   duration_hint: number;
+  /**
+   * Mốc thật trên trục audio (giây) — chỉ có với hoạt hình nhạc đã căn theo
+   * lời hát. `duration_hint` = end_sec - start_sec, nhưng giữ cả hai mốc để
+   * bước ghép biết cảnh này phải bắt đầu ở đâu chứ không chỉ dài bao nhiêu.
+   */
+  start_sec?: number;
+  end_sec?: number;
   /** Phần cấu trúc kịch bản cố định: mở đầu / thân / kết. */
   section?: SceneSection;
   /**
@@ -207,9 +221,32 @@ export interface GenerateIdeaInput {
 }
 
 /** Input phân tích lyric → kịch bản phân cảnh (music-animation). */
+/** Một câu hát với mốc thời gian thật, lấy từ Whisper hoặc file .lrc. */
+export interface TimedLyricLine {
+  /** 1-based, dùng làm khóa để AI trả về khoảng câu của mỗi scene. */
+  index: number;
+  start: number;
+  end: number;
+  text: string;
+}
+
+export interface MusicTimingInfo {
+  source: 'lrc' | 'whisper' | 'none';
+  audioDurationSec: number;
+  lines: TimedLyricLine[];
+  /** Giây bắt đầu có giọng hát — phần trước đó là nhạc dạo. */
+  firstVocalSec: number;
+  lastVocalSec: number;
+}
+
 export interface GenerateMusicAnimationScriptInput {
   lyricText: string;
   language: string;
+  /**
+   * Lời hát kèm mốc thời gian thật. Có thì AI chia cảnh theo câu hát thay vì
+   * đoán độ dài từ số chữ — đây là thứ quyết định hình có khớp nhạc hay không.
+   */
+  timedLines?: TimedLyricLine[];
   /** Độ dài audio nhạc (giây) — tổng duration_hint các scene ≈ giá trị này. */
   musicDurationSec: number;
   /** Mục tiêu số shot/ảnh — tránh storyboard quá dày. */
@@ -399,9 +436,10 @@ export interface GenerateJobInput {
   /** Override số worker song song (mặc định lấy từ Settings). */
   maxConcurrentScenes?: number;
   /**
-   * Nối scene video liền mạch qua Snapgen video-extend (`ref_history`).
-   * Default: true khi mediaKind=video và family hỗ trợ extend (veo/grok/seedance/kling).
-   * Khi bật → generate tuần tự theo thứ tự scene.
+   * Nối scene video liền mạch: video-extend (`ref_history`) với veo/grok/seedance/kling,
+   * còn lại (sora/meta) nối bằng keyframe `last_frame_url` của scene trước.
+   * Default: true khi mediaKind=video.
+   * Khi bật → generate TUẦN TỰ (scene N cần scene N-1 xong), tức không chạy song song.
    */
   chainScenes?: boolean;
   /** Voiceover theo dự án (ưu tiên hơn AppSettings). */

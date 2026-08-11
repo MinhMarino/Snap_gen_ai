@@ -32,6 +32,7 @@ import {
   resolveMusicAudioPath,
 } from './services/music-project';
 import { getDurationSafe } from './services/ffmpeg';
+import { resolveMusicTiming } from './services/music-timing';
 import type { GenerateMusicAnimationScriptInput } from '../shared/types';
 import {
   clearElevenLabsSession,
@@ -306,12 +307,23 @@ function registerIpc(): void {
         settings.openaiModel ||
         'gpt-4o-mini';
       const images = loadCharacterDataUrls(projectId);
+      const language = input?.language || draft.language || DEFAULT_PROJECT_LANGUAGE;
+      // Nghe file nhạc để biết từng câu hát vang lên lúc nào — không có bước này
+      // thì độ dài cảnh chỉ là suy đoán từ số chữ và hình luôn lệch nhạc.
+      // Kết quả cache theo hash audio nên Generate lại không gọi API lần nữa.
+      const timing = await resolveMusicTiming({
+        projectId,
+        apiKey: keys.openaiApiKey,
+        lyricText,
+        language,
+      });
       const result = await generateMusicAnimationScript(
         keys.openaiApiKey,
         chatModel,
         {
           lyricText,
-          language: input?.language || draft.language || DEFAULT_PROJECT_LANGUAGE,
+          timedLines: timing.lines,
+          language,
           musicDurationSec,
           sceneCount:
             input?.sceneCount ||

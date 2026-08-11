@@ -1,7 +1,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import type { ImageFamily, VideoFamily } from '../../shared/types';
-import { resolveModelId } from '../../shared/models';
+import { isSameResolution, normalizeVideoRequest, resolveModelId } from '../../shared/models';
+import { canonicalAspectRatio } from '../../shared/output-format';
 
 const BASE = 'https://api.snapgen.ai';
 
@@ -17,13 +18,29 @@ export interface SnapgenHistory {
   model_name?: string | null;
   type?: string | null;
   created_at?: string | null;
+  /** Credit Snapgen báo cho chính request này — có ngay trong response POST. */
+  estimated_credit?: number | null;
+  used_credit?: number | null;
+  /** Hạn sống của media; quá hạn thì URL 404 nên không tái sử dụng được. */
+  expired_at?: string | null;
+  /** Frame cuối của video — làm keyframe mở đầu cho scene kế tiếp. */
+  last_frame_url?: string | null;
   generated_video?: Array<{
     video_url?: string | null;
     duration?: number | null;
+    aspect_ratio?: string | null;
+    resolution?: string | null;
   }>;
   generated_image?: Array<{
     image_url?: string | null;
     file_download_url?: string | null;
+    aspect_ratio?: string | null;
+    resolution?: string | null;
+  }>;
+  /** Ảnh/video tham chiếu đã dùng khi gen — để biết clip có keyframe hay không. */
+  reference_item?: Array<{
+    media_type?: string | null;
+    thumbnail_url?: string | null;
   }>;
 }
 
@@ -111,6 +128,11 @@ export interface GenerateVideoParams {
   aspectRatio: string;
   resolution: string;
   mode?: string;
+  /**
+   * URL ảnh tham chiếu công khai (thường là `last_frame_url` của scene trước)
+   * → dùng làm keyframe mở đầu để nối cảnh không cắt cứng.
+   */
+  refImageUrls?: string[];
 }
 
 export interface GenerateImageParams {
@@ -135,8 +157,97 @@ function videoEndpoint(family: VideoFamily): string {
   return map[family];
 }
 
+/**
+ * Field nhận URL ảnh tham chiếu, theo openapi.json:
+ * - veo/seedance/kling: `ref_images` (nhận cả file lẫn URL)
+ * - grok: `ref_images` chỉ nhận UUID ảnh của chính mình → URL phải đi qua `file_urls`
+ * - sora/meta: chỉ có `files`/`file_urls`
+ */
+function refImageField(family: VideoFamily): 'ref_images' | 'file_urls' {
+  return family === 'veo' || family === 'seedance' || family === 'kling'
+    ? 'ref_images'
+    : 'file_urls';
+}
+
+/** Số ảnh tham chiếu tối đa mỗi request (docs từng họ model). */
+const MAX_REF_IMAGES: Record<VideoFamily, number> = {
+  veo: 2, // frame mode: ảnh 1 = frame đầu, ảnh 2 = frame cuối
+  seedance: 4,
+  kling: 4,
+  grok: 2,
+  sora: 1, // docs: "API currently only accepts a single image"
+  meta: 2,
+};
+
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
+}
+
+interface SnapgenErrorDetail {
+  error_code?: string;
+  message?: string;
+  error_message?: string;
+}
+
+/**
+ * Đọc lỗi Snapgen. Docs bọc trong `detail` ({error_code, message|error_message}),
+ * vài endpoint trả phẳng, proxy hỏng thì trả HTML — nên nhận cả 3 dạng.
+ * Trước đây chỉ đọc `data.message` ở tầng gốc nên MỌI mã lỗi đều bị mất.
+ */
+function readSnapgenError(
+  body: unknown,
+  rawText: string
+): { code?: string; message?: string } {
+  const root = (body ?? {}) as SnapgenErrorDetail & { detail?: unknown };
+  const detail = root.detail;
+  const nested: SnapgenErrorDetail =
+    detail && typeof detail === 'object' ? (detail as SnapgenErrorDetail) : {};
+  const code = nested.error_code || root.error_code;
+  const message =
+    nested.message ||
+    nested.error_message ||
+    (typeof detail === 'string' ? detail : undefined) ||
+    root.message ||
+    root.error_message ||
+    // 422 của FastAPI có `detail` là ARRAY validation error — không field nào khớp ở trên,
+    // nên giữ nguyên body để còn đọc được tham số nào bị từ chối.
+    rawText.slice(0, 200);
+  return { code: code?.trim() || undefined, message: message?.trim() || undefined };
+}
+
+/**
+ * POST multipart tới Snapgen rồi trả history.
+ * Giữ HTTP status trong message: scene-generate dò `/404|not found/` trên message
+ * để fallback extend → generate, nên mất status là mất luôn fallback.
+ */
+async function postSnapgen(
+  url: string,
+  apiKey: string,
+  form: FormData,
+  kind: 'video' | 'image',
+  label: string
+): Promise<SnapgenHistory> {
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'x-api-key': apiKey },
+    body: form,
+  });
+  const text = await res.text();
+  let data: SnapgenHistory | null = null;
+  try {
+    data = JSON.parse(text) as SnapgenHistory;
+  } catch {
+    data = null;
+  }
+
+  if (!res.ok) {
+    const { code, message } = readSnapgenError(data, text);
+    throw new Error(`${localizeSnapgenError(message, code, kind)} [HTTP ${res.status}]`);
+  }
+  if (!data?.uuid) {
+    throw new Error(`${label} thiếu uuid: ${text.slice(0, 300)}`);
+  }
+  return data;
 }
 
 export async function testAccount(apiKey: string): Promise<{ ok: boolean; message: string }> {
@@ -167,51 +278,61 @@ export async function testAccount(apiKey: string): Promise<{ ok: boolean; messag
 }
 
 export async function generateVideo(params: GenerateVideoParams): Promise<SnapgenHistory> {
-  const form = new FormData();
-  form.append('prompt', params.prompt);
-  form.append('model', params.model);
-  form.append('duration', String(params.duration));
-  form.append('aspect_ratio', params.aspectRatio);
-
-  if (params.family === 'sora') {
-    form.append('resolution', params.resolution);
-  } else if (params.family === 'grok') {
-    form.append('resolution', params.resolution);
-    form.append('mode', params.mode || 'custom');
-    form.append('skip_audio', 'true');
-  } else if (params.family === 'seedance') {
-    form.append('mode', params.mode || 'pro');
-  } else if (params.family === 'kling') {
-    form.append('mode', params.mode || 'standard');
-  } else if (params.family === 'veo') {
-    form.append('resolution', params.resolution);
-  } else if (params.family === 'meta') {
-    form.append('resolution', params.resolution);
-  }
-
-  const res = await fetch(videoEndpoint(params.family), {
-    method: 'POST',
-    headers: { 'x-api-key': params.apiKey },
-    body: form,
+  const req = normalizeVideoRequest({
+    modelId: params.model,
+    duration: params.duration,
+    aspectRatio: params.aspectRatio,
+    resolution: params.resolution,
+    mode: params.mode,
   });
 
-  const data = (await res.json()) as SnapgenHistory & { detail?: unknown; message?: string };
-  if (!res.ok) {
-    throw new Error(
-      localizeSnapgenError(
-        typeof data.message === 'string' ? data.message : undefined,
-        typeof (data as { error_code?: string }).error_code === 'string'
-          ? (data as { error_code?: string }).error_code
-          : undefined,
-        'request'
-      ) ||
-        `Snapgen ${params.family} thất bại: HTTP ${res.status}`
-    );
+  const form = new FormData();
+  form.append('prompt', params.prompt);
+  form.append('model', req.model);
+  form.append('duration', String(req.duration));
+
+  // Field theo openapi.json — mỗi endpoint nhận một bộ khác nhau, gửi sai thì bị bỏ im lặng.
+  if (params.family === 'meta') {
+    // video-gen/meta: `orientation` (landscape/portrait/square), không có aspect_ratio/resolution.
+    form.append('orientation', req.aspectRatio);
+  } else {
+    form.append('aspect_ratio', req.aspectRatio);
+
+    if (params.family === 'kling') {
+      // Kling KHÔNG có param resolution: 1080p = mode `professional`
+      // (normalizeVideoRequest đã nâng mode khi user chọn 1080p).
+      form.append('mode', req.mode || 'standard');
+    } else {
+      form.append('resolution', req.resolution);
+
+      if (params.family === 'grok') {
+        form.append('mode', req.mode || 'custom');
+        // Narration do TTS của app lo — bỏ audio Grok tự sinh.
+        form.append('skip_audio', 'true');
+      } else if (params.family === 'seedance') {
+        form.append('mode', req.mode || 'pro');
+      }
+    }
   }
-  if (!data.uuid) {
-    throw new Error(`Snapgen response missing uuid: ${JSON.stringify(data).slice(0, 300)}`);
+
+  // Keyframe nối cảnh: ảnh đầu tiên = frame mở đầu của clip mới.
+  const refUrls = (params.refImageUrls ?? [])
+    .filter((url) => /^https?:\/\//i.test(String(url || '').trim()))
+    .slice(0, MAX_REF_IMAGES[params.family]);
+  if (refUrls.length) {
+    const field = refImageField(params.family);
+    for (const url of refUrls) form.append(field, url);
+    // Veo: `frame` = ảnh đóng vai frame đầu/cuối (mặc định của endpoint là ingredient-style).
+    if (params.family === 'veo') form.append('mode_image', 'frame');
   }
-  return data;
+
+  return postSnapgen(
+    videoEndpoint(params.family),
+    params.apiKey,
+    form,
+    'video',
+    `Snapgen ${params.family}`
+  );
 }
 
 export async function generateImage(params: GenerateImageParams): Promise<SnapgenHistory> {
@@ -238,26 +359,7 @@ export async function generateImage(params: GenerateImageParams): Promise<Snapge
     form.append('output_format', 'png');
   }
 
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: { 'x-api-key': params.apiKey },
-    body: form,
-  });
-
-  const data = (await res.json()) as SnapgenHistory & { detail?: unknown; message?: string };
-  if (!res.ok) {
-    throw new Error(
-      localizeSnapgenError(
-        typeof data.message === 'string' ? data.message : JSON.stringify(data).slice(0, 280),
-        data.error_code,
-        'image'
-      )
-    );
-  }
-  if (!data.uuid) {
-    throw new Error(`Snapgen image thiếu uuid: ${JSON.stringify(data).slice(0, 300)}`);
-  }
-  return data;
+  return postSnapgen(url, params.apiKey, form, 'image', 'Snapgen image');
 }
 
 export interface ExtendVideoParams {
@@ -265,8 +367,11 @@ export interface ExtendVideoParams {
   family: VideoFamily;
   prompt: string;
   refHistory: string;
+  /** Chỉ để log/ước tính — API extend luôn dùng duration của video gốc. */
   duration?: number;
+  /** Chỉ để log — API extend luôn dùng resolution của video gốc. */
   resolution?: string;
+  /** Chỉ endpoint video-extend/kling còn nhận mode. */
   mode?: string;
 }
 
@@ -290,34 +395,13 @@ export async function extendVideo(params: ExtendVideoParams): Promise<SnapgenHis
   form.append('prompt', params.prompt);
   form.append('ref_history', params.refHistory);
 
-  if (params.family === 'grok') {
-    if (params.duration != null) form.append('duration', String(params.duration));
-    if (params.resolution) form.append('resolution', params.resolution);
-    if (params.mode) form.append('mode', params.mode);
-  } else if (params.family === 'seedance' || params.family === 'kling') {
-    form.append('mode', params.mode || 'fast');
+  // Extend tự lấy model/mode/duration/aspect/resolution từ video gốc (docs veo & seedance:
+  // "cannot be modified"). Chỉ endpoint kling còn nhận `mode` theo openapi.json.
+  if (params.family === 'kling' && params.mode) {
+    form.append('mode', params.mode);
   }
 
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: { 'x-api-key': params.apiKey },
-    body: form,
-  });
-
-  const data = (await res.json()) as SnapgenHistory & { detail?: unknown; message?: string };
-  if (!res.ok) {
-    throw new Error(
-      localizeSnapgenError(
-        typeof data.message === 'string' ? data.message : JSON.stringify(data).slice(0, 280),
-        data.error_code,
-        'video'
-      )
-    );
-  }
-  if (!data.uuid) {
-    throw new Error(`Snapgen extend thiếu uuid: ${JSON.stringify(data).slice(0, 300)}`);
-  }
-  return data;
+  return postSnapgen(url, params.apiKey, form, 'video', 'Snapgen extend');
 }
 
 export async function getHistory(apiKey: string, uuid: string): Promise<SnapgenHistory> {
@@ -416,7 +500,88 @@ export async function listHistories(
   };
 }
 
+/** URL frame cuối của một history, nếu Snapgen có cung cấp. */
+export function lastFrameUrlOf(hist: SnapgenHistory): string | null {
+  const url = String(hist.last_frame_url || '').trim();
+  return /^https?:\/\//i.test(url) ? url : null;
+}
+
+/**
+ * Frame cuối của history video — keyframe mở đầu cho clip kế tiếp.
+ * Không có / lỗi mạng → null (nối cảnh degrade về prompt-only, không làm fail scene).
+ */
+export async function getLastFrameUrl(apiKey: string, uuid: string): Promise<string | null> {
+  try {
+    return lastFrameUrlOf(await getHistory(apiKey, uuid));
+  } catch {
+    return null;
+  }
+}
+
 export type ReusableHistoryKind = 'video' | 'image';
+
+/**
+ * Điều kiện một history cũ được coi là "đúng cái mình đang cần".
+ * Trùng prompt là KHÔNG đủ: đổi model / 720p→1080p / đổi tỉ lệ mà prompt giữ nguyên
+ * thì trước đây vẫn tải lại clip cũ, sai hẳn thông số người dùng vừa chọn.
+ */
+export interface ReusableExpectation {
+  modelId?: string;
+  resolution?: string;
+  aspectRatio?: string;
+  duration?: number;
+  /**
+   * false = job phải KHÔNG dùng ảnh tham chiếu.
+   * Cố tình một chiều: khi đang cần keyframe mà history không khai reference_item,
+   * ta vẫn nhận — thà nối cảnh yếu hơn là gen lại tốn credit.
+   */
+  withReference?: boolean;
+}
+
+/** Media Snapgen có hạn (~30 ngày) — hết hạn thì URL 404, đừng tái sử dụng. */
+function isExpiredHistory(hist: SnapgenHistory): boolean {
+  const raw = String(hist.expired_at || '').trim();
+  if (!raw) return false;
+  const at = Date.parse(raw);
+  return Number.isFinite(at) && at <= Date.now();
+}
+
+/** So khớp ở tầng list (chưa tốn thêm request chi tiết). */
+function matchesHistoryRow(row: SnapgenHistory, expect?: ReusableExpectation): boolean {
+  if (isExpiredHistory(row)) return false;
+  const wantModel = expect?.modelId?.trim().toLowerCase();
+  const gotModel = String(row.model_name || '').trim().toLowerCase();
+  if (wantModel && gotModel && wantModel !== gotModel) return false;
+  return true;
+}
+
+/** So khớp media đã render (chỉ gọi khi history đã COMPLETED). */
+function matchesHistoryMedia(
+  hist: SnapgenHistory,
+  kind: ReusableHistoryKind,
+  expect?: ReusableExpectation
+): boolean {
+  if (!expect) return true;
+  if (expect.withReference === false && (hist.reference_item?.length ?? 0) > 0) return false;
+
+  const media = kind === 'video' ? hist.generated_video?.[0] : hist.generated_image?.[0];
+  if (!media) return true;
+
+  if (!isSameResolution(expect.resolution, media.resolution)) return false;
+
+  const gotAspect = String(media.aspect_ratio || '').trim();
+  if (expect.aspectRatio && gotAspect) {
+    if (canonicalAspectRatio(expect.aspectRatio) !== canonicalAspectRatio(gotAspect)) return false;
+  }
+
+  if (kind === 'video' && expect.duration != null) {
+    const gotDuration = hist.generated_video?.[0]?.duration;
+    // Snapgen làm tròn thời lượng thật (8s → 8.0/7.9) nên nới 1.5s.
+    if (gotDuration != null && Math.abs(gotDuration - expect.duration) > 1.5) return false;
+  }
+
+  return true;
+}
 
 /**
  * Tìm history Snapgen trùng prompt để tái sử dụng (đã xong hoặc đang chạy).
@@ -426,7 +591,7 @@ export async function findReusableHistoryByPrompt(
   apiKey: string,
   prompt: string,
   kind: ReusableHistoryKind,
-  options?: { maxPages?: number; pageSize?: number }
+  options?: { maxPages?: number; pageSize?: number; expect?: ReusableExpectation }
 ): Promise<SnapgenHistory | null> {
   const maxPages = options?.maxPages ?? 3;
   const pageSize = options?.pageSize ?? 25;
@@ -448,12 +613,17 @@ export async function findReusableHistoryByPrompt(
       const input = String(row.input_text || '');
       if (!snapgenPromptsMatch(prompt, input)) continue;
       if (row.status === 3) continue;
+      if (!matchesHistoryRow(row, options?.expect)) continue;
       if (row.status === 2) {
         // List endpoint thường thiếu nested media — lấy chi tiết khi cần.
         try {
           const detail = await getHistory(apiKey, row.uuid);
-          if (detail.status === 2) return detail;
+          if (detail.status === 2) {
+            if (!matchesHistoryMedia(detail, kind, options?.expect)) continue;
+            return detail;
+          }
           if (detail.status === 0 || detail.status === 1) {
+            // Chưa render xong → chưa có media để so, chấp nhận theo prompt + model.
             bestProcessing = bestProcessing || detail;
           }
         } catch {

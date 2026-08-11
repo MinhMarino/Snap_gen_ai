@@ -4,13 +4,21 @@ import type {
   SceneDraft,
   SceneSection,
   ScriptDraft,
+  TimedLyricLine,
 } from '../../shared/types';
+import {
+  buildTimelineSlots,
+  describeTimelineForPrompt,
+  linesTextForSlot,
+  slotDurationSec,
+} from '../../shared/music-align';
 import {
   assertNarrationCoversTarget,
   clampTargetSceneCount,
   coalesceScenesToTargetCount,
   countSpokenBudgetUnits,
   DEFAULT_STYLE_PROMPT,
+  KIDS_3D_TOY_STYLE,
   estimateScriptSpokenSeconds,
   estimateSpokenSeconds,
   findScenesWithShortNarration,
@@ -22,8 +30,6 @@ import {
   MIN_SCENE_BEAT_SEC,
   normalizeSceneDurations,
   planScenesFromDuration,
-  resolveVisualLanguageLock,
-  resolveVisualLocaleHint,
   spokenBudgetForDurationSec,
   WORDS_PER_SECOND,
 } from '../../shared/models';
@@ -410,82 +416,43 @@ function splitNarrationFallback(
     }
   }
 
-  const locale = resolveVisualLocaleHint(language);
-  const languageLock = resolveVisualLanguageLock(language);
-  const cast =
-    continuity?.seriesCast?.trim() ||
-    'the same recurring cute animal or toy mascot cast throughout the video';
-  const styleBit = continuity?.stylePrompt?.trim()
-    ? `Style bible: ${continuity.stylePrompt.trim().slice(0, 320)}.`
-    : '';
+  const cast = continuity?.seriesCast?.trim() || 'a cute cartoon animal mascot';
 
-  // Camera / lighting rotate lightly so adjacent beats stay linked but not identical frames.
+  // Đổi nhẹ góc máy / bối cảnh cho các beat liền nhau đỡ trùng khung. Giữ NGẮN.
   const cameraAngles = [
-    'medium shot, eye-level, gentle slow push-in',
-    'slightly low angle medium shot, soft parallax drift left',
-    'medium-wide shot, slow orbit-lite pan right',
-    'close-medium on face and hands/paws presenting the prop, subtle bob',
-    'three-quarter view, soft push-out revealing the simple set',
-  ];
-  const lightMoods = [
-    'warm sunny key light from upper-left, soft pastel fill, cheerful highlights',
-    'bright even classroom-toy lighting, soft shadows, candy-color bounce',
-    'golden morning glow, gentle rim light on the mascot silhouette',
-    'clean studio-toy light with soft sky-blue ambient fill',
+    'medium shot',
+    'medium wide shot',
+    'close-up',
+    'three-quarter view',
   ];
   const setBases = [
-    'simple rounded playroom set with oversized soft blocks and a clean sky gradient',
-    'minimal outdoor hill with soft clouds and a few toy trees',
-    'cozy toy classroom with rounded shelves and blank colorful shapes (no letters)',
-    'open pastel stage with soft floor circle and floating bubbles',
+    'simple playroom with soft blocks',
+    'sunny grassy hill with a few trees',
+    'plain pastel stage',
+    'cozy room with rounded shelves',
+  ];
+  /** Hành động dự phòng khi narration rỗng — luôn là hành động đơn, dễ vẽ. */
+  const fallbackActions = [
+    'waving happily',
+    'holding up a big colorful toy',
+    'pointing at a simple shape',
+    'jumping with joy',
   ];
 
   return merged.map((segment, index) => {
-    const excerpt = segment.replace(/\s+/g, ' ').trim().slice(0, 220);
-    const nextExcerpt =
-      index < merged.length - 1
-        ? merged[index + 1].replace(/\s+/g, ' ').trim().slice(0, 120)
-        : '';
-    const prevExcerpt =
-      index === 0
-        ? (continuity?.previousBridge || '').replace(/\s+/g, ' ').trim().slice(0, 160)
-        : merged[index - 1].replace(/\s+/g, ' ').trim().slice(0, 120);
-
-    const linkLine =
-      index === 0 && !prevExcerpt
-        ? `OPENING beat of a continuous sequence: clearly establish ${cast} (same face shape, fur/fabric colors, eye style, and proportions that must repeat every shot) in a friendly readable set.`
-        : prevExcerpt
-          ? `CONTINUATION beat (seamless from previous shot about "${prevExcerpt}"): keep IDENTICAL cast design, wardrobe, palette, proportions, and camera language — soft motion bridge from the last pose, no hard cut, no redesign.`
-          : `CONTINUATION beat: keep IDENTICAL cast, palette, and camera language — soft motion bridge, no hard cut.`;
-
-    const nextLine = nextExcerpt
-      ? ` End the shot mid-action so it can flow into the next beat about "${nextExcerpt}".`
-      : ' End on a gentle satisfied pose that can close the sequence.';
-
+    // Ngắn hơn hẳn bản cũ (220 ký tự) và bỏ ngoặc kép.
+    const excerpt = segment.replace(/\s+/g, ' ').replace(/["“”]/g, '').trim().slice(0, 90);
     const camera = cameraAngles[index % cameraAngles.length];
-    const lighting = lightMoods[index % lightMoods.length];
     const setBase = setBases[index % setBases.length];
+    const action = excerpt ? `showing ${excerpt}` : fallbackActions[index % fallbackActions.length];
 
-    const base =
-      `${linkLine} ` +
-      `Chapter "${chapter.name}", beat ${index + 1}/${merged.length}. ` +
-      `Story beat to visualize (match narration precisely): "${excerpt}". ` +
-      `SUBJECT: ${cast}; big friendly eyes, rounded soft body, expressive eyebrows, clear silhouette; ` +
-      `pose and gesture must act out the spoken idea (point, hold, present, bounce, react). ` +
-      `PROP / FOCUS OBJECT: one oversized simple toy object that represents the learning idea in this line ` +
-      `(bright primary color, smooth plastic/felt look, no logos, no readable text). ` +
-      `ENVIRONMENT: ${setBase}; uncluttered, shallow depth, 2–4 background shapes max, consistent world across shots. ` +
-      `ACTION / MOTION: gentle playful bounce and squash, small secondary motion on ears/tail/scarf; ` +
-      `smooth 1–2 second gesture cycle, no chaotic cuts inside the shot. ` +
-      `CAMERA: ${camera}. ` +
-      `LIGHTING & COLOR: ${lighting}; saturated but soft Pingpong kids-cartoon palette, flat shading with soft gradients, rounded edges. ` +
-      `COMPOSITION: subject centered or rule-of-thirds, prop readable, negative space clean. ` +
-      `${styleBit}${nextLine} ` +
-      `STRICT: no readable text, letters, numbers-as-glyphs, subtitles, UI, watermarks; never depict real children or babies.`;
-    const withLocale = locale ? `${base} ${locale}.` : base;
+    // Mô tả NGẮN: một chủ thể + một hành động + một nền đơn giản.
+    // Bản cũ ~150 chữ với 8 nhãn viết hoa (SUBJECT/PROP/CAMERA…) và narration trong
+    // ngoặc kép — Veo Fast hoặc chặn, hoặc vẽ luôn chữ trong ngoặc lên màn hình.
+    const base = `${cast} ${action}. ${setBase}, ${camera}, soft bounce.`;
     return {
       id: `scene-tmp-${index + 1}`,
-      visual_prompt: `${withLocale} ${languageLock}`,
+      visual_prompt: base,
       narration_segment: segment,
       duration_hint: Math.max(
         MIN_SCENE_BEAT_SEC,
@@ -521,34 +488,14 @@ function applyLocalVisualContinuity(
   options: { seriesCast: string; stylePrompt?: string }
 ): SceneDraft[] {
   if (scenes.length < 2) return scenes;
-  const cast = options.seriesCast;
-  return scenes.map((scene, index) => {
-    const prevNar =
-      index > 0
-        ? (scenes[index - 1].narration_segment || '').replace(/\s+/g, ' ').trim().slice(0, 90)
-        : '';
-    const nextNar =
-      index < scenes.length - 1
-        ? (scenes[index + 1].narration_segment || '').replace(/\s+/g, ' ').trim().slice(0, 90)
-        : '';
-    let visual = (scene.visual_prompt || '').trim();
-    const lower = visual.toLowerCase();
-    if (!lower.includes('continuation') && !lower.includes('opening beat')) {
-      const bridge =
-        index === 0
-          ? `OPENING of a continuous kids-cartoon sequence with ${cast}.`
-          : `CONTINUATION from previous narration "${prevNar}": same cast (${cast}), same style, seamless soft transition, no hard cut.`;
-      const tail = nextNar
-        ? ` Leave motion ready for next beat "${nextNar}".`
-        : ' Gentle closing energy for sequence end.';
-      visual = `${bridge} ${visual}${tail}`.trim();
-    } else if (cast && !lower.includes('recurring') && !lower.includes(cast.slice(0, 24).toLowerCase())) {
-      visual = `${visual} Recurring cast: ${cast}.`;
-    }
-    if (options.stylePrompt?.trim() && !lower.includes('style bible')) {
-      visual = `${visual} Style bible: ${options.stylePrompt.trim().slice(0, 180)}.`;
-    }
-    return { ...scene, visual_prompt: visual };
+  const cast = options.seriesCast.trim();
+  // Liên tục giữa các scene giờ do keyframe / video-extend lo (frame cuối scene trước
+  // làm frame đầu scene sau). Nhồi thêm narration + "no hard cut" + style bible vào
+  // prompt chỉ làm nó dài ra và dễ bị Veo chặn. Chỉ giữ một mệnh đề khóa nhân vật.
+  return scenes.map((scene) => {
+    const visual = (scene.visual_prompt || '').trim();
+    if (!cast || visual.toLowerCase().includes(cast.toLowerCase().slice(0, 18))) return scene;
+    return { ...scene, visual_prompt: `${cast} ${visual}`.replace(/\s+/g, ' ').trim() };
   });
 }
 
@@ -568,8 +515,6 @@ async function enrichVisualContinuityWithAi(options: {
   const { scenes } = options;
   if (scenes.length < 2) return scenes;
 
-  const localeHint = resolveVisualLocaleHint(options.language);
-  const languageLock = resolveVisualLanguageLock(options.language);
   const sceneBlock = scenes
     .map((s, i) => {
       return (
@@ -588,40 +533,29 @@ async function enrichVisualContinuityWithAi(options: {
     }>({
       apiKey: options.apiKey,
       model: options.openaiModel,
-      temperature: 0.5,
-      maxTokens: Math.min(MAX_COMPLETION_TOKENS, Math.max(3200, scenes.length * 380)),
-      system: `You rewrite ONLY visual_prompt fields into RICH, DETAILED shot briefs for a continuous kids animated video (Snapgen video-extend / ref_history chaining).
+      temperature: 0.4,
+      maxTokens: Math.min(MAX_COMPLETION_TOKENS, Math.max(1200, scenes.length * 110)),
+      system: `You rewrite ONLY visual_prompt fields into SHORT, SIMPLE shot descriptions for a preschool kids cartoon rendered by Google Veo.
 Return ONLY JSON:
 {
   "series_cast": string,
   "scenes": [ { "id": string, "visual_prompt": string } ]
 }
-Rules:
-- Keep the SAME recurring cast in every shot: ${options.seriesCast}
-- Scene 1 = OPENING establishing shot; Scene 2+ = CONTINUATION from the previous shot (identical character design, wardrobe, palette, proportions, camera language, soft motion bridge, NO hard cut, NO redesign).
-- Each visual_prompt MUST be English, ONE shot, highly detailed, about 110–160 words, and explicitly cover ALL of:
-  1) continuity link (OPENING / CONTINUATION + what carries over),
-  2) subject design (species/toy type, colors, face, size, expression),
-  3) exact action/gesture matching the narration beat,
-  4) hero prop/object (material, color, size, how it is held/shown),
-  5) environment layers (foreground / mid / background, keep world simple but concrete),
-  6) camera (framing + slow move),
-  7) lighting + color palette,
-  8) motion quality (bounce, timing),
-  9) end-pose bridge into the next beat,
-  10) bans: no readable text/letters/numbers-glyphs/UI/subtitles; never depict real children or babies.
-- Pingpong-simple kids cartoon: bright flat colors, soft rounded shapes, clean uncluttered set — detailed description, NOT cluttered art.
-- Style: ${options.stylePrompt.slice(0, 360)}
-${localeHint ? `- Locale: ${localeHint}` : ''}
-- Include this lock idea: ${languageLock.slice(0, 240)}
-- Do NOT change narration, duration, chapter, or section. Return one visual_prompt per input scene id.
-- Never write vague one-liners like "cute scene of learning". Every prompt must be production-ready for image/video gen.`,
+HARD LENGTH LIMIT: each visual_prompt is English, 12–28 words, ONE sentence or two short ones. Longer prompts make Veo fail — brevity matters more than detail.
+Each visual_prompt = the SAME cast (${options.seriesCast}) + ONE simple action matching the narration + ONE simple background.
+Allowed extras (at most one each, only if useful): a simple framing word (medium shot / close-up / wide shot), one prop, one light word (sunny / warm).
+NEVER include: continuity notes, OPENING/CONTINUATION labels, quotes of the narration, capitalised labels (SUBJECT:, CAMERA:…), lists of bans, style bibles, locale essays, words about text/logos/watermarks, camera move jargon (parallax, orbit, dolly), or ages / children / babies / real people.
+Characters are always friendly cartoon animals or toys — never humans, never children.
+Style to imply (do not quote it): ${options.stylePrompt.slice(0, 120)}
+Do NOT change narration, duration, chapter, or section. Return one visual_prompt per input scene id.
+Good example: "The orange fox mascot holds up a big red ball, medium shot, sunny grassy hill."
+Bad example: a 100-word brief with labels, bans and continuity notes.`,
       user: `Title: ${options.title}
-Brief: ${options.brief.slice(0, 900)}
+Brief: ${options.brief.slice(0, 400)}
 
 ${sceneBlock}
 
-Rewrite a DETAILED visual_prompt for every scene so they chain seamlessly and are specific enough for Snapgen.`,
+Rewrite one SHORT visual_prompt (12–28 words) per scene. Same cast every scene, simple actions, simple backgrounds.`,
     });
 
     const byId = new Map<string, string>();
@@ -632,15 +566,11 @@ Rewrite a DETAILED visual_prompt for every scene so they chain seamlessly and ar
     }
     if (!byId.size) return scenes;
 
-    const cast = String(parsed.series_cast || options.seriesCast).trim();
     return scenes.map((scene, index) => {
       const next = byId.get(scene.id) || byId.get(`scene-${String(index + 1).padStart(2, '0')}`);
-      if (!next) return scene;
-      let visual = next;
-      if (cast && !visual.toLowerCase().includes('recurring') && !visual.toLowerCase().includes('cast')) {
-        visual = `${visual} Recurring cast: ${cast}.`;
-      }
-      return { ...scene, visual_prompt: visual };
+      // Không gắn thêm "Recurring cast: …" nữa — AI đã lặp cast trong từng câu,
+      // và wrapper sẽ cắt mọi chỉ thị kiểu này trước khi gửi Snapgen.
+      return next ? { ...scene, visual_prompt: next } : scene;
     });
   } catch {
     return scenes;
@@ -982,8 +912,6 @@ export async function rewriteNarrationToMatchDuration(options: {
   const actual = Math.max(0.1, actualAudioSec);
   const ratio = target / actual;
   const tooShort = actual < target;
-  const localeHint = resolveVisualLocaleHint(language);
-  const languageLock = resolveVisualLanguageLock(language);
 
   const system = `You adjust voiceover length to match a measured TTS runtime for a SIMPLE kids learning video (Pingpong / preschool style).
 Return ONLY valid JSON with scenes including section, chapter, visual_prompt, narration_segment, duration_hint.
@@ -994,9 +922,7 @@ Rules:
 - Scale spoken length ≈ ${ratio.toFixed(3)}× (${tooShort ? 'EXPAND' : 'COMPRESS'}).
 - Narration: SHORT toddler-friendly sentences, warm playful host, repeat key learning words gently (~${WORDS_PER_SECOND} words/sec).
 - One idea / one visual per scene. Continuous voiceover across scenes.
-- visual_prompt MUST stay faithful to narration_segment AND chain across scenes: Scene 1 OPENING; Scene 2+ CONTINUATION from previous shot with the SAME recurring cast design, palette, and camera language (soft bridge, no hard cut). Write DETAILED English visual_prompt (110–160 words) covering subject design, action, prop, environment, camera, lighting, motion, and end-pose bridge. Cute animal/toy mascots, bright flat Pingpong kids-cartoon look, no readable text, never depict real children or babies.${localeHint ? ` ${localeHint}.` : ''}
-- When rewriting, KEEP or IMPROVE visual_prompt detail — never collapse into a vague one-liner.
-- ${languageLock}`;
+- visual_prompt: English, SHORT (12–28 words), same recurring cartoon animal/toy cast in every scene, ONE simple action matching the narration, ONE simple background. No labels, no continuity notes, no quoted narration, no ages/children/real people. Brevity matters — long prompts make Veo fail.`;
 
   const sceneLines = script.scenes
     .map((s, i) => {
@@ -1098,6 +1024,60 @@ async function chatJsonWithImages<T>(options: {
 }
 
 /**
+ * Ghép visual do AI viết với mốc thời gian thật của lời hát.
+ *
+ * AI chỉ trả về khoảng câu (first_line / last_line); mọi phép tính giây nằm ở
+ * `alignRangesToSlots`. Slot nào là phần cắt thêm của một cảnh quá dài thì dùng
+ * lại visual của cảnh gốc — wrapper tự đổi cỡ cảnh theo index nên vẫn ra khung khác.
+ *
+ * Trả về [] khi dữ liệu AI không dùng được → caller lùi về cách chia cũ.
+ */
+function buildTimedScenes(options: {
+  scenes: SceneDraft[];
+  timedLines: TimedLyricLine[];
+  musicSec: number;
+  targetMediaCount: number;
+  typicalBeatSec: number;
+  maxBeatSec: number;
+}): SceneDraft[] {
+  const { scenes, timedLines, musicSec, targetMediaCount } = options;
+  if (timedLines.length < 2) return [];
+
+  const slots = buildTimelineSlots({
+    // AI không trả mốc dùng được → buildTimelineSlots tự chia theo câu hát.
+    aiSlots: scenes.map((s) => ({ start: Number(s.start_sec), end: Number(s.end_sec) })),
+    lines: timedLines,
+    timeline: {
+      audioDurationSec: musicSec,
+      minSec: Math.max(MIN_SCENE_BEAT_SEC, options.typicalBeatSec * 0.45),
+      maxSec: options.maxBeatSec,
+      maxCount: targetMediaCount,
+    },
+  });
+  if (!slots.length) return [];
+
+  const out: SceneDraft[] = slots.map((slot, i) => {
+    const source = scenes[Math.min(slot.sourceIndex, scenes.length - 1)] || scenes[0];
+    // Lời hát của slot: ưu tiên text đã có mốc (đúng theo thời gian); slot không có
+    // câu nào (nhạc dạo / outro) thì để rỗng — đúng bản chất, không phải lỗi.
+    const lyric = linesTextForSlot(timedLines, slot) || (slot.isSplit ? '' : source.narration_segment?.trim() || '');
+    return {
+      // Cùng quy ước với `reindexScenes` — tên thư mục media của scene dựa trên id này.
+      id: `scene-${String(i + 1).padStart(2, '0')}`,
+      visual_prompt: source.visual_prompt || '',
+      narration_segment: lyric,
+      duration_hint: slotDurationSec(slot),
+      start_sec: Math.round(slot.start * 10) / 10,
+      end_sec: Math.round(slot.end * 10) / 10,
+      section: source.section,
+      chapter: source.chapter || `Beat ${i + 1}`,
+    };
+  });
+
+  return assignSections(out);
+}
+
+/**
  * Phân tích lyric + độ dài nhạc → kịch bản phân cảnh cho video hoạt hình nhạc.
  * narration_segment = lyric/beat lines cho scene; visual_prompt = shot Snapgen.
  */
@@ -1114,8 +1094,8 @@ export async function generateMusicAnimationScript(
   });
   const targetMediaCount = clampTargetSceneCount(musicSec, plan.sceneCountHint);
   const styleLine = input.stylePrompt?.trim()
-    ? `Global animated style (apply every visual_prompt): ${input.stylePrompt.trim()}`
-    : 'Animated music video look (anime/illustration cinematic), vivid, beat-synced staging.';
+    ? `Style (same in every visual_prompt): ${input.stylePrompt.trim()}`
+    : `Style (same in every visual_prompt): ${KIDS_3D_TOY_STYLE}`;
   const characterLine = input.characterBrief?.trim()
     ? `Character continuity: ${input.characterBrief.trim()}`
     : characterImages?.length
@@ -1124,12 +1104,30 @@ export async function generateMusicAnimationScript(
 
   // Ảnh tĩnh không zoom/pan nữa → mô tả camera move là vô nghĩa, phải yêu cầu
   // bố cục một khung đứng vững thay vì "camera pushes in".
+  // Prompt NGẮN cho ra hình ổn định hơn hẳn: bản cũ đòi 90–160 từ với đủ lớp
+  // foreground/midground/background, palette, motion quality — model gom lại thành
+  // một khung rối, và mỗi scene lại "diễn giải" chi tiết một kiểu nên nhân vật đổi
+  // dáng liên tục. Hoạt hình thiếu nhi chỉ cần: ai + làm gì + ở đâu.
   const isStill = input.mediaKind === 'image';
   const shotLine = isStill
-    ? 'visual_prompt = ONE STILL KEY FRAME in English (90–140 words): subject design, pose/gesture at the emotional peak of the lyric, hero prop, foreground/midground/background layers, shot size (wide|medium|close-up — VARY it between consecutive scenes), lighting, palette. NO camera-movement wording (no pan/zoom/dolly/tracking/handheld) — the frame is held still. No multi-panel, no readable text.'
-    : 'visual_prompt = ONE DETAILED animated shot in English (110–160 words): subject design, action synced to lyric mood, hero prop, environment layers, camera move, lighting, palette, motion quality. Scene 1 establishes cast; later scenes CONTINUATION from previous shot (same character/style, soft bridge for chain-extend). No multi-panel, no readable text.';
+    ? 'visual_prompt = ONE simple picture in English, 18–35 words: which character (name it), ONE easy pose from the lyric, ONE simple background, one shot size (wide shot | medium shot | close-up — VARY it between consecutive scenes). No camera-movement words (no pan/zoom/dolly/tracking) — the frame is held still. No text, no collage.'
+    : 'visual_prompt = ONE simple animated shot in English, 20–40 words: which character (name it), ONE easy motion, ONE simple background. The motion may ONLY be: bouncing springily up and down, wiggling / swaying side to side, nodding, waving, rolling forward slowly, or a little hop in place. Never dance routines, running, spinning, flips or acrobatics. Keep the same characters and style in every scene. No text, no collage, no camera jargon.';
 
-  const system = `You are a music-video storyboard director for AI video generation (Snapgen).
+  // Có mốc thời gian thật thì AI KHÔNG được tự đặt độ dài cảnh nữa: nó chỉ nhóm
+  // câu hát (việc nó làm tốt — nhận ra phiên khúc / điệp khúc), còn mốc giây do
+  // `alignRangesToSlots` tính từ timestamp thật.
+  const timedLines = input.timedLines || [];
+  const timedBlock =
+    timedLines.length >= 2 ? describeTimelineForPrompt(timedLines, musicSec) : '';
+  const timingRules = timedBlock
+    ? `- TIMING COMES FROM THE AUDIO, NOT FROM YOU. Each scene returns "start_sec" and "end_sec" taken from the timeline above — do NOT return duration_hint, and do NOT invent timestamps that are not printed there.
+- Scenes must run back-to-back with NO gap and NO overlap: scene 1 starts at 0.0s, each next scene starts exactly where the previous ended, the last scene ends at ${musicSec.toFixed(1)}s. Cover the WHOLE song including instrumental parts.
+- Give every [INTRO] / [BREAK] / [OUTRO] block its own scene — those seconds have no lyric, so they need a picture of their own (establishing the cast, a wide view of the world, a calm closing shot). Cutting them into a lyric scene is wrong.
+- Aim for ~${plan.typicalBeatSec}s of REAL time per scene: read the timestamps, do not count words. A held note or a repeated chorus line can be long; a quick line can be short.
+- narration_segment = the lyric lines actually sung inside that time range, copied from the original lyric text (faithful spelling). Empty string for instrumental scenes.`
+    : `- Total of duration_hint MUST equal ${musicSec} (±2s ok).`;
+
+  const system = `You storyboard a CHILDREN'S cartoon music video (nursery-rhyme / kids-song style) for AI video generation (Snapgen).
 Return ONLY JSON:
 {
   "title": string,
@@ -1140,21 +1138,25 @@ Return ONLY JSON:
       "id": string,
       "chapter": string,
       "section": "introduction"|"body"|"conclusion",
-      "duration_hint": number,
+      ${timedBlock ? '"start_sec": number,\n      "end_sec": number,' : '"duration_hint": number,'}
       "narration_segment": string,
       "visual_prompt": string
     }
   ]
 }
 Rules:
-- Total of duration_hint MUST equal ${musicSec} (±2s ok).
+${timingRules}
 - HARD LIMIT: return about ${targetMediaCount} scenes (range ${Math.max(3, targetMediaCount - 2)}–${targetMediaCount + 2}). Typical beat ~${plan.typicalBeatSec}s (max ~${plan.maxBeatSec}s). Do NOT create one scene per lyric line if that exceeds the limit — group lines.
 - narration_segment = the lyric lines / vocal phrases that play during that scene (language: ${input.language}). Keep lyric wording faithful; you may lightly punctuate.
 - ${shotLine}
-- cast_lock = a 30–50 word ENGLISH cast + world bible naming EVERY recurring character with fixed, re-drawable traits (age, hair colour & cut, eye colour, exact outfit, one signature accessory) plus the fixed world palette. Concrete nouns only, no story, no adjectives like "beautiful". Every scene is generated independently, so this text is what keeps the characters identical.
-- Every visual_prompt must refer to characters by the SAME names used in cast_lock (never "a girl" / "the singer" if the cast has a name).
-- Sync energy: slow/emotional lines → intimate framing, softer light; chorus → wider staging / stronger colour.
-- SAFETY (Google blocks these outright — a blocked scene costs the user a failed render): never write children, babies, toddlers, teenagers or school pupils as characters. For nursery-rhyme / kids songs use friendly ANIMAL or TOY mascots instead, or adult characters. Never name or describe real people, celebrities or public figures, never use copyrighted or branded characters (Disney, Pokémon, superheroes…), never put brand logos in frame. This applies to cast_lock and to every visual_prompt.
+- cast_lock = 15–30 ENGLISH words naming every recurring character with a few re-drawable traits (animal/toy type, main colour, one outfit piece, one signature accessory). Concrete nouns only — no story, no age, no adjectives like "beautiful". Every scene is generated independently, so this short line is what keeps the characters identical.
+- Every visual_prompt must call characters by the SAME names used in cast_lock (never "the singer" / "a mascot" if the cast has a name).
+- Audience is toddlers and young children: everything cheerful, gentle and easy to recognise — daytime, friendly faces, simple toys and nature. No scary, sad-dramatic, dark, violent or romantic imagery, no night gloom, no weapons.
+- KEEP IT SIMPLE AND FUN — this is the most important rule. Each scene: 1 to 5 friendly characters at most (never a crowd, never background people), a few big simple props, a clean uncluttered background. Nothing intricate, elaborate or busy.
+- Characters are cartoon VEHICLES, ANIMALS or TOYS with big shiny cartoon eyes and happy smiles — the classic kids-channel cast. A row of them side by side facing the camera is a great shot.
+- Everything in the frame is a cartoon, including scenery and objects: cars, buses, houses, trees, furniture and food are chunky rounded cartoon shapes in bright saturated colors — never photoreal, never live-action footage.
+- Energy: calm lines → one character in a cosy spot; chorus → brighter colours and a slightly bigger bounce. Bigger energy means brighter colour, NOT more characters or more detail.
+- SAFETY (Google blocks these outright — a blocked scene costs the user a failed render): characters are friendly cartoon VEHICLES, ANIMALS or TOYS. Never write children, babies, toddlers, teenagers or school pupils, and never mention ages. Never name or describe real people, celebrities or public figures, never use copyrighted or branded characters (Disney, Pokémon, superheroes…), never put brand logos in frame. This applies to cast_lock and to every visual_prompt.
 - ${styleLine}
 - ${characterLine}
 - section: intro/body/outro structure across the song.
@@ -1164,20 +1166,24 @@ Rules:
 Target media count: ~${targetMediaCount} scenes (~${plan.typicalBeatSec}s each)
 Language / lyric language: ${input.language}
 ${input.songTitle ? `Title hint: ${input.songTitle}` : ''}
-
+${timedBlock ? `\nSONG TIMELINE — real timestamps measured from the actual audio file:\n${timedBlock}\n` : ''}
 LYRICS / SCRIPT:
 """
 ${input.lyricText.trim()}
 """
 
-Plan an animated music-video storyboard that fits the song length exactly within the media-count budget.`;
+Plan a kids cartoon music-video storyboard that fits the song length exactly within the media-count budget. Keep every visual_prompt short and simple.${
+    timedBlock
+      ? `\nWalk the timeline above from 0.0s to ${musicSec.toFixed(1)}s and cut it into scenes. Return start_sec / end_sec for every scene, back-to-back, covering the instrumental [INTRO]/[BREAK]/[OUTRO] blocks as their own scenes.`
+      : ''
+  }`;
 
   const model = openaiModel.trim() || 'gpt-4o-mini';
   type MusicScriptResponse = {
     title?: string;
     notes?: string;
     cast_lock?: string;
-    scenes?: Array<Partial<SceneDraft>>;
+    scenes?: Array<Partial<SceneDraft> & { first_line?: number; last_line?: number }>;
   };
   const raw =
     characterImages && characterImages.length
@@ -1205,6 +1211,10 @@ Plan an animated music-video storyboard that fits the song length exactly within
       visual_prompt: String(s.visual_prompt || '').trim(),
       narration_segment: String(s.narration_segment || '').trim(),
       duration_hint: Math.max(2, Number(s.duration_hint) || 6),
+      // Mốc AI chọn trên trục nhạc — giữ lại để `buildTimedScenes` dùng. Phải đi
+      // cùng scene qua bước filter, nếu tách mảng riêng thì index lệch → gán sai visual.
+      start_sec: Number(s.start_sec),
+      end_sec: Number(s.end_sec),
       section: normalizeSection(s.section) || (i === 0 ? 'introduction' : 'body'),
       chapter: normalizeChapter(s.chapter) || `Beat ${i + 1}`,
     }))
@@ -1212,6 +1222,30 @@ Plan an animated music-video storyboard that fits the song length exactly within
 
   if (!scenes.length) {
     throw new Error('ChatGPT không trả về scene nào từ lyric.');
+  }
+
+  // —— Căn cảnh theo mốc hát thật ——
+  if (timedBlock) {
+    const timed = buildTimedScenes({
+      scenes,
+      timedLines,
+      musicSec,
+      targetMediaCount,
+      typicalBeatSec: plan.typicalBeatSec,
+      maxBeatSec: plan.maxBeatSec,
+    });
+    if (timed.length) {
+      return {
+        script: {
+          title:
+            String(raw.title || input.songTitle || 'Music Animation').trim() || 'Music Animation',
+          narration: timed.map((s) => s.narration_segment).join('\n'),
+          scenes: timed,
+        },
+        notes: String(raw.notes || '').trim(),
+        castLock: String(raw.cast_lock || '').trim() || String(input.characterBrief || '').trim(),
+      };
+    }
   }
 
   const limited =
