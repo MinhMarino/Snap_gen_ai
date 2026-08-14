@@ -23,7 +23,10 @@ import {
   TTS_PROVIDERS_TEMPORARILY_HIDDEN,
   type IrodoriSpeedPreset,
 } from '../../shared/voice';
-import { ELEVENLABS_LANGUAGES } from '../../shared/elevenlabs-languages';
+import {
+  ELEVENLABS_LANGUAGES,
+  resolveLanguageIdFromLabel,
+} from '../../shared/elevenlabs-languages';
 import ElevenLabsVoicePicker from './ElevenLabsVoicePicker';
 import GenmaxVoicePicker from './GenmaxVoicePicker';
 import QwenVoicePicker from './QwenVoicePicker';
@@ -32,6 +35,16 @@ import QwenVoicePicker from './QwenVoicePicker';
 const NARRATION_LANGUAGE_OPTIONS = [...ELEVENLABS_LANGUAGES].sort((a, b) =>
   a.label.localeCompare(b.label, 'en')
 );
+
+/**
+ * Đổi ngôn ngữ lời bình theo giọng vừa chọn.
+ * Metadata giọng không nói được ngôn ngữ (nhiều giọng Library bỏ trống label) thì
+ * KHÔNG đụng tới lựa chọn đang có — xoá đi sẽ âm thầm quay về "tự động".
+ */
+function narrationLanguagePatch(voiceLanguage?: string | null): Partial<ProjectVoiceSettings> {
+  const id = resolveLanguageIdFromLabel(voiceLanguage);
+  return id ? { narrationLanguage: id } : {};
+}
 
 function parseTtsProvider(value: string): TtsProvider {
   if (value === 'elevenlabs' || value === 'qwen' || value === 'genmax') return value;
@@ -119,6 +132,13 @@ export default function ProjectVoicePanel({
           const premade =
             list.find((v) => (v.category || '').toLowerCase() === 'premade') || list[0];
           if (premade) onChange({ ...value, elevenLabsVoiceId: premade.voiceId });
+        } else if (!value.narrationLanguage?.trim()) {
+          // Dự án cũ: lấy ngôn ngữ từ chính giọng đang chọn. Không ghi đè khi đã có.
+          const current = list.find((v) => v.voiceId === value.elevenLabsVoiceId);
+          const langPatch = narrationLanguagePatch(
+            current?.labels?.language || current?.labels?.locale || current?.labels?.accent
+          );
+          if (langPatch.narrationLanguage) onChange({ ...value, ...langPatch });
         }
       } catch {
         if (!cancelled) setVoices([]);
@@ -159,6 +179,7 @@ export default function ProjectVoicePanel({
           onChange={(e) => patch({ narrationLanguage: e.target.value })}
         >
           <option value="">Tự động (theo brief)</option>
+          <option disabled>──────────</option>
           {NARRATION_LANGUAGE_OPTIONS.map((l) => (
             <option key={l.id} value={l.id}>
               {l.label}
@@ -166,9 +187,9 @@ export default function ProjectVoicePanel({
           ))}
         </select>
         <small className="field-hint">
-          AI viết lời bình bằng đúng ngôn ngữ này, và đây cũng là language gửi cho TTS
-          (GenMax / ElevenLabs / Irodori). Để «Tự động» thì lấy theo ngôn ngữ của brief —
-          brief tiếng Việt mà muốn video tiếng Nhật thì phải chọn ở đây.
+          Tự đổi theo giọng đọc bạn chọn bên dưới — lời bình luôn cùng tiếng với giọng.
+          AI viết kịch bản bằng ngôn ngữ này và nó cũng là language gửi cho TTS. Chọn tay
+          để ghi đè; «Tự động» chỉ dùng khi giọng không khai báo ngôn ngữ.
         </small>
       </div>
       <div className="field">
@@ -297,6 +318,10 @@ export default function ProjectVoicePanel({
                   elevenLabsPublicOwnerId: v?.publicOwnerId,
                   elevenLabsOriginalVoiceId: v?.originalVoiceId || voiceId,
                   elevenLabsVoiceName: v?.name,
+                  // Lời bình phải cùng tiếng với giọng đọc — chọn giọng là chốt luôn.
+                  ...narrationLanguagePatch(
+                    v?.labels?.language || v?.labels?.locale || v?.labels?.accent
+                  ),
                 });
               }}
             />
@@ -330,6 +355,8 @@ export default function ProjectVoicePanel({
                 patch({
                   qwenLanguageType,
                   qwenTtsVoice: pickQwenVoiceForLanguage(qwenLanguageType, value.qwenTtsVoice),
+                  // 'Auto' không nói được tiếng gì → giữ nguyên lựa chọn hiện có.
+                  ...narrationLanguagePatch(qwenLanguageType),
                 });
               }}
             >
@@ -411,8 +438,17 @@ export default function ProjectVoicePanel({
                 genmaxVoiceName: voice.name,
                 genmaxBackend: voice.backend,
                 genmaxSpeed: clampGenmaxSpeed(value.genmaxSpeed, voice.backend),
+                // Lời bình phải cùng tiếng với giọng đọc — chọn giọng là chốt luôn.
+                ...narrationLanguagePatch(voice.language || voice.accent),
               })
             }
+            onVoiceResolved={(voice) => {
+              // Chỉ điền khi còn trống: đây là dự án cũ chưa có ngôn ngữ nào được
+              // lưu, không được ghi đè lựa chọn người dùng tự đặt.
+              if (value.narrationLanguage?.trim()) return;
+              const patchLang = narrationLanguagePatch(voice.language || voice.accent);
+              if (patchLang.narrationLanguage) patch(patchLang);
+            }}
           />
           <div className="field">
             <label htmlFor="project-genmax-speed">Tốc độ đọc</label>

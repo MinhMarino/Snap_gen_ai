@@ -135,3 +135,24 @@ export function elevenLabsLanguageLabel(id?: string | null): string {
   if (!value) return '';
   return ELEVENLABS_LANGUAGES.find((l) => l.id === value)?.label || '';
 }
+
+/**
+ * Nhãn ngôn ngữ bất kỳ lấy từ metadata của giọng đọc ('ja', 'Japanese', 'jpn',
+ * 'ja-JP', 'Japanese (Tokyo)') → mã ISO trong danh sách. Không nhận ra → rỗng.
+ *
+ * Dùng khi chọn giọng: lời bình PHẢI cùng thứ tiếng với giọng đọc, nên chọn giọng
+ * là chốt luôn ngôn ngữ viết kịch bản.
+ */
+export function resolveLanguageIdFromLabel(raw?: string | null): string {
+  const value = String(raw || '')
+    .trim()
+    .toLowerCase();
+  if (!value) return '';
+  // 'ja-jp' / 'pt_br' → lấy phần đầu; giữ cả bản gốc để khớp alias như 'pt-br'.
+  const head = value.split(/[-_(]/)[0].trim();
+  for (const lang of ELEVENLABS_LANGUAGES) {
+    const tokens = languageMatchTokens(lang);
+    if (tokens.includes(value) || tokens.includes(head)) return lang.id;
+  }
+  return '';
+}

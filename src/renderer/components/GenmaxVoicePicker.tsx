@@ -37,6 +37,7 @@ export default function GenmaxVoicePicker({
   speed,
   disabled,
   onChange,
+  onVoiceResolved,
   onBackendChange,
 }: {
   backend: GenmaxBackend;
@@ -45,6 +46,8 @@ export default function GenmaxVoicePicker({
   speed?: number;
   disabled?: boolean;
   onChange: (voice: GenmaxVoice) => void;
+  /** Giọng đang chọn sau khi load xong list — chỉ để đồng bộ metadata, không đổi lựa chọn. */
+  onVoiceResolved?: (voice: GenmaxVoice) => void;
   onBackendChange: (backend: GenmaxBackend) => void;
 }) {
   const [voices, setVoices] = useState<GenmaxVoice[]>([]);
@@ -77,6 +80,12 @@ export default function GenmaxVoicePicker({
       setVoices(list);
       // Giữ selection hiện tại; chỉ gợi ý mặc định khi chưa có value.
       if (!value?.trim() && list[0]) onChange(list[0]);
+      // Báo metadata của giọng ĐANG chọn để panel đồng bộ ngôn ngữ lời bình —
+      // dự án tạo trước tính năng này chưa có ngôn ngữ nào được lưu.
+      else {
+        const current = list.find((v) => v.voiceId === value);
+        if (current) onVoiceResolved?.(current);
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
