@@ -413,15 +413,29 @@ export async function generateOneSceneMedia(
         // Đây là đường duy nhất để Sora/Meta liền mạch, và cũng vá chỗ cắt cứng của multi-cut.
         const useKeyframe = Boolean(refHistory) && !useExtend;
 
-        const chunkPrompt = chainingIntoScene
-          ? `Continue seamlessly from the previous shot with no hard cut. Keep the same characters, style, palette, and camera language. Natural motion continuation into: ${prompt}`
+        /*
+         * Luật nối cảnh đứng CUỐI và viết thật ngắn.
+         *
+         * Bản trước đặt nó lên ĐẦU, dài 158 ký tự ("Continue seamlessly from the
+         * previous shot with no hard cut. Keep the same characters, style, palette,
+         * and camera language. Natural motion continuation into: "). Vì chain bật
+         * mặc định cho video, mọi scene từ #2 trở đi mở đầu bằng đúng câu đó — hai
+         * scene liền nhau giống nhau 164 ký tự đầu. Model đọc phần đầu nặng nhất,
+         * nên thứ nó nhận được rõ nhất là "giữ nguyên như cảnh trước", còn mô tả
+         * riêng của scene bị đẩy vào giữa → video ra na ná nhau.
+         *
+         * Tính liên tục thật ra do ref_history / keyframe lo, prompt chỉ cần nhắc.
+         */
+        const continuityRule = chainingIntoScene
+          ? 'Continues from the previous shot, no hard cut.'
           : isFirst
-            ? prompt
+            ? ''
             : useExtend
-              ? `Continue the same shot seamlessly, no cut, natural motion continuation. ${prompt}`
+              ? 'Same continuous shot, no cut.'
               : useKeyframe
-                ? `Continue the same scene from the provided first frame, no hard cut, natural motion continuation. ${prompt}`
-                : `New beat of the same scene, hard cut ok, keep visual continuity. ${prompt}`;
+                ? 'Continues from the given first frame, no hard cut.'
+                : 'Next beat of the same scene.';
+        const chunkPrompt = continuityRule ? `${prompt} ${continuityRule}` : prompt;
 
         const key = promptKey({
           kind: 'video',

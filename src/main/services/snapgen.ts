@@ -445,10 +445,11 @@ const PROMPT_TRUNCATION_MIN_RATIO = 0.9;
  * CHỈ chấp nhận: giống hệt, hoặc cái ngắn là TIỀN TỐ của cái dài và giữ được
  * ≥90% độ dài (Snapgen cắt đuôi input_text).
  *
- * KHÔNG được so theo N ký tự đầu: prompt nối cảnh mở đầu bằng câu
- * "Continue seamlessly from the previous shot… continuation into: " dài 158 ký
- * tự, nên so 160 ký tự đầu làm MỌI scene nối cảnh khớp lẫn nhau → 28 scene tải
- * về cùng một video cũ thay vì gen mới.
+ * KHÔNG được so theo N ký tự đầu. Prompt nối cảnh từng mở đầu bằng câu dài 158 ký
+ * tự, nên so 160 ký tự đầu làm MỌI scene nối cảnh khớp lẫn nhau → 28 scene tải về
+ * cùng một video cũ thay vì gen mới. Câu đó giờ đã chuyển xuống cuối prompt và rút
+ * ngắn (xem `scene-generate.ts`), nhưng style prompt dùng chung vẫn có thể dài
+ * hàng nghìn ký tự giống hệt nhau — so tiền tố cố định vẫn sai như cũ.
  */
 export function snapgenPromptsMatch(a: string, b: string): boolean {
   const na = normalizeSnapgenPrompt(a);
