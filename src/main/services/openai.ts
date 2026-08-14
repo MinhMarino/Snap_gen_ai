@@ -372,13 +372,7 @@ function splitNarrationFallback(
   chapter: ChapterOutline,
   typicalBeatSec: number,
   language?: string,
-  maxBeatSec = MAX_SCENE_BEAT_SEC,
-  continuity?: {
-    seriesCast?: string;
-    /** Tóm tắt shot trước (chapter trước / beat trước). */
-    previousBridge?: string;
-    stylePrompt?: string;
-  }
+  maxBeatSec = MAX_SCENE_BEAT_SEC
 ): SceneDraft[] {
   const text = narration.trim();
   if (!text) return [];
@@ -422,7 +416,7 @@ function splitNarrationFallback(
   // Khung tạm TRUNG TÍNH về thể loại: đây chỉ là scaffold local, phần lớn sẽ được
   // `enrichVisualContinuityWithAi` viết lại theo brief. Bản cũ cứng "a cute cartoon
   // animal mascot" + phòng chơi + "soft bounce" nên dự án nào cũng ra hoạt hình thiếu nhi.
-  const cast = continuity?.seriesCast?.trim() || 'the main subject of the video';
+  const cast = 'the main subject of the video';
 
   // Đổi nhẹ góc máy / bối cảnh cho các beat liền nhau đỡ trùng khung. Giữ NGẮN.
   const cameraAngles = [
@@ -476,53 +470,20 @@ function splitNarrationFallback(
   });
 }
 
-/**
- * Gợi ý cast cố định từ brief/style — giúp mọi scene cùng nhân vật.
+/*
+ * ĐÃ XOÁ: `inferSeriesCastBrief` (đoán nhân vật lặp lại từ brief/style) và
+ * `applyLocalVisualContinuity` (chèn cast đó vào đầu mọi visual_prompt).
  *
- * TRUNG TÍNH về thể loại: chỉ nhận diện mascot khi CHÍNH style prompt nói là hoạt
- * hình / mascot. Bản cũ luôn trả về "a cute cartoon animal mascot" nên video tài
- * liệu, review hay kể chuyện đều bị gắn một con vật hoạt hình vào mọi khung hình.
+ * Nó dò CHUỖI CON, không có ranh giới từ, và không phân biệt được lệnh cấm với
+ * lệnh yêu cầu — nên một style photorealistic có dòng
+ * "AVOID: … 3D render, cartoon, anime …" bị đọc thành "người dùng muốn cartoon",
+ * rồi `/fox|cáo/` khớp vào chữ "quảng cáo" trong brief tiếng Việt và mọi scene
+ * nhận được "a cartoon fox character as the recurring hero". `/cat/` cũng khớp
+ * "deli-cat-e", `/bear/` khớp "bearing"… Đoán kiểu này không cứu được.
+ *
+ * Chủ thể lặp lại giờ do `enrichVisualContinuityWithAi` tự chốt theo brief — model
+ * đọc được cả ngữ cảnh phủ định, việc mà regex không làm được.
  */
-function inferSeriesCastBrief(brief: string, stylePrompt?: string): string {
-  const style = String(stylePrompt || '').toLowerCase();
-  // Cố tình KHÔNG bắt "animated": "smooth animated transitions" trong style của một
-  // video sản phẩm mà đẻ ra mascot con cáo thì đúng là lỗi đang phải sửa.
-  const wantsMascot = /cartoon|mascot|anime|hoạt hình|toy-like/.test(style);
-  if (!wantsMascot) {
-    // Không đoán nhân vật: để `enrichVisualContinuityWithAi` tự chốt chủ thể lặp
-    // lại theo brief. Chuỗi rỗng = không chèn cast vào visual_prompt.
-    return '';
-  }
-
-  const blob = `${brief} ${style}`.toLowerCase();
-  if (/fox|cáo/.test(blob)) return 'a cartoon fox character as the recurring hero';
-  if (/cat|mèo|kitty/.test(blob)) return 'a cartoon cat character as the recurring hero';
-  if (/dog|puppy|chó/.test(blob)) return 'a cartoon puppy character as the recurring hero';
-  if (/bear|gấu/.test(blob)) return 'a cartoon bear character as the recurring hero';
-  if (/bunny|rabbit|thỏ/.test(blob)) return 'a cartoon bunny character as the recurring hero';
-  if (/dino|dinosaur/.test(blob)) return 'a friendly cartoon dinosaur as the recurring hero';
-  if (/robot/.test(blob)) return 'a friendly round toy robot as the recurring hero';
-  return 'one recurring cartoon character (same face, colors, and proportions in every shot)';
-}
-
-/**
- * Post-process local: gắn cầu nối CONTINUATION giữa scene (không gọi API).
- */
-function applyLocalVisualContinuity(
-  scenes: SceneDraft[],
-  options: { seriesCast: string; stylePrompt?: string }
-): SceneDraft[] {
-  if (scenes.length < 2) return scenes;
-  const cast = options.seriesCast.trim();
-  // Liên tục giữa các scene giờ do keyframe / video-extend lo (frame cuối scene trước
-  // làm frame đầu scene sau). Nhồi thêm narration + "no hard cut" + style bible vào
-  // prompt chỉ làm nó dài ra và dễ bị Veo chặn. Chỉ giữ một mệnh đề khóa nhân vật.
-  return scenes.map((scene) => {
-    const visual = (scene.visual_prompt || '').trim();
-    if (!cast || visual.toLowerCase().includes(cast.toLowerCase().slice(0, 18))) return scene;
-    return { ...scene, visual_prompt: `${cast} ${visual}`.replace(/\s+/g, ' ').trim() };
-  });
-}
 
 /**
  * 1 lần gọi AI: viết lại visual_prompt toàn bộ scene thành chuỗi liền mạch (phù hợp video-extend).
@@ -534,7 +495,6 @@ async function enrichVisualContinuityWithAi(options: {
   brief: string;
   language?: string;
   stylePrompt: string;
-  seriesCast: string;
   scenes: SceneDraft[];
 }): Promise<SceneDraft[]> {
   const { scenes } = options;
@@ -551,11 +511,9 @@ async function enrichVisualContinuityWithAi(options: {
     })
     .join('\n\n');
 
-  // Cast chỉ được chốt sẵn khi style thực sự đòi hoạt hình (`inferSeriesCastBrief`).
-  // Còn lại để model tự chọn chủ thể lặp theo brief rồi trả về ở `series_cast`.
-  const castLine = options.seriesCast.trim()
-    ? `Use this same recurring cast in every scene: ${options.seriesCast.trim()}.`
-    : 'Pick ONE recurring subject/cast that fits the brief and keep it identical in every scene; report it in "series_cast".';
+  // Chủ thể lặp lại do MODEL chốt theo brief — không đoán bằng regex nữa.
+  const castLine =
+    'Pick ONE recurring subject/cast that fits the brief and keep it identical in every scene; report it in "series_cast".';
 
   try {
     const parsed = await chatJson<{
@@ -578,7 +536,8 @@ ${castLine}
 The subject and genre come from the brief and the style below — a documentary shows real-world scenes and adults, a product video shows the product, a story video shows its characters. Do NOT turn the video into a cartoon unless the style says so.
 Allowed extras (at most one each, only if useful): a framing word (medium shot / close-up / wide shot), one prop, one lighting word.
 NEVER include: continuity notes, OPENING/CONTINUATION labels, quotes of the narration, capitalised labels (SUBJECT:, CAMERA:…), lists of bans, style bibles, locale essays, words about text/logos/watermarks, camera move jargon (parallax, orbit, dolly), or ages / children / babies / named real people.
-Style to imply (do not quote it): ${options.stylePrompt.slice(0, 160)}
+Style to imply (do not quote it) — this also tells you the GENRE, and any "AVOID / do not use" list in it is a ban, never a request:
+${options.stylePrompt.slice(0, 700)}
 Do NOT change narration, duration, chapter, or section. Return one visual_prompt per input scene id.
 Good example: "A woman in a lab coat lifts a glass beaker of blue liquid, medium shot, bright lab bench."
 Bad example: a 100-word brief with labels, bans and continuity notes.`,
@@ -631,7 +590,6 @@ export async function generateScript(
   const totalBudget = spokenBudgetForDurationSec(targetDurationSec, language);
   const resolvedStyle = input.stylePrompt?.trim() || DEFAULT_STYLE_PROMPT;
   const styleHint = `Style: ${resolvedStyle}`;
-  const seriesCast = inferSeriesCastBrief(input.brief, resolvedStyle);
 
   // —— Phase 1: outline (bỏ qua nếu video ngắn — dùng plan local) ——
   let title =
@@ -691,7 +649,7 @@ Sentences: short enough to say out loud comfortably.
 Continuity: keep one through-line across chapters so the video feels like one piece, not disconnected clips.
 No stage directions, no bullet points, no markdown, no on-screen text instructions.
 Do NOT summarize. Aim for the exact word budget.
-${styleHint}${seriesCast ? `\nRecurring cast hint: ${seriesCast}` : ''}`;
+${styleHint}`;
 
   // Model đôi lúc nhả cả đề bài + đoạn lặp vô nghĩa vào chuỗi narration (JSON
   // vẫn hợp lệ nên parse qua được) → lọc ngay khi nhận, đừng để chảy xuống TTS.
@@ -793,20 +751,13 @@ Do not restart. Do not summarize the previous text.`,
   }
 
   let allScenes: SceneDraft[] = [];
-  let previousBridge = '';
   for (const { chapter, narration } of chapterNarrations) {
-    const continuityOpts = {
-      seriesCast,
-      previousBridge,
-      stylePrompt: resolvedStyle,
-    };
     let chapterScenes = splitNarrationFallback(
       narration,
       chapter,
       plan.typicalBeatSec,
       language,
-      plan.maxBeatSec,
-      continuityOpts
+      plan.maxBeatSec
     );
     if (needsBeatSplit(chapterScenes, plan.maxBeatSec)) {
       chapterScenes = splitNarrationFallback(
@@ -814,24 +765,16 @@ Do not restart. Do not summarize the previous text.`,
         chapter,
         plan.typicalBeatSec,
         language,
-        plan.maxBeatSec,
-        continuityOpts
+        plan.maxBeatSec
       );
     }
     allScenes.push(...chapterScenes);
-    const lastNar = chapterScenes[chapterScenes.length - 1]?.narration_segment || '';
-    previousBridge = lastNar.replace(/\s+/g, ' ').trim().slice(0, 140);
   }
 
   // Ép số media ≤ mục tiêu (vd. 10 phút → 20 ảnh thay vì ~100).
   if (allScenes.length > targetMediaCount) {
     allScenes = coalesceScenesToTargetCount(allScenes, targetMediaCount);
   }
-
-  allScenes = applyLocalVisualContinuity(allScenes, {
-    seriesCast,
-    stylePrompt: resolvedStyle,
-  });
 
   let draft = finalizeDraft({ title, narration: '', scenes: allScenes }, targetDurationSec);
 
@@ -875,8 +818,7 @@ Return { "continuation": "<new sentences only, ≥ ${deficitBudget.amount} ${def
       targetChapter.chapter,
       plan.typicalBeatSec,
       language,
-      plan.maxBeatSec,
-      { seriesCast, stylePrompt: resolvedStyle }
+      plan.maxBeatSec
     );
     const nextScenes: SceneDraft[] = [];
     let replaced = false;
@@ -914,11 +856,7 @@ Return { "continuation": "<new sentences only, ≥ ${deficitBudget.amount} ${def
 
   assertNarrationCoversTarget(draft.scenes, targetDurationSec, MIN_NARRATION_COVERAGE);
 
-  // —— Phase 4: liên kết visual_prompt toàn video (phù hợp chain-extend) ——
-  draft.scenes = applyLocalVisualContinuity(draft.scenes, {
-    seriesCast,
-    stylePrompt: resolvedStyle,
-  });
+  // —— Phase 4: viết lại visual_prompt toàn video theo brief + style ——
   await sleep(INTER_CALL_DELAY_MS);
   draft.scenes = await enrichVisualContinuityWithAi({
     apiKey,
@@ -927,7 +865,6 @@ Return { "continuation": "<new sentences only, ≥ ${deficitBudget.amount} ${def
     brief: input.brief,
     language,
     stylePrompt: resolvedStyle,
-    seriesCast,
     scenes: draft.scenes,
   });
   draft = finalizeDraft(
