@@ -11,3 +11,8 @@ projects/
 .env
 .env.*
 !.env.example
+
+# Repo git RIÊNG của service Irodori TTS (github.com/MinhMarino/Irodori-TTS),
+# nằm cạnh code app cho tiện chạy local. Không phải submodule — bỏ qua ở đây,
+# commit/push nó bằng git bên trong chính thư mục đó.
+Irodori-TTS/
