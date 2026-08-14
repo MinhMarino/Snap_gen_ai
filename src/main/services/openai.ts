@@ -485,7 +485,9 @@ function splitNarrationFallback(
  */
 function inferSeriesCastBrief(brief: string, stylePrompt?: string): string {
   const style = String(stylePrompt || '').toLowerCase();
-  const wantsMascot = /cartoon|mascot|anime|hoạt hình|toy-like|3d cartoon|animated/.test(style);
+  // Cố tình KHÔNG bắt "animated": "smooth animated transitions" trong style của một
+  // video sản phẩm mà đẻ ra mascot con cáo thì đúng là lỗi đang phải sửa.
+  const wantsMascot = /cartoon|mascot|anime|hoạt hình|toy-like/.test(style);
   if (!wantsMascot) {
     // Không đoán nhân vật: để `enrichVisualContinuityWithAi` tự chốt chủ thể lặp
     // lại theo brief. Chuỗi rỗng = không chèn cast vào visual_prompt.
@@ -666,7 +668,7 @@ Rules:
         system: outlineSystem,
         user: `Brief / topic: ${input.brief}
 
-Plan chapters for a ${targetDurationSec}s (${formatDurationLabel(targetDurationSec)}) kids video (~${totalBudget.amount} ${totalBudget.unitLabel} of speech).
+Plan chapters for a ${targetDurationSec}s (${formatDurationLabel(targetDurationSec)}) video (~${totalBudget.amount} ${totalBudget.unitLabel} of speech).
 ${styleHint}`,
         temperature: 0.5,
         maxTokens: 900,

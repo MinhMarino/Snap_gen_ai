@@ -72,6 +72,27 @@ export function defaultStylePromptForProjectKind(kind?: string | null): string {
     : DEFAULT_STYLE_PROMPT;
 }
 
+/**
+ * Style thiếu nhi từng là MẶC ĐỊNH của mọi dự án, nên project thường tạo trước đây
+ * đã lưu sẵn chuỗi đó trong draft.json. Đổi hằng số mặc định không cứu được chúng:
+ * style đã lưu vẫn được nhét vào prompt AI viết visual_prompt lẫn prompt gửi
+ * Snapgen → vẫn ra hoạt hình dù người dùng chọn dự án thường.
+ *
+ * Vì vậy: dự án KHÔNG phải hoạt hình nhạc mà style đúng bằng một trong hai hằng số
+ * kids cũ thì coi như chưa đặt style → trả về style trung tính. So khớp NGUYÊN
+ * CHUỖI để style do người dùng tự viết (kể cả tự viết kiểu cartoon) không bị đụng.
+ */
+export function normalizeStylePromptForProjectKind(
+  stylePrompt: string | null | undefined,
+  kind?: string | null
+): string {
+  const value = String(stylePrompt || '').trim();
+  if (!value) return defaultStylePromptForProjectKind(kind);
+  if (String(kind || '') === 'music-animation') return value;
+  const legacyKidsDefaults = [KIDS_3D_TOY_STYLE, KIDS_FLAT_2D_STYLE];
+  return legacyKidsDefaults.includes(value) ? GENERAL_STYLE_PROMPT : value;
+}
+
 export function defaultFamilyForKind(kind: MediaKind): VideoFamily | ImageFamily {
   return kind === 'image' ? DEFAULT_IMAGE_FAMILY : DEFAULT_VIDEO_FAMILY;
 }

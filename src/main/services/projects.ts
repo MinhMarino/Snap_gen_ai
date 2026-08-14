@@ -24,7 +24,7 @@ import {
   DEFAULT_DURATION_PER_SCENE,
   defaultFamilyForKind,
   defaultModelIdForKind,
-  defaultStylePromptForProjectKind,
+  normalizeStylePromptForProjectKind,
   getModelById,
 } from '../../shared/models';
 import { resolveProjectChatModel, resolveProjectVoice, projectDraftHasVoice } from '../../shared/voice';
@@ -124,7 +124,7 @@ function readDraft(id: string): ProjectDraft | null {
       mode: raw.mode,
       script: raw.script ?? null,
       mediaKind,
-      stylePrompt: raw.stylePrompt ?? defaultStylePromptForProjectKind(projectKind),
+      stylePrompt: normalizeStylePromptForProjectKind(raw.stylePrompt, projectKind),
       openaiChatModel: resolveProjectChatModel(raw.openaiChatModel, settings.openaiModel),
       outputFormat: raw.outputFormat,
       lyricText: String(raw.lyricText || ''),
@@ -289,7 +289,7 @@ export function createProject(input: CreateProjectInput): ProjectMeta {
       (input.sceneCount ?? 3) * DEFAULT_DURATION_PER_SCENE,
     hasVideo: false,
     mediaKind,
-    stylePrompt: input.stylePrompt ?? defaultStylePromptForProjectKind(projectKind),
+    stylePrompt: normalizeStylePromptForProjectKind(input.stylePrompt, projectKind),
   };
 
   writeMeta(meta);
@@ -313,7 +313,7 @@ export function createProject(input: CreateProjectInput): ProjectMeta {
     mode: meta.mode,
     script: null,
     mediaKind,
-    stylePrompt: meta.stylePrompt ?? defaultStylePromptForProjectKind(projectKind),
+    stylePrompt: normalizeStylePromptForProjectKind(meta.stylePrompt, projectKind),
     openaiChatModel: resolveProjectChatModel(input.openaiChatModel, settings.openaiModel),
     lyricText: '',
     characterRelativePaths: [],
@@ -433,7 +433,7 @@ export function ensureProject(options: {
         mode: options.mode,
         script: options.script,
         mediaKind: existing.mediaKind ?? 'video',
-        stylePrompt: existing.stylePrompt ?? defaultStylePromptForProjectKind(keptKind),
+        stylePrompt: normalizeStylePromptForProjectKind(existing.stylePrompt, keptKind),
         openaiChatModel: resolveProjectChatModel(
           prevDraft?.openaiChatModel,
           settings.openaiModel
@@ -491,7 +491,7 @@ export function ensureProject(options: {
     mode: options.mode,
     script: options.script,
     mediaKind: options.mediaKind ?? 'video',
-    stylePrompt: options.stylePrompt ?? defaultStylePromptForProjectKind(created.projectKind),
+    stylePrompt: normalizeStylePromptForProjectKind(options.stylePrompt, created.projectKind),
     openaiChatModel: resolveProjectChatModel(undefined, getSettings().openaiModel),
     ...voice,
   });

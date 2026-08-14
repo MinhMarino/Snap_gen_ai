@@ -15,12 +15,12 @@ import type {
 import { resolveProjectKind } from '../../shared/types';
 import {
   clampTargetSceneCount,
-  DEFAULT_PROJECT_LANGUAGE,
   DEFAULT_SCENE_DENSITY,
   DEFAULT_STYLE_PROMPT,
   defaultFamilyForKind,
   defaultModelIdForKind,
   defaultStylePromptForProjectKind,
+  normalizeStylePromptForProjectKind,
   estimateGenerationCredits,
   estimateScriptSpokenSeconds,
   formatCreditEstimate,
@@ -703,11 +703,9 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
           setResolution(draft.resolution);
           setMode(draft.mode ?? '');
           const kind = resolveProjectKind(draft.projectKind ?? detail.meta.projectKind);
-          // Project chưa lưu style thì lấy default THEO KIND — dùng chung
-          // DEFAULT_STYLE_PROMPT sẽ gán style video học tập cho project nhạc.
-          setStylePrompt(
-            draft.stylePrompt?.trim() ? draft.stylePrompt : defaultStylePromptForProjectKind(kind)
-          );
+          // Chưa lưu style → default theo KIND; đã lưu style thiếu nhi mặc định CŨ
+          // trên dự án thường → đổi sang trung tính (xem `normalizeStylePromptForProjectKind`).
+          setStylePrompt(normalizeStylePromptForProjectKind(draft.stylePrompt, kind));
           setScript(draft.script);
           setVoice(resolveProjectVoice(draft));
           setOpenaiChatModel(
