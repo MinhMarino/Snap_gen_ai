@@ -7,6 +7,7 @@ import {
   type NarrationChunkPlan,
 } from '../../shared/narration-chunks';
 import { clampGenmaxSpeed } from '../../shared/voice';
+import { ELEVENLABS_LANGUAGES } from '../../shared/elevenlabs-languages';
 import { concatAudioFiles, convertAudioToMp3, getDurationSafe } from './ffmpeg';
 import {
   buildContinuousNarrationText,
@@ -70,13 +71,24 @@ export function resolveGenmaxBackend(value?: string | null): GenmaxBackend {
   return isGenmaxBackend(value) ? value : DEFAULT_GENMAX_BACKEND;
 }
 
-/** Map ngôn ngữ dự án → language_code GenMax theo backend. */
+/**
+ * Map ngôn ngữ dự án → language_code GenMax theo backend.
+ *
+ * Khớp CHÍNH XÁC với danh sách ngôn ngữ trước: ô "Ngôn ngữ lời bình" lấy đúng từ
+ * danh sách đó, và nó có 74 thứ tiếng trong khi mấy dòng dò chuỗi bên dưới chỉ
+ * biết 10 — chọn Hindi mà rơi về 'en' thì lời bình một đằng, giọng đọc một nẻo.
+ * MiniMax nhận TÊN tiếng Anh thay vì mã ISO, riêng tiếng Trung có tên riêng.
+ */
 export function resolveGenmaxLanguageCode(
   backend: GenmaxBackend,
   projectLanguage?: string | null
 ): string {
   const lang = String(projectLanguage || '').toLowerCase();
+  const exact = ELEVENLABS_LANGUAGES.find(
+    (l) => l.id.toLowerCase() === lang || l.label.toLowerCase() === lang
+  );
   if (backend === 'minimax') {
+    if (exact) return exact.id === 'zh' ? 'Chinese (Mandarin)' : exact.label;
     if (!lang) return 'English';
     if (/việt|vietnam|\bvi\b/.test(lang)) return 'Vietnamese';
     if (/中|chinese|mandarin|\bzh\b/.test(lang)) return 'Chinese (Mandarin)';
@@ -90,6 +102,7 @@ export function resolveGenmaxLanguageCode(
     return 'English';
   }
   // ElevenLabs / CapCut — ISO
+  if (exact) return exact.id;
   if (!lang) return 'en';
   if (/việt|vietnam|\bvi\b/.test(lang)) return 'vi';
   if (/中|chinese|mandarin|\bzh\b/.test(lang)) return 'zh';

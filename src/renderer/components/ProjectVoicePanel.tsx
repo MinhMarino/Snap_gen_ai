@@ -166,9 +166,9 @@ export default function ProjectVoicePanel({
           ))}
         </select>
         <small className="field-hint">
-          AI viết lời bình bằng đúng ngôn ngữ này, và đây cũng là language_code gửi cho
-          ElevenLabs. Để «Tự động» thì lấy theo ngôn ngữ của brief — brief tiếng Việt mà
-          muốn video tiếng Nhật thì phải chọn ở đây.
+          AI viết lời bình bằng đúng ngôn ngữ này, và đây cũng là language gửi cho TTS
+          (GenMax / ElevenLabs / Irodori). Để «Tự động» thì lấy theo ngôn ngữ của brief —
+          brief tiếng Việt mà muốn video tiếng Nhật thì phải chọn ở đây.
         </small>
       </div>
       <div className="field">
