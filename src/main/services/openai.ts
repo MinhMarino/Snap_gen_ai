@@ -33,6 +33,7 @@ import {
   spokenBudgetForDurationSec,
   WORDS_PER_SECOND,
 } from '../../shared/models';
+import { sanitizeNarrationText } from '../../shared/narration-clean';
 
 /** Chunk lớn hơn → ít API call hơn (TPM-friendly). */
 const CHAPTER_CHUNK_SEC = 90;
@@ -657,6 +658,13 @@ Do NOT summarize. Aim for the exact word budget.
 ${styleHint}
 Recurring cast hint: ${seriesCast}`;
 
+  // Model đôi lúc nhả cả đề bài + đoạn lặp vô nghĩa vào chuỗi narration (JSON
+  // vẫn hợp lệ nên parse qua được) → lọc ngay khi nhận, đừng để chảy xuống TTS.
+  const cleanNarration = (raw: unknown): string =>
+    sanitizeNarrationText(String(raw || ''), {
+      dropForeignSentences: isCjkLanguage(input.language),
+    });
+
   const previousNarrationTail: string[] = [];
   const chapterNarrations: Array<{ chapter: ChapterOutline; narration: string }> = [];
 
@@ -706,7 +714,7 @@ Return JSON: { "narration": "<full spoken script for this chapter only>" }`,
           temperature: 0.75,
           maxTokens: chapterMaxTokens,
         });
-        narration = String(parsed.narration || '').trim();
+        narration = cleanNarration(parsed.narration);
       } else {
         const parsed = await chatJson<{ continuation?: string; narration?: string }>({
           apiKey,
@@ -722,7 +730,7 @@ Do not restart. Do not summarize the previous text.`,
           temperature: 0.8,
           maxTokens: Math.min(2048, chapterMaxTokens),
         });
-        const extra = String(parsed.continuation || parsed.narration || '').trim();
+        const extra = cleanNarration(parsed.continuation || parsed.narration);
         if (extra) {
           if (
             extra.length > narration.length * 0.8 &&
@@ -823,7 +831,7 @@ Return { "continuation": "<new sentences only, ≥ ${deficitBudget.amount} ${def
       temperature: 0.85,
       maxTokens: Math.min(2048, Math.max(600, Math.round(deficitSec * 28))),
     });
-    const extra = String(parsed.continuation || '').trim();
+    const extra = cleanNarration(parsed.continuation);
     if (!extra) continue;
 
     targetChapter.narration = `${targetChapter.narration} ${extra}`.trim();
@@ -947,6 +955,16 @@ ${sceneLines}
 Return the FULL rewritten JSON.`,
     temperature: 0.55,
   });
+
+  if (rewritten.scenes?.length) {
+    const dropForeignSentences = isCjkLanguage(language);
+    rewritten.scenes = rewritten.scenes.map((scene) => ({
+      ...scene,
+      narration_segment: sanitizeNarrationText(scene.narration_segment || '', {
+        dropForeignSentences,
+      }),
+    }));
+  }
 
   return finalizeDraft(rewritten, target);
 }

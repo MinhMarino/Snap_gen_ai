@@ -11,6 +11,7 @@ import {
   familySupportsExtend,
   findScenesWithShortNarration,
   formatDurationLabel,
+  isCjkLanguage,
   MAX_TTS_FIT_ATTEMPTS,
   normalizeSceneDurations,
 } from '../../shared/models';
@@ -41,6 +42,7 @@ import {
   resolveProjectVoice,
 } from '../../shared/voice';
 import { rewriteNarrationToMatchDuration } from './openai';
+import { sanitizeSceneNarration } from '../../shared/narration-clean';
 import { resolveMusicTiming } from './music-timing';
 import { timedLinesToSrt } from '../../shared/music-align';
 import { generateOneSceneMedia } from './scene-generate';
@@ -268,6 +270,15 @@ async function prepareNarration(options: {
 }): Promise<NarrationBundle> {
   const { projectDir, workDir, apiKey, voice, ttsModel } = options;
   const syncToSpeech = Boolean(options.syncToSpeech);
+  // Lưới chắn cuối trước khi tốn tiền TTS: script cũ có thể đã lưu rác model
+  // (đề bài bị echo, đoạn lặp "? >#"…). Làm sạch cả script luôn để text đọc,
+  // timing từng scene và phụ đề đều dựa trên cùng một bản lời.
+  const sanitized = sanitizeSceneNarration(options.script.scenes, {
+    dropForeignSentences: isCjkLanguage(options.language),
+  });
+  if (sanitized.changed) {
+    options = { ...options, script: { ...options.script, scenes: sanitized.scenes } };
+  }
   const scenes = options.script.scenes;
   const text = buildContinuousNarrationText(scenes);
   if (!text) throw new Error('Kịch bản chưa có lời thoại (narration_segment) để tạo voiceover.');
