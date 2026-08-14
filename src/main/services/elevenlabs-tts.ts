@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import type { ElevenLabsVoice } from '../../shared/types';
+import { ELEVENLABS_LANGUAGES } from '../../shared/elevenlabs-languages';
 import type { TranscriptWord } from './openai-audio';
 import { elevenLabsFetch, getElevenLabsCookieHeader, getElevenLabsSessionStatus, hasElevenLabsApiAccess } from './elevenlabs-auth';
 import { getCapturedElevenLabsAuthorization } from '../store';
@@ -181,20 +182,36 @@ function writeTtsResult(
   return { audioPath, srtPath, words, modelId: options.modelId };
 }
 
-/** ISO 639-1 from Studio language label. */
+/**
+ * ISO 639-1 từ nhãn ngôn ngữ của Studio.
+ *
+ * Khớp CHÍNH XÁC với danh sách ElevenLabs trước — ô "Ngôn ngữ lời bình" lấy đúng
+ * từ danh sách đó nên gần như luôn trúng ở bước này. Chỉ khi không trúng mới rơi
+ * xuống dò chuỗi con, phần dành cho project cũ lưu chuỗi gõ tay ("Tiếng Việt").
+ *
+ * Dò chuỗi con phải xét "en" CUỐI CÙNG: "french" chứa "en", đặt trước thì chọn
+ * tiếng Pháp lại gửi language_code 'en'.
+ */
 export function resolveElevenLabsLanguageCode(language?: string): string | undefined {
-  if (!language?.trim()) return undefined;
-  const lang = language.toLowerCase();
-  if (lang.includes('vi') || lang.includes('việt') || lang.includes('viet')) return 'vi';
-  if (lang.includes('en') || lang.includes('english') || lang.includes('anh')) return 'en';
-  if (lang.includes('zh') || lang.includes('trung') || lang.includes('chinese')) return 'zh';
-  if (lang.includes('ja') || lang.includes('nhật') || lang.includes('japan')) return 'ja';
-  if (lang.includes('ko') || lang.includes('hàn') || lang.includes('korea')) return 'ko';
-  if (lang.includes('fr') || lang.includes('pháp') || lang.includes('french')) return 'fr';
-  if (lang.includes('de') || lang.includes('đức') || lang.includes('german')) return 'de';
-  if (lang.includes('es') || lang.includes('tây ban') || lang.includes('spanish')) return 'es';
-  if (lang.includes('id') || lang.includes('indonesia')) return 'id';
-  if (lang.includes('th') || lang.includes('thái') || lang.includes('thai')) return 'th';
+  const raw = language?.trim();
+  if (!raw) return undefined;
+  const lang = raw.toLowerCase();
+
+  const exact = ELEVENLABS_LANGUAGES.find(
+    (l) => l.id.toLowerCase() === lang || l.label.toLowerCase() === lang
+  );
+  if (exact) return exact.id;
+
+  if (lang.includes('việt') || lang.includes('viet')) return 'vi';
+  if (lang.includes('trung') || lang.includes('chinese')) return 'zh';
+  if (lang.includes('nhật') || lang.includes('japan')) return 'ja';
+  if (lang.includes('hàn') || lang.includes('korea')) return 'ko';
+  if (lang.includes('pháp') || lang.includes('french')) return 'fr';
+  if (lang.includes('đức') || lang.includes('german')) return 'de';
+  if (lang.includes('tây ban') || lang.includes('spanish')) return 'es';
+  if (lang.includes('indonesia')) return 'id';
+  if (lang.includes('thái') || lang.includes('thai')) return 'th';
+  if (lang.includes('english') || lang.includes('anh')) return 'en';
   return undefined;
 }
 

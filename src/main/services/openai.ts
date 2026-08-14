@@ -583,10 +583,11 @@ export async function generateScript(
   });
   const targetDurationSec = plan.targetDurationSec;
   const targetMediaCount = clampTargetSceneCount(targetDurationSec, plan.sceneCountHint);
-  // Studio không còn ô Language: brief viết tiếng nào thì lời bình ra tiếng đó.
-  // Vẫn phải chốt một nhãn ngôn ngữ TRƯỚC khi viết, vì ngân sách lời tính bằng
-  // ký tự (CJK) hay từ (còn lại) là hai con số khác hẳn nhau.
-  const language = input.language?.trim() || detectScriptLanguage(input.brief);
+  // Ngôn ngữ lời bình: người dùng chọn ở panel giọng đọc thì theo đúng lựa chọn đó;
+  // để «Tự động» thì đoán từ brief. Phải chốt TRƯỚC khi viết vì ngân sách lời tính
+  // bằng ký tự (CJK) hay từ (còn lại) là hai con số khác hẳn nhau.
+  const explicitLanguage = input.language?.trim() || '';
+  const language = explicitLanguage || detectScriptLanguage(input.brief);
   const totalBudget = spokenBudgetForDurationSec(targetDurationSec, language);
   const resolvedStyle = input.stylePrompt?.trim() || DEFAULT_STYLE_PROMPT;
   const styleHint = `Style: ${resolvedStyle}`;
@@ -642,7 +643,11 @@ ${styleHint}`,
   // —— Phase 2: narration per chapter → split scenes local (không gọi AI split) ——
   const writeNarrationSystem = `You write spoken voiceover for ONE chapter of a video.
 Return ONLY JSON: { "narration": string } OR { "continuation": string }
-Language: write the narration in the SAME language the brief is written in (detected: ${language}). If the brief explicitly asks for another language, follow the brief instead.
+Language: ${
+    explicitLanguage
+      ? `write EVERY narration sentence in ${language}. This is a hard requirement set by the user — the brief itself may be written in a different language, ignore that and write in ${language}.`
+      : `write the narration in the SAME language the brief is written in (detected: ${language}). If the brief explicitly asks for another language, follow the brief instead.`
+  }
 Audience and tone: taken from the brief. Match it — do not default to a children's video.
 Voice: clear and natural for that audience; spoken, not written prose.
 Sentences: short enough to say out loud comfortably.

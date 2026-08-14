@@ -23,9 +23,15 @@ import {
   TTS_PROVIDERS_TEMPORARILY_HIDDEN,
   type IrodoriSpeedPreset,
 } from '../../shared/voice';
+import { ELEVENLABS_LANGUAGES } from '../../shared/elevenlabs-languages';
 import ElevenLabsVoicePicker from './ElevenLabsVoicePicker';
 import GenmaxVoicePicker from './GenmaxVoicePicker';
 import QwenVoicePicker from './QwenVoicePicker';
+
+/** Ngôn ngữ lời bình = đúng danh sách ElevenLabs hỗ trợ, xếp theo tên. */
+const NARRATION_LANGUAGE_OPTIONS = [...ELEVENLABS_LANGUAGES].sort((a, b) =>
+  a.label.localeCompare(b.label, 'en')
+);
 
 function parseTtsProvider(value: string): TtsProvider {
   if (value === 'elevenlabs' || value === 'qwen' || value === 'genmax') return value;
@@ -144,6 +150,27 @@ export default function ProjectVoicePanel({
 
   return (
     <div className="project-voice-panel">
+      <div className="field">
+        <label htmlFor="project-narration-language">Ngôn ngữ lời bình</label>
+        <select
+          id="project-narration-language"
+          value={value.narrationLanguage || ''}
+          disabled={disabled}
+          onChange={(e) => patch({ narrationLanguage: e.target.value })}
+        >
+          <option value="">Tự động (theo brief)</option>
+          {NARRATION_LANGUAGE_OPTIONS.map((l) => (
+            <option key={l.id} value={l.id}>
+              {l.label}
+            </option>
+          ))}
+        </select>
+        <small className="field-hint">
+          AI viết lời bình bằng đúng ngôn ngữ này, và đây cũng là language_code gửi cho
+          ElevenLabs. Để «Tự động» thì lấy theo ngôn ngữ của brief — brief tiếng Việt mà
+          muốn video tiếng Nhật thì phải chọn ở đây.
+        </small>
+      </div>
       <div className="field">
         <label htmlFor="project-tts-provider">Nguồn giọng đọc</label>
         <select

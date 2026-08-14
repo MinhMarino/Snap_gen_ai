@@ -95,6 +95,16 @@ export interface AppSettings {
 
 /** Voiceover gắn theo từng dự án (lưu trong draft.json). */
 export interface ProjectVoiceSettings {
+  /**
+   * Ngôn ngữ LỜI BÌNH — mã ISO 639-1 theo danh sách ElevenLabs ('ja', 'vi'…).
+   * Chuỗi rỗng = tự nhận diện từ brief.
+   *
+   * Đây là ngôn ngữ AI viết narration VÀ là `language_code` gửi cho ElevenLabs —
+   * hai thứ đó bắt buộc phải trùng nhau, nên chỉ có một ô để chọn. Tự nhận diện
+   * chỉ đúng khi brief viết cùng thứ tiếng với video; brief tiếng Việt đặt làm
+   * video tiếng Nhật thì phải nói rõ ở đây.
+   */
+  narrationLanguage?: string;
   ttsProvider: TtsProvider;
   openaiTtsModel: string;
   openaiTtsVoice: string;
@@ -342,6 +352,7 @@ export interface ProjectDraft {
    */
   outputFormat?: string;
   /** Voiceover theo dự án. */
+  narrationLanguage?: string;
   ttsProvider: TtsProvider;
   openaiTtsModel: string;
   openaiTtsVoice: string;

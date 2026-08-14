@@ -95,6 +95,8 @@ export function genmaxSpeedRange(backend?: ProjectVoiceSettings['genmaxBackend']
 }
 
 export const DEFAULT_PROJECT_VOICE: ProjectVoiceSettings = {
+  // Rỗng = tự nhận diện ngôn ngữ lời bình từ brief.
+  narrationLanguage: '',
   ttsProvider: 'genmax',
   openaiTtsModel: 'gpt-4o-mini-tts',
   openaiTtsVoice: 'onyx',
@@ -134,6 +136,8 @@ export function resolveProjectVoice(
   defaults?: Partial<AppSettings> | null
 ): ProjectVoiceSettings {
   const base: ProjectVoiceSettings = {
+    // Không có default cấp app: ngôn ngữ lời bình là quyết định của TỪNG dự án.
+    narrationLanguage: '',
     ttsProvider: coerceSelectableTtsProvider(
       isTtsProvider(defaults?.ttsProvider)
         ? defaults.ttsProvider
@@ -168,6 +172,10 @@ export function resolveProjectVoice(
   const qwenLanguageType = partial!.qwenLanguageType || base.qwenLanguageType;
   const genmaxBackend = resolveGenmaxBackendField(partial!.genmaxBackend ?? base.genmaxBackend);
   return {
+    narrationLanguage:
+      partial!.narrationLanguage !== undefined
+        ? String(partial!.narrationLanguage || '').trim()
+        : base.narrationLanguage,
     ttsProvider: coerceSelectableTtsProvider(
       isTtsProvider(partial!.ttsProvider) ? partial!.ttsProvider : base.ttsProvider
     ),

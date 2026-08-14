@@ -125,3 +125,13 @@ export function languageMatchTokens(lang: ElevenLabsLanguage): string[] {
 export function accentMatchTokens(accent: ElevenLabsAccent): string[] {
   return [accent.id, accent.label, ...(accent.aliases || [])].map((s) => s.toLowerCase());
 }
+
+/**
+ * Mã ISO ('ja') → tên tiếng Anh ('Japanese'), dùng làm nhãn ngôn ngữ cho AI viết
+ * kịch bản. Không khớp / rỗng → chuỗi rỗng, nghĩa là "tự nhận diện từ brief".
+ */
+export function elevenLabsLanguageLabel(id?: string | null): string {
+  const value = String(id || '').trim().toLowerCase();
+  if (!value) return '';
+  return ELEVENLABS_LANGUAGES.find((l) => l.id === value)?.label || '';
+}

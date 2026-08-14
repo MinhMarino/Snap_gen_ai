@@ -51,6 +51,7 @@ import StepActivityUI, {
 import type { ProjectVoiceSettings } from '../../shared/types';
 import { OPENAI_CHAT_MODELS } from '../../shared/types';
 import { DEFAULT_PROJECT_VOICE, resolveProjectChatModel, resolveProjectVoice } from '../../shared/voice';
+import { elevenLabsLanguageLabel } from '../../shared/elevenlabs-languages';
 import {
   canonicalAspectRatio,
   formatOutputFormatLabel,
@@ -274,6 +275,12 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
   const [activity, setActivity] = useState<StepActivityState | null>(null);
   const isMusicAnimation = projectKind === 'music-animation';
   const isAudioOnly = projectKind === 'audio-only';
+  /**
+   * Ngôn ngữ lời bình chọn ở panel giọng đọc, đổi từ mã ISO ('ja') sang tên
+   * ('Japanese') — dạng mà prompt viết kịch bản và các hàm ngôn ngữ đang nhận.
+   * Rỗng = để main tự nhận diện từ brief.
+   */
+  const narrationLanguage = elevenLabsLanguageLabel(voice.narrationLanguage);
   const railSteps = isMusicAnimation
     ? MUSIC_WORKFLOW_STEPS
     : isAudioOnly
@@ -1246,10 +1253,12 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
         scenePlan.sceneCountHint
       );
       pushActivityLog(
-        `Gọi ChatGPT viết kịch bản (~${formatDurationLabel(scenePlan.targetDurationSec)}, ~${mediaTarget} ${mediaKind === 'image' ? 'ảnh' : 'video'})…`
+        `Gọi ChatGPT viết kịch bản (~${formatDurationLabel(scenePlan.targetDurationSec)}, ~${mediaTarget} ${mediaKind === 'image' ? 'ảnh' : 'video'}${narrationLanguage ? `, ${narrationLanguage}` : ''})…`
       );
       const draft = await window.studio.generateScript({
         brief: brief.trim(),
+        // Rỗng → main tự nhận diện ngôn ngữ từ brief.
+        language: narrationLanguage || undefined,
         targetDurationSec: scenePlan.targetDurationSec,
         sceneCount: mediaTarget,
         family: family as VideoFamily | ImageFamily,
@@ -1520,6 +1529,8 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
         resolution,
         mode: mode || undefined,
         brief,
+        // Quyết định language_code gửi ElevenLabs + cách đếm ngân sách lời.
+        language: narrationLanguage || undefined,
         mediaKind,
         stylePrompt: stylePrompt.trim() || undefined,
         regenerateSceneIds: payload.regenerateSceneIds,
@@ -1761,6 +1772,7 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
       pushActivityLog(`Mục tiêu ~${mediaTarget} shot (~${formatDurationLabel(scenePlan.typicalBeatSec)}/scene)…`);
       const result = await window.studio.generateMusicAnimationScript(id, {
         lyricText,
+        language: narrationLanguage || undefined,
         stylePrompt,
         openaiChatModel,
         songTitle: projectName,
