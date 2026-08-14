@@ -22,7 +22,6 @@ import type {
 import { resolveProjectKind } from '../../shared/types';
 import {
   DEFAULT_DURATION_PER_SCENE,
-  DEFAULT_PROJECT_LANGUAGE,
   defaultFamilyForKind,
   defaultModelIdForKind,
   defaultStylePromptForProjectKind,
@@ -109,7 +108,7 @@ function readDraft(id: string): ProjectDraft | null {
     const draft: ProjectDraft = {
       projectKind,
       brief: raw.brief ?? '',
-      language: raw.language ?? DEFAULT_PROJECT_LANGUAGE,
+      language: raw.language,
       sceneCount,
       targetMediaCount:
         typeof raw.targetMediaCount === 'number' && raw.targetMediaCount > 0
@@ -278,7 +277,7 @@ export function createProject(input: CreateProjectInput): ProjectMeta {
     status: 'draft',
     projectKind,
     brief: input.brief ?? '',
-    language: input.language ?? DEFAULT_PROJECT_LANGUAGE,
+    language: input.language,
     family: input.family ?? defaultFamilyForKind(mediaKind),
     model: input.model ?? defaultModelIdForKind(mediaKind),
     aspectRatio: input.aspectRatio ?? defaultModel?.defaultAspectRatio ?? '16:9',
@@ -304,7 +303,7 @@ export function createProject(input: CreateProjectInput): ProjectMeta {
   writeDraft(id, {
     projectKind,
     brief: meta.brief ?? '',
-    language: meta.language ?? DEFAULT_PROJECT_LANGUAGE,
+    language: meta.language,
     sceneCount: meta.sceneCount ?? 3,
     targetDurationSec: meta.targetDurationSec ?? DEFAULT_TARGET_DURATION_SEC,
     family: (meta.family ?? defaultFamilyForKind(mediaKind)) as VideoFamily | ImageFamily,
@@ -421,7 +420,7 @@ export function ensureProject(options: {
         // không nằm trong options, nếu không dự án nhạc mất lyric / cast lock.
         projectKind: keptKind,
         brief: existing.brief ?? '',
-        language: existing.language ?? DEFAULT_PROJECT_LANGUAGE,
+        language: existing.language,
         sceneCount: options.script.scenes.length,
         targetMediaCount: prevDraft?.targetMediaCount,
         sceneDensity: prevDraft?.sceneDensity,
@@ -482,7 +481,7 @@ export function ensureProject(options: {
   const voice = resolveProjectVoice(readDraft(created.id), getSettings());
   writeDraft(created.id, {
     brief: options.brief ?? '',
-    language: options.language ?? DEFAULT_PROJECT_LANGUAGE,
+    language: options.language,
     sceneCount: options.script.scenes.length,
     targetDurationSec: scriptDuration || DEFAULT_TARGET_DURATION_SEC,
     family: options.family,

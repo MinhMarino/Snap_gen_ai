@@ -257,24 +257,22 @@ export async function generateOneSceneMedia(
   sceneIndex: number,
   onProgress?: (update: SceneProgressUpdate) => void
 ): Promise<SceneGenerateResult> {
-  const basePrompt =
-    ctx.projectKind === 'music-animation'
-      ? buildMusicSceneImagePrompt({
-          visualPrompt: scene.visual_prompt,
-          language: ctx.language,
-          stylePrompt: ctx.stylePrompt,
-          castLock: ctx.castLock,
-          sceneIndex,
-          section: scene.section,
-          stillFrame: ctx.stillFrame,
-          mediaKind: ctx.mediaKind,
-        })
-      : buildSceneImagePrompt({
-          visualPrompt: scene.visual_prompt,
-          language: ctx.language,
-          stylePrompt: ctx.stylePrompt,
-          mediaKind: ctx.mediaKind,
-        });
+  const isMusicAnimation = ctx.projectKind === 'music-animation';
+  const basePrompt = isMusicAnimation
+    ? buildMusicSceneImagePrompt({
+        visualPrompt: scene.visual_prompt,
+        stylePrompt: ctx.stylePrompt,
+        castLock: ctx.castLock,
+        sceneIndex,
+        section: scene.section,
+        stillFrame: ctx.stillFrame,
+        mediaKind: ctx.mediaKind,
+      })
+    : buildSceneImagePrompt({
+        visualPrompt: scene.visual_prompt,
+        stylePrompt: ctx.stylePrompt,
+        mediaKind: ctx.mediaKind,
+      });
   const label = `Scene ${sceneIndex + 1}`;
   const maxAttempts = ctx.maxAttempts ?? 3;
   const segmentDir = path.join(ctx.workDir, `scene-${safeSceneKey(scene.id)}`);
@@ -296,8 +294,14 @@ export async function generateOneSceneMedia(
       if (attempt > 1) {
         onProgress?.({ state: 'retrying', attempt, detailPercent: 0, local01: 0 });
       }
+      // Dự án thường: làm sạch theo hướng trung tính (không ép chủ thể thành mascot
+      // hoạt hình) — nếu không, một lần bị RAI chặn là cả video đổi sang thể loại khác.
       const prompt =
-        safetyLevel > 0 ? sanitizeUnsafePrompt(basePrompt, safetyLevel) : basePrompt;
+        safetyLevel > 0
+          ? sanitizeUnsafePrompt(basePrompt, safetyLevel, {
+              cartoonSubjects: isMusicAnimation,
+            })
+          : basePrompt;
       try {
 
       if (ctx.mediaKind === 'image') {

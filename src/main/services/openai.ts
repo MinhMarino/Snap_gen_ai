@@ -35,6 +35,7 @@ import {
   WORDS_PER_SECOND,
 } from '../../shared/models';
 import { sanitizeNarrationText } from '../../shared/narration-clean';
+import { detectScriptLanguage } from '../../shared/detect-language';
 
 /** Chunk lớn hơn → ít API call hơn (TPM-friendly). */
 const CHAPTER_CHUNK_SEC = 90;
@@ -418,7 +419,10 @@ function splitNarrationFallback(
     }
   }
 
-  const cast = continuity?.seriesCast?.trim() || 'a cute cartoon animal mascot';
+  // Khung tạm TRUNG TÍNH về thể loại: đây chỉ là scaffold local, phần lớn sẽ được
+  // `enrichVisualContinuityWithAi` viết lại theo brief. Bản cũ cứng "a cute cartoon
+  // animal mascot" + phòng chơi + "soft bounce" nên dự án nào cũng ra hoạt hình thiếu nhi.
+  const cast = continuity?.seriesCast?.trim() || 'the main subject of the video';
 
   // Đổi nhẹ góc máy / bối cảnh cho các beat liền nhau đỡ trùng khung. Giữ NGẮN.
   const cameraAngles = [
@@ -428,17 +432,17 @@ function splitNarrationFallback(
     'three-quarter view',
   ];
   const setBases = [
-    'simple playroom with soft blocks',
-    'sunny grassy hill with a few trees',
-    'plain pastel stage',
-    'cozy room with rounded shelves',
+    'simple uncluttered background',
+    'natural outdoor setting',
+    'plain neutral studio background',
+    'simple indoor setting',
   ];
   /** Hành động dự phòng khi narration rỗng — luôn là hành động đơn, dễ vẽ. */
   const fallbackActions = [
-    'waving happily',
-    'holding up a big colorful toy',
-    'pointing at a simple shape',
-    'jumping with joy',
+    'presented clearly in frame',
+    'seen from a slightly different angle',
+    'shown in a calm steady pose',
+    'framed against a clean background',
   ];
 
   return merged.map((segment, index) => {
@@ -457,7 +461,7 @@ function splitNarrationFallback(
     // Mô tả NGẮN: một chủ thể + một hành động + một nền đơn giản.
     // Bản cũ ~150 chữ với 8 nhãn viết hoa (SUBJECT/PROP/CAMERA…) và narration trong
     // ngoặc kép — Veo Fast hoặc chặn, hoặc vẽ luôn chữ trong ngoặc lên màn hình.
-    const base = `${cast} ${action}. ${setBase}, ${camera}, soft bounce.`;
+    const base = `${cast} ${action}. ${setBase}, ${camera}.`;
     return {
       id: `scene-tmp-${index + 1}`,
       visual_prompt: base,
@@ -472,20 +476,31 @@ function splitNarrationFallback(
   });
 }
 
-/** Gợi ý cast cố định từ brief/style — giúp mọi scene cùng nhân vật. */
+/**
+ * Gợi ý cast cố định từ brief/style — giúp mọi scene cùng nhân vật.
+ *
+ * TRUNG TÍNH về thể loại: chỉ nhận diện mascot khi CHÍNH style prompt nói là hoạt
+ * hình / mascot. Bản cũ luôn trả về "a cute cartoon animal mascot" nên video tài
+ * liệu, review hay kể chuyện đều bị gắn một con vật hoạt hình vào mọi khung hình.
+ */
 function inferSeriesCastBrief(brief: string, stylePrompt?: string): string {
-  const blob = `${brief} ${stylePrompt || ''}`.toLowerCase();
-  if (/fox|cáo/.test(blob)) return 'a cute cartoon fox mascot as the recurring hero';
-  if (/cat|mèo|kitty/.test(blob)) return 'a cute cartoon cat mascot as the recurring hero';
-  if (/dog|puppy|chó/.test(blob)) return 'a cute cartoon puppy mascot as the recurring hero';
-  if (/bear|gấu/.test(blob)) return 'a cute cartoon bear mascot as the recurring hero';
-  if (/bunny|rabbit|thỏ/.test(blob)) return 'a cute cartoon bunny mascot as the recurring hero';
-  if (/dino|dinosaur/.test(blob)) return 'a friendly cartoon dinosaur mascot as the recurring hero';
-  if (/robot/.test(blob)) return 'a friendly round toy robot mascot as the recurring hero';
-  if (/color|màu|số|number|alphabet|letter|animal|động vật/.test(blob)) {
-    return 'one recurring cute animal teacher-mascot plus simple toy props matching each learning beat';
+  const style = String(stylePrompt || '').toLowerCase();
+  const wantsMascot = /cartoon|mascot|anime|hoạt hình|toy-like|3d cartoon|animated/.test(style);
+  if (!wantsMascot) {
+    // Không đoán nhân vật: để `enrichVisualContinuityWithAi` tự chốt chủ thể lặp
+    // lại theo brief. Chuỗi rỗng = không chèn cast vào visual_prompt.
+    return '';
   }
-  return 'one recurring cute animal or toy mascot hero (same face, colors, and proportions in every shot)';
+
+  const blob = `${brief} ${style}`.toLowerCase();
+  if (/fox|cáo/.test(blob)) return 'a cartoon fox character as the recurring hero';
+  if (/cat|mèo|kitty/.test(blob)) return 'a cartoon cat character as the recurring hero';
+  if (/dog|puppy|chó/.test(blob)) return 'a cartoon puppy character as the recurring hero';
+  if (/bear|gấu/.test(blob)) return 'a cartoon bear character as the recurring hero';
+  if (/bunny|rabbit|thỏ/.test(blob)) return 'a cartoon bunny character as the recurring hero';
+  if (/dino|dinosaur/.test(blob)) return 'a friendly cartoon dinosaur as the recurring hero';
+  if (/robot/.test(blob)) return 'a friendly round toy robot as the recurring hero';
+  return 'one recurring cartoon character (same face, colors, and proportions in every shot)';
 }
 
 /**
@@ -534,6 +549,12 @@ async function enrichVisualContinuityWithAi(options: {
     })
     .join('\n\n');
 
+  // Cast chỉ được chốt sẵn khi style thực sự đòi hoạt hình (`inferSeriesCastBrief`).
+  // Còn lại để model tự chọn chủ thể lặp theo brief rồi trả về ở `series_cast`.
+  const castLine = options.seriesCast.trim()
+    ? `Use this same recurring cast in every scene: ${options.seriesCast.trim()}.`
+    : 'Pick ONE recurring subject/cast that fits the brief and keep it identical in every scene; report it in "series_cast".';
+
   try {
     const parsed = await chatJson<{
       series_cast?: string;
@@ -543,27 +564,28 @@ async function enrichVisualContinuityWithAi(options: {
       model: options.openaiModel,
       temperature: 0.4,
       maxTokens: Math.min(MAX_COMPLETION_TOKENS, Math.max(1200, scenes.length * 110)),
-      system: `You rewrite ONLY visual_prompt fields into SHORT, SIMPLE shot descriptions for a preschool kids cartoon rendered by Google Veo.
+      system: `You rewrite ONLY visual_prompt fields into SHORT, CONCRETE shot descriptions rendered by Google Veo.
 Return ONLY JSON:
 {
   "series_cast": string,
   "scenes": [ { "id": string, "visual_prompt": string } ]
 }
 HARD LENGTH LIMIT: each visual_prompt is English, 12–28 words, ONE sentence or two short ones. Longer prompts make Veo fail — brevity matters more than detail.
-Each visual_prompt = the SAME cast (${options.seriesCast}) + ONE simple action matching the narration + ONE simple background.
-Allowed extras (at most one each, only if useful): a simple framing word (medium shot / close-up / wide shot), one prop, one light word (sunny / warm).
-NEVER include: continuity notes, OPENING/CONTINUATION labels, quotes of the narration, capitalised labels (SUBJECT:, CAMERA:…), lists of bans, style bibles, locale essays, words about text/logos/watermarks, camera move jargon (parallax, orbit, dolly), or ages / children / babies / real people.
-Characters are always friendly cartoon animals or toys — never humans, never children.
-Style to imply (do not quote it): ${options.stylePrompt.slice(0, 120)}
+Each visual_prompt = the recurring subject + ONE action or state that matches THIS scene's narration + ONE background.
+${castLine}
+The subject and genre come from the brief and the style below — a documentary shows real-world scenes and adults, a product video shows the product, a story video shows its characters. Do NOT turn the video into a cartoon unless the style says so.
+Allowed extras (at most one each, only if useful): a framing word (medium shot / close-up / wide shot), one prop, one lighting word.
+NEVER include: continuity notes, OPENING/CONTINUATION labels, quotes of the narration, capitalised labels (SUBJECT:, CAMERA:…), lists of bans, style bibles, locale essays, words about text/logos/watermarks, camera move jargon (parallax, orbit, dolly), or ages / children / babies / named real people.
+Style to imply (do not quote it): ${options.stylePrompt.slice(0, 160)}
 Do NOT change narration, duration, chapter, or section. Return one visual_prompt per input scene id.
-Good example: "The orange fox mascot holds up a big red ball, medium shot, sunny grassy hill."
+Good example: "A woman in a lab coat lifts a glass beaker of blue liquid, medium shot, bright lab bench."
 Bad example: a 100-word brief with labels, bans and continuity notes.`,
       user: `Title: ${options.title}
 Brief: ${options.brief.slice(0, 400)}
 
 ${sceneBlock}
 
-Rewrite one SHORT visual_prompt (12–28 words) per scene. Same cast every scene, simple actions, simple backgrounds.`,
+Rewrite one SHORT visual_prompt (12–28 words) per scene. Keep the same recurring subject and look across scenes; each shot must match its own narration.`,
     });
 
     const byId = new Map<string, string>();
@@ -600,7 +622,11 @@ export async function generateScript(
   });
   const targetDurationSec = plan.targetDurationSec;
   const targetMediaCount = clampTargetSceneCount(targetDurationSec, plan.sceneCountHint);
-  const totalBudget = spokenBudgetForDurationSec(targetDurationSec, input.language);
+  // Studio không còn ô Language: brief viết tiếng nào thì lời bình ra tiếng đó.
+  // Vẫn phải chốt một nhãn ngôn ngữ TRƯỚC khi viết, vì ngân sách lời tính bằng
+  // ký tự (CJK) hay từ (còn lại) là hai con số khác hẳn nhau.
+  const language = input.language?.trim() || detectScriptLanguage(input.brief);
+  const totalBudget = spokenBudgetForDurationSec(targetDurationSec, language);
   const resolvedStyle = input.stylePrompt?.trim() || DEFAULT_STYLE_PROMPT;
   const styleHint = `Style: ${resolvedStyle}`;
   const seriesCast = inferSeriesCastBrief(input.brief, resolvedStyle);
@@ -614,7 +640,7 @@ export async function generateScript(
   if (skipOutlineApi) {
     chapters = defaultChapterPlan(targetDurationSec);
   } else {
-    const outlineSystem = `You plan a ${formatDurationLabel(targetDurationSec)} SIMPLE kids learning video outline (Pingpong / preschool style).
+    const outlineSystem = `You plan a ${formatDurationLabel(targetDurationSec)} video outline.
 Return ONLY JSON:
 {
   "title": string,
@@ -624,9 +650,10 @@ Return ONLY JSON:
 }
 Rules:
 - Sum of targetSec MUST equal ${targetDurationSec}.
-- Prefer chapters of ~${CHAPTER_CHUNK_SEC}s (range 70–110s). For listicles (colors, animals, numbers), each item can be its own chapter.
+- Prefer chapters of ~${CHAPTER_CHUNK_SEC}s (range 70–110s). For listicles, each item can be its own chapter.
 - Must include introduction, body (one or more), conclusion.
-- Keep topics very simple for toddlers: one clear idea per chapter, friendly and playful.
+- Topic, audience and tone come from the brief — match them; do not assume a children's video.
+- One clear idea per chapter.
 - Do NOT write full narration yet — only chapter plan.`;
 
     try {
@@ -653,23 +680,22 @@ ${styleHint}`,
   }
 
   // —— Phase 2: narration per chapter → split scenes local (không gọi AI split) ——
-  const writeNarrationSystem = `You write spoken voiceover for ONE chapter of a SIMPLE kids learning video (Pingpong / preschool style).
+  const writeNarrationSystem = `You write spoken voiceover for ONE chapter of a video.
 Return ONLY JSON: { "narration": string } OR { "continuation": string }
-Language: ${input.language}
-Audience: toddlers / young children.
-Voice: warm, friendly teacher or playful host — never scary, sarcastic, or complex.
-Sentences: SHORT and clear (about 4–10 words each). Repeat key words gently for learning.
-Story continuity: keep one recurring cast/idea across chapters so the video feels like one continuous journey, not disconnected clips.
+Language: write the narration in the SAME language the brief is written in (detected: ${language}). If the brief explicitly asks for another language, follow the brief instead.
+Audience and tone: taken from the brief. Match it — do not default to a children's video.
+Voice: clear and natural for that audience; spoken, not written prose.
+Sentences: short enough to say out loud comfortably.
+Continuity: keep one through-line across chapters so the video feels like one piece, not disconnected clips.
 No stage directions, no bullet points, no markdown, no on-screen text instructions.
 Do NOT summarize. Aim for the exact word budget.
-${styleHint}
-Recurring cast hint: ${seriesCast}`;
+${styleHint}${seriesCast ? `\nRecurring cast hint: ${seriesCast}` : ''}`;
 
   // Model đôi lúc nhả cả đề bài + đoạn lặp vô nghĩa vào chuỗi narration (JSON
   // vẫn hợp lệ nên parse qua được) → lọc ngay khi nhận, đừng để chảy xuống TTS.
   const cleanNarration = (raw: unknown): string =>
     sanitizeNarrationText(String(raw || ''), {
-      dropForeignSentences: isCjkLanguage(input.language),
+      dropForeignSentences: isCjkLanguage(language),
     });
 
   const previousNarrationTail: string[] = [];
@@ -679,7 +705,7 @@ Recurring cast hint: ${seriesCast}`;
     if (i > 0) await sleep(INTER_CALL_DELAY_MS);
 
     const chapter = chapters[i];
-    const budget = spokenBudgetForDurationSec(chapter.targetSec, input.language);
+    const budget = spokenBudgetForDurationSec(chapter.targetSec, language);
     const minUnits = Math.round(budget.amount * MIN_NARRATION_COVERAGE);
     const minSec = chapter.targetSec * MIN_NARRATION_COVERAGE;
     const prevContext =
@@ -694,7 +720,7 @@ Recurring cast hint: ${seriesCast}`;
     let narration = '';
     for (let attempt = 1; attempt <= MAX_NARRATION_CONTINUATIONS; attempt++) {
       const spokenSec = estimateSpokenSeconds(narration, 0);
-      const haveUnits = countSpokenBudgetUnits(narration, input.language);
+      const haveUnits = countSpokenBudgetUnits(narration, language);
       if (spokenSec >= minSec && haveUnits >= minUnits * 0.7) break;
       const needMore = Math.max(0, minUnits - haveUnits);
 
@@ -713,7 +739,7 @@ Chapter ${i + 1}/${chapters.length}: "${chapter.name}" (${chapter.section})
 Summary: ${chapter.summary}
 TIME: ${chapter.targetSec}s → write enough spoken content for ~${chapter.targetSec}s
 Budget: ~${budget.amount} ${budget.unitLabel} (≥ ${minUnits} ${budget.unitLabel}).
-${isCjkLanguage(input.language) ? 'This is a CJK language: count characters (not English-style space-separated words).' : ''}
+${isCjkLanguage(language) ? 'This is a CJK language: count characters (not English-style space-separated words).' : ''}
 
 ${prevContext}
 
@@ -776,7 +802,7 @@ Do not restart. Do not summarize the previous text.`,
       narration,
       chapter,
       plan.typicalBeatSec,
-      input.language,
+      language,
       plan.maxBeatSec,
       continuityOpts
     );
@@ -785,7 +811,7 @@ Do not restart. Do not summarize the previous text.`,
         chapterScenes.map((s) => s.narration_segment).join(' ') || narration,
         chapter,
         plan.typicalBeatSec,
-        input.language,
+        language,
         plan.maxBeatSec,
         continuityOpts
       );
@@ -816,7 +842,7 @@ Do not restart. Do not summarize the previous text.`,
     await sleep(INTER_CALL_DELAY_MS);
     const spoken = estimateScriptSpokenSeconds(draft.scenes);
     const deficitSec = Math.max(15, targetDurationSec - spoken);
-    const deficitBudget = spokenBudgetForDurationSec(deficitSec, input.language);
+    const deficitBudget = spokenBudgetForDurationSec(deficitSec, language);
     const bodyChapters = chapterNarrations.filter((c) => c.chapter.section === 'body');
     const targetChapter =
       bodyChapters[(fill - 1) % Math.max(1, bodyChapters.length)] ||
@@ -846,7 +872,7 @@ Return { "continuation": "<new sentences only, ≥ ${deficitBudget.amount} ${def
       targetChapter.narration,
       targetChapter.chapter,
       plan.typicalBeatSec,
-      input.language,
+      language,
       plan.maxBeatSec,
       { seriesCast, stylePrompt: resolvedStyle }
     );
@@ -897,7 +923,7 @@ Return { "continuation": "<new sentences only, ≥ ${deficitBudget.amount} ${def
     openaiModel,
     title: draft.title,
     brief: input.brief,
-    language: input.language,
+    language,
     stylePrompt: resolvedStyle,
     seriesCast,
     scenes: draft.scenes,
@@ -928,16 +954,16 @@ export async function rewriteNarrationToMatchDuration(options: {
   const ratio = target / actual;
   const tooShort = actual < target;
 
-  const system = `You adjust voiceover length to match a measured TTS runtime for a SIMPLE kids learning video (Pingpong / preschool style).
+  const system = `You adjust voiceover length to match a measured TTS runtime.
 Return ONLY valid JSON with scenes including section, chapter, visual_prompt, narration_segment, duration_hint.
 
 Rules:
 - Language: ${language}
 - Prefer keeping the same chapters and scene ideas; you MAY split/merge slightly if needed for ${MIN_SCENE_BEAT_SEC}–${MAX_SCENE_BEAT_SEC}s beats.
 - Scale spoken length ≈ ${ratio.toFixed(3)}× (${tooShort ? 'EXPAND' : 'COMPRESS'}).
-- Narration: SHORT toddler-friendly sentences, warm playful host, repeat key learning words gently (~${WORDS_PER_SECOND} words/sec).
+- Narration: keep the EXISTING tone, audience and vocabulary of the script — only change length (~${WORDS_PER_SECOND} words/sec).
 - One idea / one visual per scene. Continuous voiceover across scenes.
-- visual_prompt: English, SHORT (12–28 words), same recurring cartoon animal/toy cast in every scene, ONE simple action matching the narration, ONE simple background. No labels, no continuity notes, no quoted narration, no ages/children/real people. Brevity matters — long prompts make Veo fail.`;
+- visual_prompt: English, SHORT (12–28 words), keep the same recurring subject and look already used in the script, ONE action matching the narration, ONE background. Do not change the genre or art style. No labels, no continuity notes, no quoted narration, no ages/children/real people. Brevity matters — long prompts make Veo fail.`;
 
   const sceneLines = script.scenes
     .map((s, i) => {
@@ -1118,6 +1144,8 @@ export async function generateMusicAnimationScript(
     mediaKind: input.mediaKind,
   });
   const targetMediaCount = clampTargetSceneCount(musicSec, plan.sceneCountHint);
+  // Không còn ô Language → lấy đúng ngôn ngữ của lời bài hát đang nhập.
+  const language = input.language?.trim() || detectScriptLanguage(input.lyricText);
   const styleLine = input.stylePrompt?.trim()
     ? `Style (same in every visual_prompt): ${input.stylePrompt.trim()}`
     : `Style (same in every visual_prompt): ${KIDS_3D_TOY_STYLE}`;
@@ -1172,7 +1200,7 @@ Return ONLY JSON:
 Rules:
 ${timingRules}
 - HARD LIMIT: return about ${targetMediaCount} scenes (range ${Math.max(3, targetMediaCount - 2)}–${targetMediaCount + 2}). Typical beat ~${plan.typicalBeatSec}s (max ~${plan.maxBeatSec}s). Do NOT create one scene per lyric line if that exceeds the limit — group lines.
-- narration_segment = the lyric lines / vocal phrases that play during that scene (language: ${input.language}). Keep lyric wording faithful; you may lightly punctuate.
+- narration_segment = the lyric lines / vocal phrases that play during that scene (language: ${language}). Keep lyric wording faithful; you may lightly punctuate.
 - ${shotLine}
 - cast_lock = 15–30 ENGLISH words naming every recurring character with a few re-drawable traits (animal/toy type, main colour, one outfit piece, one signature accessory). Concrete nouns only — no story, no age, no adjectives like "beautiful". Every scene is generated independently, so this short line is what keeps the characters identical.
 - Every visual_prompt must call characters by the SAME names used in cast_lock (never "the singer" / "a mascot" if the cast has a name).
@@ -1189,7 +1217,7 @@ ${timingRules}
 
   const userText = `Song duration: ${musicSec}s (${formatDurationLabel(musicSec)})
 Target media count: ~${targetMediaCount} scenes (~${plan.typicalBeatSec}s each)
-Language / lyric language: ${input.language}
+Language / lyric language: ${language}
 ${input.songTitle ? `Title hint: ${input.songTitle}` : ''}
 ${timedBlock ? `\nSONG TIMELINE — real timestamps measured from the actual audio file:\n${timedBlock}\n` : ''}
 LYRICS / SCRIPT:

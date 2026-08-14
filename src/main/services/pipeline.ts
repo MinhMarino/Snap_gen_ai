@@ -56,6 +56,7 @@ import {
   type TranscriptWord,
 } from './openai-audio';
 import { synthesizeWithElevenLabs, resolveElevenLabsLanguageCode, resolveElevenLabsModelForLanguage } from './elevenlabs-tts';
+import { detectScriptLanguage } from '../../shared/detect-language';
 import { synthesizeContinuousNarrationWithQwen, type QwenTtsProgress } from './qwen-tts';
 import {
   DEFAULT_GENMAX_MODEL_ID,
@@ -229,6 +230,18 @@ function readNarrationCache(projectDir: string): NarrationCache | null {
 }
 
 /**
+ * Ngôn ngữ để đọc/căn timestamp: ưu tiên giá trị project cũ đã lưu, không có thì
+ * đọc thẳng từ lời bình trong script. Nhận diện tại đây (chứ không ở lúc gen
+ * script) vì đây là lúc đã có ĐÚNG đoạn text sắp được đọc.
+ */
+function resolveNarrationLanguage(language: string | undefined, script: ScriptDraft): string {
+  return (
+    language?.trim() ||
+    detectScriptLanguage(script.scenes.map((s) => s.narration_segment || '').join(' '))
+  );
+}
+
+/**
  * Voiceover là MỘT mạch đọc duy nhất. Whisper/ElevenLabs timestamps
  * cho biết mỗi narration_segment chiếm đoạn nào.
  * @param syncToSpeech khi true (vòng fit duration): duration = đoạn nói thật, không đệm silence.
@@ -270,11 +283,14 @@ async function prepareNarration(options: {
 }): Promise<NarrationBundle> {
   const { projectDir, workDir, apiKey, voice, ttsModel } = options;
   const syncToSpeech = Boolean(options.syncToSpeech);
+  // Không còn ô Language trong Studio: đọc thẳng ngôn ngữ từ chính lời sắp đọc —
+  // đây là chỗ nhận diện chắc chắn nhất (project cũ đã lưu language thì tôn trọng).
+  const language = resolveNarrationLanguage(options.language, options.script);
   // Lưới chắn cuối trước khi tốn tiền TTS: script cũ có thể đã lưu rác model
   // (đề bài bị echo, đoạn lặp "? >#"…). Làm sạch cả script luôn để text đọc,
   // timing từng scene và phụ đề đều dựa trên cùng một bản lời.
   const sanitized = sanitizeSceneNarration(options.script.scenes, {
-    dropForeignSentences: isCjkLanguage(options.language),
+    dropForeignSentences: isCjkLanguage(language),
   });
   if (sanitized.changed) {
     options = { ...options, script: { ...options.script, scenes: sanitized.scenes } };
@@ -283,7 +299,7 @@ async function prepareNarration(options: {
   const text = buildContinuousNarrationText(scenes);
   if (!text) throw new Error('Kịch bản chưa có lời thoại (narration_segment) để tạo voiceover.');
 
-  const languageCode = resolveElevenLabsLanguageCode(options.language);
+  const languageCode = resolveElevenLabsLanguageCode(language);
   const resolvedElModel =
     options.ttsProvider === 'elevenlabs'
       ? resolveElevenLabsModelForLanguage(options.elevenLabsModelId, languageCode)
@@ -367,7 +383,7 @@ async function prepareNarration(options: {
       text,
       voiceId: options.elevenLabsVoiceId || '21m00Tcm4TlvDq8ikWAM',
       modelId: options.elevenLabsModelId || 'eleven_multilingual_v2',
-      language: options.language,
+      language,
       outDir: projectDir,
       fileName: RAW_NARRATION_FILE,
       publicOwnerId: options.elevenLabsPublicOwnerId,
@@ -397,7 +413,7 @@ async function prepareNarration(options: {
       languageType: options.qwenLanguageType,
       endpointId: options.runpodEndpointId,
       instruct: irodoriInstruct || undefined,
-      language: options.language,
+      language,
       outDir: projectDir,
       fileName: RAW_NARRATION_FILE,
       // Bỏ Whisper — timing theo tỉ lệ ký tự, tiết kiệm 20–60s+.
@@ -425,7 +441,7 @@ async function prepareNarration(options: {
       voiceId: options.genmaxVoiceId || DEFAULT_GENMAX_VOICE_ID,
       backend: options.genmaxBackend || 'elevenlabs',
       modelId: options.genmaxModelId || DEFAULT_GENMAX_MODEL_ID,
-      language: options.language,
+      language,
       speed: options.genmaxSpeed,
       outDir: projectDir,
       fileName: RAW_NARRATION_FILE,
@@ -447,7 +463,7 @@ async function prepareNarration(options: {
       scenes,
       voice,
       ttsModel,
-      language: options.language,
+      language,
       outDir: projectDir,
       fileName: RAW_NARRATION_FILE,
     });
@@ -742,7 +758,7 @@ async function prepareNarrationFittingTarget(options: {
       apiKey: options.apiKey,
       openaiModel: options.openaiModel,
       script,
-      language: options.language || DEFAULT_PROJECT_LANGUAGE,
+      language: resolveNarrationLanguage(options.language, script),
       targetDurationSec: target,
       actualAudioSec: raw,
     });
@@ -1175,7 +1191,10 @@ export async function runGenerateJob(input: GenerateJobInput): Promise<GenerateJ
         projectId: meta.id,
         apiKey: keys.openaiApiKey,
         lyricText: getProject(meta.id).draft?.lyricText,
-        language: getProject(meta.id).draft?.language,
+        // Whisper căn lời hát: ngôn ngữ đọc thẳng từ lyric đang có.
+        language:
+          getProject(meta.id).draft?.language ||
+          detectScriptLanguage(getProject(meta.id).draft?.lyricText),
       });
       const retimed = resolveMusicSceneTiming(input.script.scenes, timing, musicDur);
       script = { ...input.script, scenes: retimed.scenes };
@@ -1934,7 +1953,7 @@ export async function importExternalNarration(options: {
     const transcribed = await transcribeWithWords({
       apiKey: keys.openaiApiKey.trim(),
       audioPath,
-      language: draft?.language,
+      language: draft?.language || detectScriptLanguage(text),
       outDir: projectDir,
     });
     words = transcribed.words;

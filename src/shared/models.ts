@@ -29,13 +29,12 @@ export const DEFAULT_IMAGE_MODEL_ID = 'nano-banana-2';
 export const DEFAULT_PROJECT_LANGUAGE = 'English';
 
 /**
- * Style mặc định: video học tập đơn giản cho trẻ nhỏ, cảm hứng Pingpong / kids cartoon.
- * Visual: mascot động vật & đồ vật — KHÔNG mô tả trẻ em (Snapgen/Google chặn).
- */
-/**
  * Vẻ ngoài kênh thiếu nhi YouTube: 3D bóng bẩy kiểu đồ chơi (Cocomelon / Kids TV).
  * Nhân vật là xe cộ - đồ vật - con vật có MẮT TO và miệng cười — thứ làm nên
  * thể loại này, và cũng là thứ tránh được lệnh chặn của Google vì không có trẻ em.
+ *
+ * CHỈ dùng cho dự án hoạt hình nhạc (music-animation). Dự án thường phải trung tính
+ * về thể loại — xem `GENERAL_STYLE_PROMPT`.
  */
 export const KIDS_3D_TOY_STYLE =
   'bright 3D cartoon animation for young children, glossy toy-like characters with big shiny ' +
@@ -47,7 +46,19 @@ export const KIDS_FLAT_2D_STYLE =
   'very simple flat 2D kids cartoon, thick clean outlines, bright cheerful colors, ' +
   'soft rounded shapes, big friendly eyes, minimal detail, plain empty background';
 
-export const DEFAULT_STYLE_PROMPT = KIDS_3D_TOY_STYLE;
+/**
+ * Style mặc định của dự án THƯỜNG (standard) — trung tính về thể loại.
+ * Chỉ nói về chất lượng khung hình và tính nhất quán giữa các scene, KHÔNG áp
+ * kiểu vẽ nào: chủ đề là gì thì visual đi theo brief + style prompt người dùng nhập.
+ *
+ * Bản trước để `DEFAULT_STYLE_PROMPT = KIDS_3D_TOY_STYLE`, nên mọi dự án thường
+ * (tài liệu, review, kể chuyện người lớn…) đều bị kéo về hoạt hình thiếu nhi.
+ */
+export const GENERAL_STYLE_PROMPT =
+  'consistent look across every shot, one clear subject, natural lighting, ' +
+  'clean uncluttered background, sharp and well composed';
+
+export const DEFAULT_STYLE_PROMPT = GENERAL_STYLE_PROMPT;
 
 /**
  * Style mặc định cho dự án hoạt hình nhạc — dùng chung vẻ 3D đồ chơi.
@@ -571,73 +582,13 @@ export function withStylePrompt(visualPrompt: string, stylePrompt?: string): str
   return `${visualPrompt.trim()}. Style: ${style}`;
 }
 
-/** Gợi ý văn hóa / nhân vật theo language setting — dùng cho image prompt. */
-export function resolveVisualLocaleHint(language?: string | null): string | null {
-  const value = String(language || '').toLowerCase();
-  if (!value) return null;
-  if (/japan|日本語|nihongo|tiếng nhật|nhật bản|\bja\b/.test(value)) {
-    return 'Japanese cultural setting; when people appear, depict them as Japanese with accurate age, clothing, and environment matching the narration';
-  }
-  if (/việt|vietnam|tiếng việt|\bvi\b/.test(value)) {
-    return 'Vietnamese cultural setting; when people appear, depict them as Vietnamese with accurate age, clothing, and environment matching the narration';
-  }
-  if (/korean|한국어|hangul|tiếng hàn|hàn quốc|\bko\b/.test(value)) {
-    return 'Korean cultural setting; when people appear, depict them as Korean with accurate age, clothing, and environment matching the narration';
-  }
-  if (/chinese|中文|mandarin|cantonese|tiếng trung|trung quốc|\bzh\b/.test(value)) {
-    return 'Chinese cultural setting; when people appear, depict them as Chinese with accurate age, clothing, and environment matching the narration';
-  }
-  if (/english|tiếng anh|\ben\b/.test(value)) {
-    return 'English-language / Western cultural setting when people and places appear; match the narration';
-  }
-  if (/thai|ไทย|tiếng thái|\bth\b/.test(value)) {
-    return 'Thai cultural setting; when people appear, depict them as Thai with accurate age, clothing, and environment matching the narration';
-  }
-  return `Cultural setting matching language "${String(language).trim()}"; people and places must match that locale and the narration`;
-}
-
-/** Chỉ câu luật văn hóa — dùng chung cho standard lock và music wrapper. */
-function resolveCultureRule(language?: string | null): string {
-  const label = String(language || '').trim() || DEFAULT_PROJECT_LANGUAGE;
-  const value = label.toLowerCase();
-
-  if (/japan|日本語|nihongo|tiếng nhật|nhật bản|\bja\b/.test(value)) {
-    return 'People, places, props, clothing, and atmosphere MUST match Japanese culture when applicable.';
-  }
-  if (/việt|vietnam|tiếng việt|\bvi\b/.test(value)) {
-    return 'People, places, props, clothing, and atmosphere MUST match Vietnamese culture when applicable.';
-  }
-  if (/korean|한국어|hangul|tiếng hàn|hàn quốc|\bko\b/.test(value)) {
-    return 'People, places, props, clothing, and atmosphere MUST match Korean culture when applicable.';
-  }
-  if (/chinese|中文|mandarin|cantonese|tiếng trung|trung quốc|\bzh\b/.test(value)) {
-    return 'People, places, props, clothing, and atmosphere MUST match Chinese culture when applicable.';
-  }
-  if (/english|tiếng anh|\ben\b/.test(value)) {
-    return 'People, places, props, clothing, and atmosphere should match Western/English cultural context when applicable.';
-  }
-  if (/thai|ไทย|tiếng thái|\bth\b/.test(value)) {
-    return 'People, places, props, clothing, and atmosphere MUST match Thai culture when applicable.';
-  }
-  return `People, places, props, clothing, and atmosphere should match the "${label}" cultural context when applicable.`;
-}
-
 /**
- * Khóa visual: khớp văn hóa theo Language (kịch bản/TTS) nhưng không hiện chữ trên màn hình.
+ * GHI CHÚ: các hàm bối cảnh văn hoá theo ngôn ngữ (`resolveVisualLocaleHint`,
+ * `resolveCultureRule`, `resolveVisualLanguageLock`) đã bị xoá cùng ô Language.
+ * Ngôn ngữ giờ tự nhận diện từ lời bình (`detect-language.ts`) và chỉ dùng cho
+ * TTS + cách đếm ngân sách lời, không còn can thiệp vào prompt hình.
  */
-export function resolveVisualLanguageLock(language?: string | null): string {
-  return (
-    `VISUAL RULE (mandatory): ${resolveCultureRule(language)} ` +
-    `Do NOT show any readable text, subtitles, captions, signs, labels, screens, books, posters, or UI text in the frame. ` +
-    `Purely visual storytelling — no written language on screen.`
-  );
-}
 
-/**
- * Prompt gửi Snapgen: visual + style + locale + khóa language.
- * Không gắn narration — lời thoại chỉ dùng cho TTS/subtitle, không đưa vào prompt gen media.
- * visual_prompt ưu tiên English mô tả hình; không hiện chữ trên màn hình.
- */
 /**
  * Chỉ thị/meta lọt vào visual_prompt qua các bước viết kịch bản cũ.
  * Veo nhận nguyên văn những câu này rồi cố VẼ chúng (nhất là narration trong ngoặc
@@ -771,16 +722,12 @@ export function compactVisualPrompt(
   return `${(lastSpace > 0 ? head.slice(0, lastSpace) : head).trim()}.`;
 }
 
-/** Bối cảnh văn hóa dạng ngắn — bỏ mệnh đề "depict people with accurate age…". */
-function shortLocaleHint(language?: string | null): string | null {
-  const full = resolveVisualLocaleHint(language);
-  if (!full) return null;
-  const head = full.split(';')[0].trim();
-  return /english|western/i.test(head) ? null : head;
-}
-
 // ---------------------------------------------------------------------------
-// Luật "hoạt hình hoá mọi thứ + cực đơn giản" — dùng chung cho cả hai wrapper
+// Luật "hoạt hình hoá mọi thứ + cực đơn giản" — CHỈ cho hoạt hình nhạc thiếu nhi
+//
+// Trước đây cả hai wrapper dùng chung khối này, nên dự án thường bị ép thành
+// hoạt hình: "cinematic" bị đổi thành "bright cheerful", "realistic" thành
+// "cartoon", và mọi prompt bị nối thêm luật cartoon/nhún nhảy.
 // ---------------------------------------------------------------------------
 
 /**
@@ -884,36 +831,45 @@ function simplifyBusyScene(text: string): string {
 }
 
 /**
- * Prompt gửi Snapgen: mô tả hình NGẮN + style + luật hoạt hình + "no text".
+ * Chuyển động cho dự án THƯỜNG: một hành động rõ ràng, máy quay ổn định.
+ * Trung tính về thể loại — chỉ chặn thứ Veo Fast hay làm hỏng (hành động dồn dập,
+ * nhiều cú máy trong một shot), không quy định phong cách.
+ */
+export const STEADY_MOTION_RULE =
+  'one clear continuous action, steady camera, no fast cuts';
+
+/**
+ * Prompt gửi Snapgen cho dự án THƯỜNG: mô tả hình NGẮN + style + "no text".
  * Không gắn narration — lời thoại chỉ dùng cho TTS/subtitle.
  *
- * Cố tình KHÔNG dùng `resolveVisualLanguageLock` nữa: câu đó liệt kê hàng loạt thứ
- * cấm ("signs, labels, screens, books, posters…") nên chính nó gợi model vẽ ra,
- * và mệnh đề "depict people with accurate age" trong locale hint là lý do video
- * thiếu nhi hay bị Google chặn vì nghi mô tả trẻ em.
+ * TRUNG TÍNH về thể loại: không nối luật cartoon, không đơn giản hoá cảnh, không
+ * đổi từ khoá phong cách. Kiểu hình do brief + style prompt người dùng quyết định.
+ * Bản trước chạy `simplifyBusyScene` và nối `CARTOON_WORLD_RULE` /
+ * `SIMPLE_STAGING_RULE` — tức mọi dự án thường đều bị biến thành hoạt hình thiếu nhi.
+ *
+ * Cố tình KHÔNG dùng `resolveVisualLanguageLock`: câu đó liệt kê hàng loạt thứ
+ * cấm ("signs, labels, screens, books, posters…") nên chính nó gợi model vẽ ra.
+ *
+ * Cũng KHÔNG còn mệnh đề bối cảnh văn hoá theo ngôn ngữ: ngôn ngữ giờ tự nhận
+ * diện từ lời bình, không phải lựa chọn của người dùng nữa — lấy nó suy ra bối
+ * cảnh hình là đoán mò (cảnh vũ trụ, cảnh sản phẩm không có "bối cảnh Việt Nam").
+ * Muốn bối cảnh nào thì viết vào brief hoặc style prompt.
  */
 export function buildSceneImagePrompt(options: {
   visualPrompt: string;
-  language?: string | null;
   stylePrompt?: string;
-  /** 'video' → gắn thêm luật chuyển động nhún/lắc. */
+  /** 'video' → gắn thêm luật một hành động / máy quay ổn định. */
   mediaKind?: string | null;
 }): string {
-  const visual = simplifyBusyScene(compactVisualPrompt(options.visualPrompt || ''));
+  const visual = compactVisualPrompt(options.visualPrompt || '');
   const parts = [visual.replace(/\.*$/, '')];
-
-  const locale = shortLocaleHint(options.language);
-  if (locale && !new RegExp(locale.split(' ')[0], 'i').test(visual)) {
-    parts.push(locale);
-  }
 
   const style = (options.stylePrompt || DEFAULT_STYLE_PROMPT).trim().replace(/\.*$/, '');
   if (style && !visual.toLowerCase().includes(style.toLowerCase().slice(0, 30))) {
     parts.push(style);
   }
 
-  parts.push(CARTOON_WORLD_RULE, SIMPLE_STAGING_RULE);
-  if (options.mediaKind === 'video') parts.push(SIMPLE_MOTION_RULE);
+  if (options.mediaKind === 'video') parts.push(STEADY_MOTION_RULE);
   parts.push('no text');
   return parts.filter(Boolean).join('. ').replace(/\s+/g, ' ').trim() + '.';
 }
@@ -957,7 +913,6 @@ const MUSIC_STILL_FRAME_RULE = 'one still frame, no camera movement, sharp and c
 
 export interface MusicScenePromptOptions {
   visualPrompt: string;
-  language?: string | null;
   stylePrompt?: string;
   /**
    * Cast/style bible ngắn, LẶP NGUYÊN VĂN ở mọi scene — cách rẻ nhất để chống
@@ -1031,11 +986,8 @@ export function buildMusicSceneImagePrompt(options: MusicScenePromptOptions): st
     !!style && style.length >= 12 && visual.toLowerCase().includes(style.toLowerCase());
   if (style && !styleAlready) parts.push(style);
 
-  // Bối cảnh văn hóa: chỉ một mệnh đề ngắn, và bỏ hẳn với English/Western
-  // (`shortLocaleHint`) — mascot hoạt hình phẳng thì câu này chỉ là nhiễu.
-  const locale = shortLocaleHint(options.language);
-  if (locale && !new RegExp(locale.split(' ')[0], 'i').test(visual)) parts.push(locale);
-
+  // Không còn mệnh đề bối cảnh văn hoá theo ngôn ngữ — xem chú thích ở
+  // `buildSceneImagePrompt`. Với mascot hoạt hình thì câu đó vốn cũng chỉ là nhiễu.
   if (options.stillFrame) parts.push(MUSIC_STILL_FRAME_RULE);
   else if (options.mediaKind === 'video') parts.push(SIMPLE_MOTION_RULE);
 
@@ -1084,6 +1036,16 @@ export const SAFE_SUBJECT_RULE =
   'or public figures. No copyrighted, branded or third-party characters, no brand logos.';
 
 /**
+ * Bản trung tính cho dự án THƯỜNG: vẫn chặn đúng thứ Google chặn (trẻ em, người
+ * thật, nhân vật bản quyền) nhưng KHÔNG ép chủ thể thành mascot hoạt hình —
+ * dự án thường có thể là tài liệu, review, kể chuyện với nhân vật người lớn.
+ */
+export const GENERAL_SAFE_SUBJECT_RULE =
+  'SAFETY: all characters are original fictional adults. No children, babies or ' +
+  'toddlers. No real people, celebrities or public figures. No copyrighted, branded ' +
+  'or third-party characters, no brand logos.';
+
+/**
  * Bản NGẮN, viết theo hướng khẳng định — dùng cho prompt bình thường của hoạt hình
  * nhạc thiếu nhi. SAFE_SUBJECT_RULE đầy đủ (4 câu cấm) chỉ gắn khi đã bị RAI chặn
  * và phải viết lại prompt: ở lượt đầu nó dài hơn cả phần tả hình.
@@ -1120,6 +1082,19 @@ const CHILD_TERM_REPLACEMENTS: Array<[RegExp, string]> = [
   [/\b(childlike|childish|youthful innocence)\b/gi, 'playful'],
 ];
 
+/**
+ * Bản trung tính cho dự án thường: trẻ em → người lớn, KHÔNG ép thành mascot.
+ * Đổi "a little girl reading" thành "a friendly cartoon mascot reading" trong một
+ * video tài liệu là hỏng cảnh, dù prompt có qua được kiểm duyệt.
+ */
+const GENERAL_CHILD_TERM_REPLACEMENTS: Array<[RegExp, string]> = [
+  [new RegExp(`\\b(?:a|an|the)\\s+${CHILD_QUALIFIERS}(?:${CHILD_NOUNS})\\b`, 'gi'), 'an adult'],
+  [new RegExp(`\\b${CHILD_QUALIFIERS}(?:${CHILD_NOUNS})\\b`, 'gi'), 'adults'],
+  [/\b(kindergarten|nursery|playschool|elementary school|primary school|school bus)\b/gi,
+    'town setting'],
+  [/\b(childlike|childish|youthful innocence)\b/gi, 'lighthearted'],
+];
+
 /** Người thật / nhân vật bản quyền — Google chặn chắc chắn, xử ngay từ mức 1. */
 const LIKENESS_TERM_REPLACEMENTS: Array<[RegExp, string]> = [
   [/\b(celebrity|celebrities|famous singer|pop star|movie star|influencer)\b/gi,
@@ -1138,6 +1113,7 @@ const CLEANUP_REPLACEMENTS: Array<[RegExp, string]> = [
   [/\b(a|an|the)\s+(a|an|the)\b/gi, '$1'],
   [/\bfriendly cartoon mascots?\s+friendly cartoon mascots?\b/gi, 'friendly cartoon mascots'],
   [/\banimal mascot\s+animal mascot\b/gi, 'animal mascots'],
+  [/\b(adults?)\s+\1\b/gi, '$1'],
   [/\s+([,.;:])/g, '$1'],
   [/([,.;:])\1+/g, '$1'],
 ];
@@ -1150,29 +1126,49 @@ function applyReplacements(text: string, pairs: Array<[RegExp, string]>): string
 
 /**
  * Viết lại prompt an toàn hơn sau khi bị RAI chặn.
- *  level 1 — xóa mốc tuổi, đổi từ chỉ trẻ em → mascot, bỏ tên thương hiệu /
- *            nhân vật bản quyền, gắn SAFE_SUBJECT_RULE.
- *  level 2 — thêm: ép MỌI chủ thể thành mascot động vật phi-người (phương án cuối).
+ *  level 1 — xóa mốc tuổi, đổi từ chỉ trẻ em, bỏ tên thương hiệu / nhân vật
+ *            bản quyền, gắn luật SAFETY.
+ *  level 2 — phương án cuối: hoạt hình nhạc ép mọi chủ thể thành mascot động vật;
+ *            dự án thường chỉ ép thành nhân vật hư cấu người lớn (giữ đúng thể loại).
  */
-export function sanitizeUnsafePrompt(prompt: string, level: number): string {
+export function sanitizeUnsafePrompt(
+  prompt: string,
+  level: number,
+  options?: {
+    /** true (mặc định) = luật thiếu nhi: mọi chủ thể thành mascot hoạt hình. */
+    cartoonSubjects?: boolean;
+  }
+): string {
   const src = String(prompt || '').trim();
   if (!src || level <= 0) return src;
+  const cartoon = options?.cartoonSubjects !== false;
 
   let out = src;
   for (const re of AGE_PATTERNS) out = out.replace(re, ' ');
-  out = applyReplacements(out, CHILD_TERM_REPLACEMENTS);
+  out = applyReplacements(
+    out,
+    cartoon ? CHILD_TERM_REPLACEMENTS : GENERAL_CHILD_TERM_REPLACEMENTS
+  );
   out = applyReplacements(out, LIKENESS_TERM_REPLACEMENTS);
 
   if (level >= 2) {
-    out = applyReplacements(out, [
-      [/\b(men|women|people|humans|persons|characters)\b/gi, 'animal mascots'],
-      [/\b(man|woman|person|human|character)\b/gi, 'animal mascot'],
-    ]);
-    out = `${out} All subjects are non-human friendly animal mascots in a simple cartoon world.`;
+    if (cartoon) {
+      out = applyReplacements(out, [
+        [/\b(men|women|people|humans|persons|characters)\b/gi, 'animal mascots'],
+        [/\b(man|woman|person|human|character)\b/gi, 'animal mascot'],
+      ]);
+      out = `${out} All subjects are non-human friendly animal mascots in a simple cartoon world.`;
+    } else {
+      // Không đổi danh từ chỉ người: dự án thường thường CẦN người trong khung.
+      // Chỉ nói rõ đây là nhân vật hư cấu do mình dựng, không giống ai có thật.
+      out = `${out} All people are original fictional adult characters, not resembling any real person.`;
+    }
   }
 
   out = applyReplacements(out, CLEANUP_REPLACEMENTS);
-  if (!out.toUpperCase().includes('SAFETY:')) out = `${out} ${SAFE_SUBJECT_RULE}`;
+  if (!out.toUpperCase().includes('SAFETY:')) {
+    out = `${out} ${cartoon ? SAFE_SUBJECT_RULE : GENERAL_SAFE_SUBJECT_RULE}`;
+  }
   return out.replace(/\s+/g, ' ').trim();
 }
 

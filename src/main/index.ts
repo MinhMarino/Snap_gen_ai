@@ -2,7 +2,8 @@ import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron';
 import fs from 'node:fs';
 import path from 'node:path';
 import { IPC } from '../shared/ipc';
-import { IMAGE_FAMILIES, IMAGE_MODELS, VIDEO_FAMILIES, VIDEO_MODELS, DEFAULT_PROJECT_LANGUAGE } from '../shared/models';
+import { IMAGE_FAMILIES, IMAGE_MODELS, VIDEO_FAMILIES, VIDEO_MODELS } from '../shared/models';
+import { detectScriptLanguage } from '../shared/detect-language';
 import type {
   ApiKeys,
   AppSettings,
@@ -307,7 +308,8 @@ function registerIpc(): void {
         settings.openaiModel ||
         'gpt-4o-mini';
       const images = loadCharacterDataUrls(projectId);
-      const language = input?.language || draft.language || DEFAULT_PROJECT_LANGUAGE;
+      // Không còn ô Language: lời bài hát viết tiếng nào thì Whisper căn theo tiếng đó.
+      const language = input?.language || draft.language || detectScriptLanguage(lyricText);
       // Nghe file nhạc để biết từng câu hát vang lên lúc nào — không có bước này
       // thì độ dài cảnh chỉ là suy đoán từ số chữ và hình luôn lệch nhạc.
       // Kết quả cache theo hash audio nên Generate lại không gọi API lần nữa.

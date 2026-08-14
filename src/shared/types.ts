@@ -201,7 +201,11 @@ export interface ScriptDraft {
 
 export interface GenerateIdeaInput {
   brief: string;
-  language: string;
+  /**
+   * Bỏ trống (mặc định) → tự nhận diện từ brief bằng `detectScriptLanguage`.
+   * Studio không còn ô Language; field giữ lại cho project cũ đã lưu giá trị.
+   */
+  language?: string;
   /** Desired total video length in seconds. Scene count & per-scene lengths are derived. */
   targetDurationSec: number;
   /** Optional override; otherwise estimated from target duration. */
@@ -241,7 +245,8 @@ export interface MusicTimingInfo {
 
 export interface GenerateMusicAnimationScriptInput {
   lyricText: string;
-  language: string;
+  /** Bỏ trống → tự nhận diện từ lời bài hát. */
+  language?: string;
   /**
    * Lời hát kèm mốc thời gian thật. Có thì AI chia cảnh theo câu hát thay vì
    * đoán độ dài từ số chữ — đây là thứ quyết định hình có khớp nhạc hay không.
@@ -293,7 +298,11 @@ export interface ProjectDraft {
   /** Loại dự án — standard | music-animation */
   projectKind?: ProjectKind;
   brief: string;
-  language: string;
+  /**
+   * Ngôn ngữ lời bình. Project MỚI không lưu field này nữa (tự nhận diện từ
+   * brief / narration mỗi lần dùng); giữ optional để project cũ đọc lại được.
+   */
+  language?: string;
   sceneCount: number;
   /**
    * Mục tiêu số ảnh/video khi gen script (cost control).

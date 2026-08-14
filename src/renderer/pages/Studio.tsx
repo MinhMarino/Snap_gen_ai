@@ -231,7 +231,6 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
   const [modelId, setModelId] = useState(defaultModelIdForKind('video'));
   const [brief, setBrief] = useState('');
   const [stylePrompt, setStylePrompt] = useState(DEFAULT_STYLE_PROMPT);
-  const [language, setLanguage] = useState(DEFAULT_PROJECT_LANGUAGE);
   /** Free-text minutes; may be empty while typing. */
   const [durationInput, setDurationInput] = useState(String(DEFAULT_DURATION_MIN));
   /** dense | normal | economy | custom — kiểm soát số ảnh/video. */
@@ -680,7 +679,6 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
         const draft = detail.draft;
         if (draft) {
           setBrief(draft.brief);
-          setLanguage(draft.language);
           setTargetDurationMin(minutesFromSeconds(draft.targetDurationSec));
           setMediaKind(draft.mediaKind ?? 'video');
           {
@@ -864,7 +862,6 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
   ) => ({
     projectKind,
     brief,
-    language,
     sceneCount: nextScript?.scenes.length ?? scenePlan.sceneCountHint,
     targetMediaCount: clampTargetSceneCount(
       isMusicAnimation && musicDurationSec && musicDurationSec > 0
@@ -909,7 +906,6 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
       name,
       projectKind,
       brief,
-      language,
       sceneCount: scenePlan.sceneCountHint,
       targetDurationSec: scenePlan.targetDurationSec,
       family: family as VideoFamily | ImageFamily,
@@ -943,7 +939,6 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
       name,
       projectKind,
       brief,
-      language,
       sceneCount: scenePlan.sceneCountHint,
       targetDurationSec: scenePlan.targetDurationSec,
       family: family as VideoFamily | ImageFamily,
@@ -989,7 +984,6 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
       name,
       projectKind,
       brief,
-      language,
       sceneCount: scenePlan.sceneCountHint,
       targetDurationSec: scenePlan.targetDurationSec,
       family: family as VideoFamily | ImageFamily,
@@ -1254,11 +1248,10 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
         scenePlan.sceneCountHint
       );
       pushActivityLog(
-        `Gọi ChatGPT viết kịch bản (~${formatDurationLabel(scenePlan.targetDurationSec)}, ~${mediaTarget} ${mediaKind === 'image' ? 'ảnh' : 'video'}, ${language})…`
+        `Gọi ChatGPT viết kịch bản (~${formatDurationLabel(scenePlan.targetDurationSec)}, ~${mediaTarget} ${mediaKind === 'image' ? 'ảnh' : 'video'})…`
       );
       const draft = await window.studio.generateScript({
         brief: brief.trim(),
-        language,
         targetDurationSec: scenePlan.targetDurationSec,
         sceneCount: mediaTarget,
         family: family as VideoFamily | ImageFamily,
@@ -1529,7 +1522,6 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
         resolution,
         mode: mode || undefined,
         brief,
-        language,
         mediaKind,
         stylePrompt: stylePrompt.trim() || undefined,
         regenerateSceneIds: payload.regenerateSceneIds,
@@ -1737,6 +1729,14 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
       setHasNarration(true);
       setNarrationPath(result.audioPath);
       setProjectKind('music-animation');
+      // Style mặc định của dự án thường giờ là trung tính (GENERAL_STYLE_PROMPT).
+      // Chuyển sang hoạt hình nhạc mà người dùng chưa tự sửa style thì phải đổi
+      // sang style thiếu nhi, không thì MV ra khung trung tính không đúng thể loại.
+      setStylePrompt((current) =>
+        current.trim() === DEFAULT_STYLE_PROMPT
+          ? defaultStylePromptForProjectKind('music-animation')
+          : current
+      );
       setToast({ type: 'ok', text: `Đã import nhạc (~${Math.round(result.durationSec)}s).` });
     } catch (err) {
       setToast({ type: 'error', text: err instanceof Error ? err.message : String(err) });
@@ -1763,7 +1763,6 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
       pushActivityLog(`Mục tiêu ~${mediaTarget} shot (~${formatDurationLabel(scenePlan.typicalBeatSec)}/scene)…`);
       const result = await window.studio.generateMusicAnimationScript(id, {
         lyricText,
-        language,
         stylePrompt,
         openaiChatModel,
         songTitle: projectName,
@@ -1945,7 +1944,7 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
               id="brief"
               value={brief}
               onChange={(event) => setBrief(event.target.value)}
-              placeholder="Colors for kids: red apple, blue ball, yellow sun..."
+              placeholder="Chủ đề, đối tượng xem, giọng kể… vd: 5 mẹo tiết kiệm điện cho hộ gia đình"
             />
           </div>
           <div className="field compact-field">
@@ -1955,20 +1954,8 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
               className="small-textarea"
               value={stylePrompt}
               onChange={(event) => setStylePrompt(event.target.value)}
-              placeholder="Simple Pingpong-style kids learning cartoon..."
+              placeholder="vd: cinematic documentary, natural light — hoặc: flat 2D kids cartoon"
             />
-          </div>
-          <div className="field compact-field">
-            <label htmlFor="language">Language (script / TTS)</label>
-            <input
-              id="language"
-              value={language}
-              onChange={(event) => setLanguage(event.target.value)}
-              placeholder="English"
-            />
-            <small className="field-hint">
-              Script & voiceover language. Visuals stay English, no on-screen text.
-            </small>
           </div>
           <div className="field compact-field duration-field">
             <div className="duration-field-head">
