@@ -24,6 +24,7 @@ import {
   findScenesWithShortNarration,
   formatDurationLabel,
   isCjkLanguage,
+  looksLikeLeakedNarration,
   MAX_SCENE_BEAT_SEC,
   mergeUndersizedScenes,
   MIN_NARRATION_COVERAGE,
@@ -445,7 +446,13 @@ function splitNarrationFallback(
     const excerpt = segment.replace(/\s+/g, ' ').replace(/["“”]/g, '').trim().slice(0, 90);
     const camera = cameraAngles[index % cameraAngles.length];
     const setBase = setBases[index % setBases.length];
-    const action = excerpt ? `showing ${excerpt}` : fallbackActions[index % fallbackActions.length];
+    // Chỉ nhét narration vào prompt khi wrapper sẽ GIỮ nó. Lời thoại tiếng Nhật/
+    // Việt… bị wrapper cắt (nếu không model vẽ luôn chữ lên hình), để lại câu
+    // prompt què "…mascot showing." → thà dùng hành động chung ngay từ đầu.
+    const usableExcerpt = excerpt && !looksLikeLeakedNarration(excerpt) ? excerpt : '';
+    const action = usableExcerpt
+      ? `showing ${usableExcerpt}`
+      : fallbackActions[index % fallbackActions.length];
 
     // Mô tả NGẮN: một chủ thể + một hành động + một nền đơn giản.
     // Bản cũ ~150 chữ với 8 nhãn viết hoa (SUBJECT/PROP/CAMERA…) và narration trong

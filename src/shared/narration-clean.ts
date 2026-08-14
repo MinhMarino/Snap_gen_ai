@@ -40,6 +40,14 @@ const META_PATTERNS: RegExp[] = [
   /^\s*(?:narration|continuation|script|output|answer|response)\s*[:：]/i,
 ];
 
+/** Blockquote / heading rác rải giữa câu: "... ? ># ? ># ..." */
+const INLINE_MARKUP_RUN = /(?:^|\s)[?>#*|]{1,}(?:[\s?>#*|]*[?>#*|])?(?=\s|$)/g;
+
+/** Gỡ markup rác nằm GIỮA chuỗi (stripMarkupEdges chỉ lo hai đầu). */
+export function stripInlineMarkupJunk(text: string): string {
+  return text.replace(INLINE_MARKUP_RUN, ' ').replace(/\s{2,}/g, ' ').trim();
+}
+
 function stripMarkupEdges(line: string): string {
   return line
     // ```json / ``` mở đầu hoặc kết thúc
@@ -54,6 +62,14 @@ function looksLikeInstruction(line: string): boolean {
   return META_PATTERNS.some((re) => re.test(line));
 }
 
+/**
+ * Rác dạng "đề bài bị echo" cũng lọt vào visual_prompt (prompt hình được dựng từ
+ * narration) → wrapper prompt dùng lại đúng bộ nhận diện này.
+ */
+export function looksLikeLlmInstruction(text: string): boolean {
+  return looksLikeInstruction(text);
+}
+
 function latinLetterCount(text: string): number {
   return (text.match(/[A-Za-z]/g) || []).length;
 }
@@ -62,6 +78,10 @@ function latinLetterCount(text: string): number {
  * Bỏ đoạn lặp vô nghĩa. Model lỗi thường lặp cùng một mẩu hàng trăm lần —
  * TTS sẽ đọc hết chỗ đó nếu không cắt.
  */
+export function collapseLlmRepeats(text: string): string {
+  return collapseRepeats(text);
+}
+
 function collapseRepeats(text: string): string {
   // 1) Cùng một "từ" lặp liên tiếp > 2 lần → giữ 2 (lời cho trẻ có lặp thật).
   const kept: string[] = [];

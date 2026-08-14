@@ -1,4 +1,9 @@
 import { resolveAspectRatioForModel } from './output-format';
+import {
+  collapseLlmRepeats,
+  looksLikeLlmInstruction,
+  stripInlineMarkupJunk,
+} from './narration-clean';
 import type { ImageFamily, MediaKind, ModelOption, VideoFamily } from './types';
 
 export const VIDEO_FAMILIES: { id: VideoFamily; label: string }[] = [
@@ -667,6 +672,46 @@ const PROMPT_DIRECTIVE_PATTERNS: RegExp[] = [
 const MAX_VISUAL_PROMPT_CHARS = 260;
 
 /**
+ * Chữ của các hệ không phải Latin — kana/Hán/Hangul, Thái, Cyrillic, Ả Rập,
+ * Devanagari, Hebrew, Hy Lạp. Prompt hình luôn tiếng Anh, nên những ký tự này
+ * trong prompt chỉ có thể là narration lọt vào.
+ */
+const NON_LATIN_RANGES =
+  '\\u0370-\\u03FF\\u0400-\\u04FF\\u0590-\\u05FF\\u0600-\\u06FF\\u0900-\\u097F' +
+  '\\u0E00-\\u0E7F\\u3040-\\u30FF\\u3400-\\u4DBF\\u4E00-\\u9FFF\\uF900-\\uFAFF' +
+  '\\uFF66-\\uFF9F\\uAC00-\\uD7AF';
+const NON_LATIN_SCRIPT_CHAR = new RegExp(`[${NON_LATIN_RANGES}]`, 'g');
+
+/**
+ * Cùng dải chữ trên, kèm dấu câu CJK — dùng để CẮT ĐÚNG ĐOẠN lời thoại lọt
+ * vào và giữ lại phần tiếng Anh quanh nó. Bỏ cả mệnh đề thì prompt
+ * "mascot showing <câu tiếng Nhật>. sunny hill…" mất luôn chủ thể.
+ */
+const NON_LATIN_RUN = new RegExp(
+  `[${NON_LATIN_RANGES}][${NON_LATIN_RANGES}\\u3000-\\u303F\\uFF01-\\uFF60\\s]*`,
+  'g'
+);
+
+/**
+ * Lời thoại lọt vào prompt là lý do model VẼ chữ lên màn hình. Bản cũ chỉ soi
+ * dấu tiếng Việt → narration tiếng Nhật/Trung/Hàn/Nga… đi qua tự do.
+ *
+ * Export để chỗ DỰNG prompt cũng dùng được: nhét vào một mệnh đề mà wrapper
+ * chắc chắn cắt bỏ chỉ để lại câu prompt què ("... mascot showing.").
+ */
+export function looksLikeLeakedNarration(clause: string): boolean {
+  if (
+    /[àáạảãâầấậẩẫăằắặẳẵèéẹẻẽêềếệểễìíịỉĩòóọỏõôồốộổỗơờớợởỡùúụủũưừứựửữỳýỵỷỹđ]/i.test(clause) &&
+    clause.split(/\s+/).length > 4
+  ) {
+    return true;
+  }
+  // Chữ ngoài hệ Latin (CJK, Hàn, Thái, Cyrillic…): 4 ký tự đã là một mệnh đề
+  // narration — prompt hình luôn viết bằng tiếng Anh.
+  return (clause.match(NON_LATIN_SCRIPT_CHAR) || []).length >= 4;
+}
+
+/**
  * Rút prompt về một câu tả hình ngắn: bỏ chỉ thị, bỏ ngoặc kép, cắt theo ranh giới câu.
  * Prompt ngắn và cụ thể cho kết quả ổn định hơn hẳn trên Veo Fast — prompt dài,
  * nhiều mệnh lệnh mâu thuẫn là nguyên nhân chính gây lỗi và gen ra hình lộn xộn.
@@ -675,7 +720,11 @@ export function compactVisualPrompt(
   visualPrompt: string,
   maxChars = MAX_VISUAL_PROMPT_CHARS
 ): string {
-  let out = String(visualPrompt || '');
+  // Rác model (đề bài bị echo, "? ># ? >#" lặp vô hạn) lọt vào visual_prompt vì
+  // prompt hình được dựng từ narration — cắt trước khi xét mệnh đề.
+  let out = collapseLlmRepeats(stripInlineMarkupJunk(String(visualPrompt || '')));
+  // Lời thoại không-Latin lọt vào: cắt đúng đoạn đó, giữ phần tả hình quanh nó.
+  out = out.replace(NON_LATIN_RUN, ' ');
   for (const re of PROMPT_DIRECTIVE_PATTERNS) out = out.replace(re, ' ');
 
   // Bỏ mệnh lệnh (không phải tả hình) và lời thoại lọt vào. Cắt theo MỆNH ĐỀ
@@ -683,9 +732,7 @@ export function compactVisualPrompt(
   // được chủ thể, chỉ rụng đúng mệnh đề mệnh lệnh.
   const isDirective = (s: string) =>
     /\b(must|do not|don'?t|never|avoid|strictly|no readable|no on-screen)\b/i.test(s);
-  const isLeakedNarration = (s: string) =>
-    /[àáạảãâầấậẩẫăằắặẳẵèéẹẻẽêềếệểễìíịỉĩòóọỏõôồốộổỗơờớợởỡùúụủũưừứựửữỳýỵỷỹđ]/i.test(s) &&
-    s.split(/\s+/).length > 4;
+  const isLeakedNarration = looksLikeLeakedNarration;
 
   out = out
     .split(/(?<=[.!?])\s+/)
@@ -693,7 +740,13 @@ export function compactVisualPrompt(
       const kept = sentence
         .split(';')
         .map((clause) => clause.trim())
-        .filter((clause) => clause && !isDirective(clause) && !isLeakedNarration(clause));
+        .filter(
+          (clause) =>
+            clause &&
+            !isDirective(clause) &&
+            !isLeakedNarration(clause) &&
+            !looksLikeLlmInstruction(clause)
+        );
       if (!kept.length) return '';
       const joined = kept.join('; ');
       return /[.!?]$/.test(joined) ? joined : `${joined}.`;
