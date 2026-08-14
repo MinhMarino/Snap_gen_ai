@@ -366,6 +366,20 @@ export async function testOpenAI(apiKey: string): Promise<{ ok: boolean; message
 }
 
 
+/**
+ * Cỡ cảnh luân phiên theo index scene — gợi ý cho AI, và cũng là thứ dùng cho
+ * khung tạm local. Mọi shot cùng một cỡ là cách nhanh nhất làm video thành nhàm.
+ * Giữ từ vựng phổ thông, không dùng tiếng nghề (dolly, OTS…) vì mỗi từ lạ thêm
+ * vào là một cơ hội để model đổi style giữa các scene.
+ */
+const SHOT_LADDER = [
+  'wide shot',
+  'medium shot',
+  'close-up',
+  'extreme close-up detail',
+  'medium wide shot',
+];
+
 /** Chia narration thành scene theo câu khi AI cắt mất lời — visual prompt liên kết beat trước/sau. */
 function splitNarrationFallback(
   narration: string,
@@ -419,12 +433,7 @@ function splitNarrationFallback(
   const cast = 'the main subject of the video';
 
   // Đổi nhẹ góc máy / bối cảnh cho các beat liền nhau đỡ trùng khung. Giữ NGẮN.
-  const cameraAngles = [
-    'medium shot',
-    'medium wide shot',
-    'close-up',
-    'three-quarter view',
-  ];
+  const cameraAngles = SHOT_LADDER;
   const setBases = [
     'simple uncluttered background',
     'natural outdoor setting',
@@ -485,6 +494,7 @@ function splitNarrationFallback(
  * đọc được cả ngữ cảnh phủ định, việc mà regex không làm được.
  */
 
+
 /**
  * 1 lần gọi AI: viết lại visual_prompt toàn bộ scene thành chuỗi liền mạch (phù hợp video-extend).
  */
@@ -504,16 +514,24 @@ async function enrichVisualContinuityWithAi(options: {
     .map((s, i) => {
       return (
         `Scene ${i + 1} [${s.id}] chapter=${s.chapter || '—'} section=${s.section || 'body'} ` +
-        `duration_hint=${Math.max(2, s.duration_hint || 6)}s\n` +
+        `duration_hint=${Math.max(2, s.duration_hint || 6)}s ` +
+        `shot_hint=${SHOT_LADDER[i % SHOT_LADDER.length]}\n` +
         `narration: ${(s.narration_segment || '').trim()}\n` +
         `visual_now: ${(s.visual_prompt || '').trim().slice(0, 700)}`
       );
     })
     .join('\n\n');
 
-  // Chủ thể lặp lại do MODEL chốt theo brief — không đoán bằng regex nữa.
+  /*
+   * Nhất quán là nhất quán về THẾ GIỚI (bối cảnh, kiểu hình, nhân vật khi có
+   * người), KHÔNG phải lặp lại một chủ thể trong mọi khung.
+   *
+   * Bản trước ghi "chọn MỘT chủ thể và giữ y hệt ở mọi scene": với style
+   * "hands-only" model chọn luôn "hands" rồi mở đầu cả 75/75 scene bằng "Hands…" —
+   * 75 shot liên tiếp cùng một thứ, xem rất chán.
+   */
   const castLine =
-    'Pick ONE recurring subject/cast that fits the brief and keep it identical in every scene; report it in "series_cast".';
+    'Keep ONE consistent world across scenes — same place, same look, same people/objects when they reappear — and report it in "series_cast". Consistency is about the WORLD, not about filming the same thing every time.';
 
   try {
     const parsed = await chatJson<{
@@ -531,10 +549,15 @@ Return ONLY JSON:
   "scenes": [ { "id": string, "visual_prompt": string } ]
 }
 HARD LENGTH LIMIT: each visual_prompt is English, 12–28 words, ONE sentence or two short ones. Longer prompts make Veo fail — brevity matters more than detail.
-Each visual_prompt = the recurring subject + ONE action or state that matches THIS scene's narration + ONE background.
+Each visual_prompt = ONE subject + ONE action or state that matches THIS scene's narration + ONE background.
 ${castLine}
+VARIETY IS MANDATORY — this is what makes the video watchable:
+- Consecutive scenes must show DIFFERENT things. Never open more than two scenes in a row with the same subject word.
+- Across the video, rotate what is in frame: the whole setting, the object being worked on, a close detail of it, the tool, the hands/person doing the action, the result, the surrounding environment.
+- Each scene has a "shot_hint" — use it as the framing for that scene unless the narration clearly needs another one.
+- A person or their hands should be in frame only when the narration is about doing something. Otherwise show the subject itself.
 The subject and genre come from the brief and the style below — a documentary shows real-world scenes and adults, a product video shows the product, a story video shows its characters. Do NOT turn the video into a cartoon unless the style says so.
-Allowed extras (at most one each, only if useful): a framing word (medium shot / close-up / wide shot), one prop, one lighting word.
+Allowed extras (at most one each, only if useful): one prop, one lighting word.
 NEVER include: continuity notes, OPENING/CONTINUATION labels, quotes of the narration, capitalised labels (SUBJECT:, CAMERA:…), lists of bans, style bibles, locale essays, words about text/logos/watermarks, camera move jargon (parallax, orbit, dolly), or ages / children / babies / named real people.
 Style to imply (do not quote it) — this also tells you the GENRE, and any "AVOID / do not use" list in it is a ban, never a request:
 ${options.stylePrompt.slice(0, 700)}
@@ -546,7 +569,7 @@ Brief: ${options.brief.slice(0, 400)}
 
 ${sceneBlock}
 
-Rewrite one SHORT visual_prompt (12–28 words) per scene. Keep the same recurring subject and look across scenes; each shot must match its own narration.`,
+Rewrite one SHORT visual_prompt (12–28 words) per scene. Same world and look throughout, but each shot shows something different — follow each scene's shot_hint and its own narration.`,
     });
 
     const byId = new Map<string, string>();
