@@ -927,8 +927,13 @@ export async function assembleFinalVideo(options: {
   workDir: string;
   estimatedTotalSeconds?: number;
   clipDurations?: number[];
-  /** When clips are already 1080p@60 (e.g. Ken Burns slides), skip re-scale — vẫn encode fade chuyển cảnh. */
-  skipClipNormalize?: boolean;
+  /**
+   * Khi `clipPaths` là ẢNH TĨNH (không phải video): dựng clip ngay tại đây —
+   * zoom (Ken Burns) hoặc giữ khung đứng yên, kèm fade + đúng độ dài, trong
+   * MỘT lần encode duy nhất. Không có clip trung gian nào bị encode hai lần.
+   * `clipDurations[i]` là độ dài mong muốn của ảnh thứ i.
+   */
+  stillMotion?: 'kenburns' | 'static';
   /**
    * false → cắt cảnh thẳng (không fade đen). Clip nào đã đúng chuẩn + đúng độ dài
    * sẽ được dùng nguyên bản, bỏ hẳn pass encode lại (music-animation).
@@ -941,16 +946,27 @@ export async function assembleFinalVideo(options: {
 
   fs.mkdirSync(workDir, { recursive: true });
   const withTransitions = options.sceneTransitions !== false;
+  const stillMotion = options.stillMotion;
 
   // Fit mỗi clip theo duration + fade đen vào/ra, rồi concat -c copy (không re-encode lần 2).
-  const encoder = await resolveVideoEncoder();
+  // Ảnh tĩnh: zoompan luôn đi bằng libx264 (NVENC gần như không nhanh hơn trên
+  // clip zoompan ngắn) → không cần dò encoder phần cứng.
+  const encoder = stillMotion
+    ? { name: 'libx264', outputArgs: [] as string[] }
+    : await resolveVideoEncoder();
   report(onProgress, {
     stage: 'NORMALIZING',
-    message: withTransitions
-      ? `Preparing ${clipPaths.length} clip(s) with transitions`
-      : `Preparing ${clipPaths.length} clip(s) — hard cuts, no fade`,
+    message: stillMotion
+      ? `Rendering ${clipPaths.length} still(s) → clip (${stillMotion})`
+      : withTransitions
+        ? `Preparing ${clipPaths.length} clip(s) with transitions`
+        : `Preparing ${clipPaths.length} clip(s) — hard cuts, no fade`,
     reencoding: true,
-    reason: withTransitions ? 'scene fade transitions / duration fit' : 'duration fit only',
+    reason: stillMotion
+      ? `${stillMotion === 'static' ? 'still frame' : 'Ken Burns zoom'} + ${withTransitions ? 'fade' : 'hard cut'} in one pass`
+      : withTransitions
+        ? 'scene fade transitions / duration fit'
+        : 'duration fit only',
     encoder: encoder.name,
   });
 
@@ -960,6 +976,63 @@ export async function assembleFinalVideo(options: {
     const out = path.join(workDir, `clip-${i}.mp4`);
     const fadeOpts = { fadeIn: true, fadeOut: true };
     const plannedDur = options.clipDurations?.[i];
+
+    // Nguồn là ẢNH: tạo chuyển động (zoom / đứng yên) + fade + đúng số frame
+    // ngay ở bước ghép final — một lần encode duy nhất cho mỗi ảnh.
+    if (stillMotion) {
+      const isStatic = stillMotion === 'static';
+      const dur = Math.max(plannedDur ?? 5, 1);
+      const outFrames = Math.max(Math.round(dur * FINAL_FPS), FINAL_FPS);
+      const filters = isStatic ? staticFrameFilters() : kenBurnsFilters(dur);
+      if (withTransitions) {
+        filters.push(...sceneTransitionFades(outFrames / FINAL_FPS, fadeOpts));
+      }
+      await run(
+        ffmpeg(clipPaths[i])
+          // Ảnh tĩnh: KHÔNG `-loop 1` — filter `loop` lo phần lặp frame (xem staticFrameFilters).
+          .inputOptions(isStatic ? [] : ['-loop', '1', '-framerate', String(FINAL_FPS)])
+          .videoFilters(filters)
+          .outputOptions([
+            '-frames:v',
+            String(outFrames),
+            '-an',
+            '-c:v',
+            'libx264',
+            '-preset',
+            isStatic ? 'veryfast' : FINAL_X264_PRESET,
+            ...(isStatic ? ['-tune', 'stillimage'] : []),
+            '-crf',
+            FINAL_CRF,
+            '-pix_fmt',
+            'yuv420p',
+            '-r',
+            String(FINAL_FPS),
+          ])
+          .output(out),
+        {
+          timeoutMs: 10 * 60 * 1000,
+          label: `${isStatic ? 'Still' : 'Ken Burns'} clip ${i + 1}/${clipPaths.length}`,
+        }
+      ).catch((err: unknown) => {
+        const detail = err instanceof Error ? err.message : String(err);
+        throw new Error(
+          `FFmpeg lỗi khi tạo clip ảnh scene ${i + 1} (${path.basename(clipPaths[i])}): ${detail}`
+        );
+      });
+      normalized.push(out);
+      reencoded += 1;
+      report(onProgress, {
+        stage: 'NORMALIZING',
+        message: isStatic
+          ? `Ảnh tĩnh clip ${i + 1}/${clipPaths.length}`
+          : `Ken Burns clip ${i + 1}/${clipPaths.length}`,
+        progress: Math.round(((i + 1) / clipPaths.length) * 100),
+        reencoding: true,
+        encoder: encoder.name,
+      });
+      continue;
+    }
+
     const naturalDur = await getDurationSafe(clipPaths[i], plannedDur ?? 8);
     const needsDurationFit =
       plannedDur != null && Math.abs(plannedDur - naturalDur) > 0.05;
@@ -967,11 +1040,6 @@ export async function assembleFinalVideo(options: {
     // Không fade + không phải fit lại độ dài → không có gì để encode.
     if (!withTransitions && !needsDurationFit) {
       const reuse = async (): Promise<boolean> => {
-        if (options.skipClipNormalize) {
-          // Clip do chính ta render (Ken Burns / ảnh tĩnh): đã 1080p@60, -an.
-          normalized.push(clipPaths[i]);
-          return true;
-        }
         const info = await probeSceneInfo(clipPaths[i]);
         if (!isSceneCompatible(info)) return false;
         // Stream-copy để bỏ audio → concat demuxer thấy các clip cùng cấu trúc.
@@ -993,41 +1061,6 @@ export async function assembleFinalVideo(options: {
         });
         continue;
       }
-    }
-
-    if (options.skipClipNormalize) {
-      const planned = plannedDur;
-      const natural = naturalDur;
-      const targetDur = planned ?? natural;
-      const filters: string[] = [];
-      if (planned != null && planned > natural + 0.05) {
-        filters.push(`tpad=stop_mode=clone:stop_duration=${(planned - natural).toFixed(3)}`);
-      }
-      if (withTransitions) filters.push(...sceneTransitionFades(targetDur, fadeOpts));
-      const cmd = ffmpeg(clipPaths[i]).outputOptions([
-        '-an',
-        ...encoder.outputArgs,
-        '-pix_fmt',
-        'yuv420p',
-        '-r',
-        String(FINAL_FPS),
-      ]);
-      if (filters.length) cmd.videoFilters(filters);
-      if (planned) cmd.outputOptions(['-t', String(planned)]);
-      await run(cmd.output(out), {
-        timeoutMs: 10 * 60 * 1000,
-        label: `Prepare clip ${i + 1}/${clipPaths.length}`,
-      });
-      normalized.push(out);
-      reencoded += 1;
-      report(onProgress, {
-        stage: 'NORMALIZING',
-        message: `Prepared clip ${i + 1}/${clipPaths.length}`,
-        progress: Math.round(((i + 1) / clipPaths.length) * 100),
-        reencoding: true,
-        encoder: encoder.name,
-      });
-      continue;
     }
 
     const natural = naturalDur;
@@ -1205,11 +1238,9 @@ export async function assembleSlideshowFromImages(options: {
   const audioDur = await getDurationSafe(audioPath, estimatedTotal);
   const fallback = Math.max(audioDur / imagePaths.length, 1);
 
-  // Ken Burns clips are always rendered from stills, so libx264 stays the
-  // default here (NVENC gives little benefit on short zoompan outputs and
-  // this keeps quality/behavior unchanged) — hardware encoding is reserved
-  // for the heavier normalize/subtitle-burn passes above.
-  const clips: string[] = [];
+  // Chỉ chuẩn bị đầu vào ở đây (kiểm tra file + xoá watermark + chốt độ dài).
+  // Việc dựng clip có zoom được để cho assembleFinalVideo làm — mỗi ảnh encode
+  // đúng MỘT lần (zoom + fade cùng một filtergraph), không có clip trung gian.
   const clipDurations: number[] = [];
   for (let i = 0; i < imagePaths.length; i++) {
     const imagePath = imagePaths[i];
@@ -1219,64 +1250,24 @@ export async function assembleSlideshowFromImages(options: {
     if (stripCornerLogo) {
       await stripNanoBananaWatermark(imagePath);
     }
-    const out = path.join(workDir, `img-clip-${i}.mp4`);
     const dur = Math.max(durations?.[i] ?? fallback, 1);
-    const outFrames = Math.max(Math.round(dur * FINAL_FPS), FINAL_FPS);
-    try {
-      await run(
-        ffmpeg(imagePath)
-          // Ảnh tĩnh: KHÔNG `-loop 1` — filter `loop` lo phần lặp frame (xem staticFrameFilters).
-          .inputOptions(isStatic ? [] : ['-loop', '1', '-framerate', String(FINAL_FPS)])
-          .videoFilters(isStatic ? staticFrameFilters() : kenBurnsFilters(dur))
-          .outputOptions([
-            '-frames:v',
-            String(outFrames),
-            '-an',
-            '-c:v',
-            'libx264',
-            '-preset',
-            isStatic ? 'veryfast' : FINAL_X264_PRESET,
-            ...(isStatic ? ['-tune', 'stillimage'] : []),
-            '-crf',
-            FINAL_CRF,
-            '-pix_fmt',
-            'yuv420p',
-            '-r',
-            String(FINAL_FPS),
-          ])
-          .output(out)
-      );
-    } catch (err) {
-      const detail = err instanceof Error ? err.message : String(err);
-      throw new Error(
-        `FFmpeg lỗi khi tạo clip ảnh scene ${i + 1} (${path.basename(imagePath)}): ${detail}`
-      );
-    }
-    clips.push(out);
-    // Độ dài thật của clip = số frame / fps — dùng chính con số này ở bước ghép
-    // để không phải encode lại chỉ vì lệch vài phần trăm giây.
-    clipDurations.push(outFrames / FINAL_FPS);
-    report(onProgress, {
-      stage: 'NORMALIZING',
-      message: isStatic
-        ? `Ảnh tĩnh clip ${i + 1}/${imagePaths.length}`
-        : `Ken Burns clip ${i + 1}/${imagePaths.length}`,
-      progress: Math.round(((i + 1) / imagePaths.length) * 100),
-    });
+    // Độ dài thật của clip = số frame / fps — chốt sẵn con số này để bước ghép
+    // không phải encode lại chỉ vì lệch vài phần trăm giây.
+    clipDurations.push(Math.max(Math.round(dur * FINAL_FPS), FINAL_FPS) / FINAL_FPS);
   }
 
   // Write to a temp file then rename so the UI never opens a half-written final.mp4.
   const tempOutput = path.join(workDir, `final-build-${Date.now()}.mp4`);
   await assembleFinalVideo({
-    clipPaths: clips,
+    clipPaths: imagePaths,
     audioPath,
     srtPath,
     outputPath: tempOutput,
     burnSubtitles,
     workDir,
     estimatedTotalSeconds: estimatedTotal,
-    clipDurations: isStatic ? clipDurations : durations,
-    skipClipNormalize: true,
+    clipDurations,
+    stillMotion: isStatic ? 'static' : 'kenburns',
     sceneTransitions: options.sceneTransitions,
     onProgress,
   });
