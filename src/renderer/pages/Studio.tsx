@@ -51,7 +51,7 @@ import StepActivityUI, {
 import type { ProjectVoiceSettings } from '../../shared/types';
 import { OPENAI_CHAT_MODELS } from '../../shared/types';
 import { DEFAULT_PROJECT_VOICE, resolveProjectChatModel, resolveProjectVoice } from '../../shared/voice';
-import { elevenLabsLanguageLabel } from '../../shared/elevenlabs-languages';
+import { ELEVENLABS_LANGUAGES, elevenLabsLanguageLabel } from '../../shared/elevenlabs-languages';
 import {
   canonicalAspectRatio,
   formatOutputFormatLabel,
@@ -61,6 +61,14 @@ import {
 
 const DURATION_PRESETS_MIN = [0.5, 1, 2, 3, 5, 10, 15] as const;
 const DEFAULT_DURATION_MIN = 1;
+
+/**
+ * Ngôn ngữ lời bình chọn ngay ở bước 1 — cùng field `narrationLanguage` với panel
+ * giọng đọc, nên chọn ở đâu cũng ra một giá trị (không có 2 nguồn sự thật).
+ */
+const NARRATION_LANGUAGE_OPTIONS = [...ELEVENLABS_LANGUAGES].sort((a, b) =>
+  a.label.localeCompare(b.label, 'en')
+);
 
 function minutesFromSeconds(totalSec: unknown, fallback = DEFAULT_DURATION_MIN): number {
   const sec = Number(totalSec);
@@ -232,6 +240,8 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
   const [modelId, setModelId] = useState(defaultModelIdForKind('video'));
   const [brief, setBrief] = useState('');
   const [stylePrompt, setStylePrompt] = useState(DEFAULT_STYLE_PROMPT);
+  /** Chỉ thị hệ thống tự đặt cho bước AI viết visual prompt (rỗng = dùng luật mặc định). */
+  const [scenePromptInstruction, setScenePromptInstruction] = useState('');
   /** Free-text minutes; may be empty while typing. */
   const [durationInput, setDurationInput] = useState(String(DEFAULT_DURATION_MIN));
   /** dense | normal | economy | custom — kiểm soát số ảnh/video. */
@@ -713,6 +723,7 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
           // Chưa lưu style → default theo KIND; đã lưu style thiếu nhi mặc định CŨ
           // trên dự án thường → đổi sang trung tính (xem `normalizeStylePromptForProjectKind`).
           setStylePrompt(normalizeStylePromptForProjectKind(draft.stylePrompt, kind));
+          setScenePromptInstruction(draft.scenePromptInstruction || '');
           setScript(draft.script);
           setVoice(resolveProjectVoice(draft));
           setOpenaiChatModel(
@@ -888,6 +899,7 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
     script: nextScript,
     mediaKind,
     stylePrompt,
+    scenePromptInstruction: scenePromptInstruction.trim() || undefined,
     openaiChatModel,
     lyricText,
     musicRelativePath,
@@ -1268,6 +1280,7 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
         maxShotSec,
         mediaKind,
         stylePrompt: stylePrompt.trim() || undefined,
+        scenePromptInstruction: scenePromptInstruction.trim() || undefined,
         openaiChatModel,
       });
       setActivityPercent(82);
@@ -1533,6 +1546,7 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
         language: narrationLanguage || undefined,
         mediaKind,
         stylePrompt: stylePrompt.trim() || undefined,
+        scenePromptInstruction: scenePromptInstruction.trim() || undefined,
         regenerateSceneIds: payload.regenerateSceneIds,
         refreshNarration: payload.refreshNarration,
         // Bước 1/2 tách riêng — không tự ghép Final (bước 3 hoặc nút Ghép lại).
@@ -1958,6 +1972,28 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
             />
           </div>
           <div className="field compact-field">
+            <label htmlFor="script-language">Ngôn ngữ lời bình</label>
+            <select
+              id="script-language"
+              value={voice.narrationLanguage || ''}
+              disabled={busy}
+              onChange={(event) => onVoiceChange({ ...voice, narrationLanguage: event.target.value })}
+            >
+              <option value="">Tự động (theo ngôn ngữ của brief)</option>
+              <option disabled>──────────</option>
+              {NARRATION_LANGUAGE_OPTIONS.map((l) => (
+                <option key={l.id} value={l.id}>
+                  {l.label}
+                </option>
+              ))}
+            </select>
+            <p className="hint">
+              ChatGPT viết narration bằng ngôn ngữ này dù brief viết bằng tiếng gì, và nó cũng là
+              language gửi cho TTS ở bước 2. «Tự động» = đoán theo brief (brief tiếng Việt → lời
+              Việt).
+            </p>
+          </div>
+          <div className="field compact-field">
             <label htmlFor="style">Visual style</label>
             <textarea
               id="style"
@@ -2210,6 +2246,9 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
                 value={voice}
                 disabled={busy}
                 preferElevenLabs={isAudioOnly}
+                // Script đã viết xong rồi thì chọn giọng không được đổi ngôn ngữ nữa —
+                // đổi là language gửi TTS lệch với tiếng của lời bình đã có.
+                lockNarrationLanguage={Boolean(script)}
                 onChange={onVoiceChange}
               />
               <div className="step-actions">

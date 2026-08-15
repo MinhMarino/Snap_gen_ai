@@ -596,12 +596,13 @@ export function planSceneChunks(
   return { mode: 'multi-cut', chunks };
 }
 
-export function withStylePrompt(visualPrompt: string, stylePrompt?: string): string {
-  const style = stylePrompt?.trim();
-  if (!style) return visualPrompt;
-  if (visualPrompt.toLowerCase().includes(style.toLowerCase())) return visualPrompt;
-  return `${visualPrompt.trim()}. Style: ${style}`;
-}
+/*
+ * ĐÃ XOÁ: `withStylePrompt` (nối `". Style: <style prompt>"` vào đuôi visual_prompt).
+ *
+ * Style giờ do bước viết kịch bản tả thẳng vào từng phân cảnh theo «Mô tả video» +
+ * «Visual style», nên nối thêm ở đây là dán một khối chữ giống hệt nhau vào đuôi
+ * mọi scene — thừa, và lấn át phần tả riêng của cảnh.
+ */
 
 /**
  * GHI CHÚ: các hàm bối cảnh văn hoá theo ngôn ngữ (`resolveVisualLocaleHint`,
@@ -640,8 +641,19 @@ const PROMPT_DIRECTIVE_PATTERNS: RegExp[] = [
   /\b(Foreground|Midground|Background|Palette|Colour palette|Color palette|Motion quality|Framing|Energy)\s*:\s*/g,
 ];
 
-/** Độ dài tối đa phần mô tả hình (ký tự) trước khi ghép style. */
-const MAX_VISUAL_PROMPT_CHARS = 260;
+/**
+ * Độ dài tối đa phần mô tả hình (ký tự).
+ *
+ * Bước viết kịch bản đặt hàng 55–90 từ, và KIỂU RENDER nằm ở CUỐI prompt — nên cắt
+ * ngắn là rụng đúng phần mang Visual style. 90 từ mô tả (photorealistic,
+ * cinematography, chiaroscuro… ~8 ký tự/từ) chạm ~720 ký tự, nên mức 700 vẫn cắt
+ * những prompt dài nhất; 900 để phần đuôi luôn sống sót. Mức cũ 260 thì chặt mất
+ * hơn nửa prompt.
+ *
+ * Đây là mức chặn AN TOÀN, không phải mục tiêu: prompt dài lê thê, nhiều mệnh lệnh
+ * mâu thuẫn vẫn là nguyên nhân chính làm Veo Fast render hỏng.
+ */
+const MAX_VISUAL_PROMPT_CHARS = 900;
 
 /**
  * Chữ của các hệ không phải Latin — kana/Hán/Hangul, Thái, Cyrillic, Ả Rập,
@@ -684,9 +696,12 @@ export function looksLikeLeakedNarration(clause: string): boolean {
 }
 
 /**
- * Rút prompt về một câu tả hình ngắn: bỏ chỉ thị, bỏ ngoặc kép, cắt theo ranh giới câu.
- * Prompt ngắn và cụ thể cho kết quả ổn định hơn hẳn trên Veo Fast — prompt dài,
- * nhiều mệnh lệnh mâu thuẫn là nguyên nhân chính gây lỗi và gen ra hình lộn xộn.
+ * Dọn prompt tả hình: bỏ mệnh lệnh, bỏ ngoặc kép, bỏ lời thoại lọt vào, cắt theo
+ * ranh giới câu khi vượt `maxChars`.
+ *
+ * Lọc MỆNH LỆNH chứ không phải lọc độ dài: phần tả hình (chất liệu, ánh sáng, kiểu
+ * render) giữ nguyên bao nhiêu cũng được, chỉ những mệnh đề kiểu "must / never /
+ * avoid" mới bị bỏ — model vẽ không làm theo được, chỉ tổ nhiễu.
  */
 export function compactVisualPrompt(
   visualPrompt: string,
@@ -860,8 +875,14 @@ export const STEADY_MOTION_RULE =
   'one clear continuous action, steady camera, no fast cuts';
 
 /**
- * Prompt gửi Snapgen cho dự án THƯỜNG: mô tả hình NGẮN + style + "no text".
+ * Prompt gửi Snapgen cho dự án THƯỜNG: mô tả hình + "no text".
  * Không gắn narration — lời thoại chỉ dùng cho TTS/subtitle.
+ *
+ * KHÔNG nối style prompt nữa. Style đã được đưa vào `visual_prompt` ngay từ bước
+ * viết kịch bản: AI đọc «Mô tả video» + «Visual style» rồi tả thẳng chất liệu, ánh
+ * sáng và kiểu render vào từng phân cảnh. Nối lại lần nữa ở đây là dán nguyên văn
+ * một khối style giống hệt nhau vào đuôi mọi prompt — thừa, và khi style viết dạng
+ * đoạn văn dài thì nó lấn át đúng phần tả riêng của scene.
  *
  * TRUNG TÍNH về thể loại: không nối luật cartoon, không đơn giản hoá cảnh, không
  * đổi từ khoá phong cách. Kiểu hình do brief + style prompt người dùng quyết định.
@@ -878,17 +899,11 @@ export const STEADY_MOTION_RULE =
  */
 export function buildSceneImagePrompt(options: {
   visualPrompt: string;
-  stylePrompt?: string;
   /** 'video' → gắn thêm luật một hành động / máy quay ổn định. */
   mediaKind?: string | null;
 }): string {
   const visual = compactVisualPrompt(options.visualPrompt || '');
   const parts = [visual.replace(/\.*$/, '')];
-
-  const style = (options.stylePrompt || DEFAULT_STYLE_PROMPT).trim().replace(/\.*$/, '');
-  if (style && !visual.toLowerCase().includes(style.toLowerCase().slice(0, 30))) {
-    parts.push(style);
-  }
 
   if (options.mediaKind === 'video') parts.push(STEADY_MOTION_RULE);
   parts.push('no text');

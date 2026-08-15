@@ -56,6 +56,11 @@ export interface SceneGenerateContext {
   castLock?: string;
   /** music-animation + ảnh: khung đứng yên (không Ken Burns) → prompt bố cục 1 khung. */
   stillFrame?: boolean;
+  /**
+   * true → visual_prompt đã là prompt hoàn chỉnh (viết bằng chỉ thị tự đặt của
+   * người dùng): gửi NGUYÊN VĂN, bỏ qua rút gọn 260 ký tự và phần nối style.
+   */
+  rawVisualPrompt?: boolean;
   imagesDir: string;
   clipsDir: string;
   workDir: string;
@@ -258,7 +263,10 @@ export async function generateOneSceneMedia(
   onProgress?: (update: SceneProgressUpdate) => void
 ): Promise<SceneGenerateResult> {
   const isMusicAnimation = ctx.projectKind === 'music-animation';
-  const basePrompt = isMusicAnimation
+  const rawPrompt = ctx.rawVisualPrompt ? String(scene.visual_prompt || '').trim() : '';
+  const basePrompt = rawPrompt
+    ? rawPrompt
+    : isMusicAnimation
     ? buildMusicSceneImagePrompt({
         visualPrompt: scene.visual_prompt,
         stylePrompt: ctx.stylePrompt,
@@ -269,8 +277,9 @@ export async function generateOneSceneMedia(
         mediaKind: ctx.mediaKind,
       })
     : buildSceneImagePrompt({
+        // Không truyền stylePrompt: style đã nằm trong visual_prompt từ bước viết
+        // kịch bản. `ctx.stylePrompt` giờ chỉ còn dùng cho wrapper music-animation.
         visualPrompt: scene.visual_prompt,
-        stylePrompt: ctx.stylePrompt,
         mediaKind: ctx.mediaKind,
       });
   const label = `Scene ${sceneIndex + 1}`;

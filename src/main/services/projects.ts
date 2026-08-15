@@ -125,6 +125,7 @@ function readDraft(id: string): ProjectDraft | null {
       script: raw.script ?? null,
       mediaKind,
       stylePrompt: normalizeStylePromptForProjectKind(raw.stylePrompt, projectKind),
+      scenePromptInstruction: raw.scenePromptInstruction,
       openaiChatModel: resolveProjectChatModel(raw.openaiChatModel, settings.openaiModel),
       outputFormat: raw.outputFormat,
       lyricText: String(raw.lyricText || ''),
@@ -314,6 +315,7 @@ export function createProject(input: CreateProjectInput): ProjectMeta {
     script: null,
     mediaKind,
     stylePrompt: normalizeStylePromptForProjectKind(meta.stylePrompt, projectKind),
+    scenePromptInstruction: undefined,
     openaiChatModel: resolveProjectChatModel(input.openaiChatModel, settings.openaiModel),
     lyricText: '',
     characterRelativePaths: [],
@@ -434,6 +436,7 @@ export function ensureProject(options: {
         script: options.script,
         mediaKind: existing.mediaKind ?? 'video',
         stylePrompt: normalizeStylePromptForProjectKind(existing.stylePrompt, keptKind),
+        scenePromptInstruction: prevDraft?.scenePromptInstruction,
         openaiChatModel: resolveProjectChatModel(
           prevDraft?.openaiChatModel,
           settings.openaiModel

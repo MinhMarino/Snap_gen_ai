@@ -55,12 +55,18 @@ export default function ProjectVoicePanel({
   value,
   disabled,
   preferElevenLabs,
+  lockNarrationLanguage,
   onChange,
 }: {
   value: ProjectVoiceSettings;
   disabled?: boolean;
   /** Dự án audio-only: ưu tiên / mặc định ElevenLabs. */
   preferElevenLabs?: boolean;
+  /**
+   * Ngôn ngữ lời bình đã chốt (script viết xong) → chọn giọng KHÔNG được đổi nó nữa,
+   * nếu không language gửi TTS sẽ lệch với tiếng của lời bình đang có.
+   */
+  lockNarrationLanguage?: boolean;
   onChange: (next: ProjectVoiceSettings) => void;
 }) {
   const [voices, setVoices] = useState<ElevenLabsVoice[]>([]);
@@ -153,6 +159,9 @@ export default function ProjectVoicePanel({
   }, [elevenLabsReady, value.ttsProvider]);
 
   const patch = (partial: Partial<ProjectVoiceSettings>) => onChange({ ...value, ...partial });
+  /** Đổi ngôn ngữ theo giọng vừa chọn — bỏ qua khi ngôn ngữ đã bị khoá. */
+  const voiceLanguagePatch = (voiceLanguage?: string | null): Partial<ProjectVoiceSettings> =>
+    lockNarrationLanguage ? {} : narrationLanguagePatch(voiceLanguage);
   const selectableProvider = preferElevenLabs
     ? TTS_PROVIDERS_TEMPORARILY_HIDDEN.has(value.ttsProvider)
       ? 'elevenlabs'
@@ -187,9 +196,11 @@ export default function ProjectVoicePanel({
           ))}
         </select>
         <small className="field-hint">
-          Tự đổi theo giọng đọc bạn chọn bên dưới — lời bình luôn cùng tiếng với giọng.
-          AI viết kịch bản bằng ngôn ngữ này và nó cũng là language gửi cho TTS. Chọn tay
-          để ghi đè; «Tự động» chỉ dùng khi giọng không khai báo ngôn ngữ.
+          Cùng một lựa chọn với ô «Ngôn ngữ lời bình» ở bước 1. AI viết kịch bản bằng ngôn ngữ
+          này và nó cũng là language gửi cho TTS.{' '}
+          {lockNarrationLanguage
+            ? 'Script đã viết xong nên chọn giọng không tự đổi ngôn ngữ nữa — muốn đổi thì sửa ở đây rồi tạo lại script.'
+            : 'Chưa có script thì chọn giọng sẽ tự đổi theo tiếng của giọng; «Tự động» = đoán theo brief.'}
         </small>
       </div>
       <div className="field">
@@ -319,7 +330,7 @@ export default function ProjectVoicePanel({
                   elevenLabsOriginalVoiceId: v?.originalVoiceId || voiceId,
                   elevenLabsVoiceName: v?.name,
                   // Lời bình phải cùng tiếng với giọng đọc — chọn giọng là chốt luôn.
-                  ...narrationLanguagePatch(
+                  ...voiceLanguagePatch(
                     v?.labels?.language || v?.labels?.locale || v?.labels?.accent
                   ),
                 });
@@ -356,7 +367,7 @@ export default function ProjectVoicePanel({
                   qwenLanguageType,
                   qwenTtsVoice: pickQwenVoiceForLanguage(qwenLanguageType, value.qwenTtsVoice),
                   // 'Auto' không nói được tiếng gì → giữ nguyên lựa chọn hiện có.
-                  ...narrationLanguagePatch(qwenLanguageType),
+                  ...voiceLanguagePatch(qwenLanguageType),
                 });
               }}
             >
@@ -439,7 +450,7 @@ export default function ProjectVoicePanel({
                 genmaxBackend: voice.backend,
                 genmaxSpeed: clampGenmaxSpeed(value.genmaxSpeed, voice.backend),
                 // Lời bình phải cùng tiếng với giọng đọc — chọn giọng là chốt luôn.
-                ...narrationLanguagePatch(voice.language || voice.accent),
+                ...voiceLanguagePatch(voice.language || voice.accent),
               })
             }
             onVoiceResolved={(voice) => {

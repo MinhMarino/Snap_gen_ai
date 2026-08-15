@@ -230,6 +230,15 @@ export interface GenerateIdeaInput {
   durationPerScene?: number;
   mediaKind: MediaKind;
   stylePrompt?: string;
+  /**
+   * Chỉ thị hệ thống TỰ ĐẶT cho bước AI viết visual_prompt (nâng cao).
+   *
+   * Có nội dung → thay hẳn luật viết prompt mặc định, và prompt AI trả về được
+   * gửi cho Snapgen NGUYÊN VĂN: không rút gọn 260 ký tự, không nối style prompt.
+   * Dùng để dán các "wrapper" prompt có cấu trúc riêng (vd. khối `### FORMAT /
+   * ### LIGHT / ### ACTION…` cho Veo 3) mà wrapper mặc định sẽ băm nát.
+   */
+  scenePromptInstruction?: string;
   /** Model ChatGPT viết kịch bản theo dự án. */
   openaiChatModel?: string;
 }
@@ -331,6 +340,15 @@ export interface ProjectDraft {
   script: ScriptDraft | null;
   mediaKind: MediaKind;
   stylePrompt: string;
+  /**
+   * Chỉ thị hệ thống TỰ ĐẶT cho bước AI viết visual_prompt (nâng cao).
+   *
+   * Có nội dung → thay hẳn luật viết prompt mặc định, và prompt AI trả về được
+   * gửi cho Snapgen NGUYÊN VĂN: không rút gọn 260 ký tự, không nối style prompt.
+   * Dùng để dán các "wrapper" prompt có cấu trúc riêng (vd. khối `### FORMAT /
+   * ### LIGHT / ### ACTION…` cho Veo 3) mà wrapper mặc định sẽ băm nát.
+   */
+  scenePromptInstruction?: string;
   /** Model ChatGPT viết kịch bản — theo từng dự án. */
   openaiChatModel: string;
   /** music-animation: lời bài hát / lyric script. */
@@ -406,6 +424,15 @@ export interface CreateProjectInput {
   mode?: string;
   mediaKind?: MediaKind;
   stylePrompt?: string;
+  /**
+   * Chỉ thị hệ thống TỰ ĐẶT cho bước AI viết visual_prompt (nâng cao).
+   *
+   * Có nội dung → thay hẳn luật viết prompt mặc định, và prompt AI trả về được
+   * gửi cho Snapgen NGUYÊN VĂN: không rút gọn 260 ký tự, không nối style prompt.
+   * Dùng để dán các "wrapper" prompt có cấu trúc riêng (vd. khối `### FORMAT /
+   * ### LIGHT / ### ACTION…` cho Veo 3) mà wrapper mặc định sẽ băm nát.
+   */
+  scenePromptInstruction?: string;
   openaiChatModel?: string;
   ttsProvider?: TtsProvider;
   openaiTtsModel?: string;
@@ -439,6 +466,15 @@ export interface GenerateJobInput {
   language?: string;
   mediaKind: MediaKind;
   stylePrompt?: string;
+  /**
+   * Chỉ thị hệ thống TỰ ĐẶT cho bước AI viết visual_prompt (nâng cao).
+   *
+   * Có nội dung → thay hẳn luật viết prompt mặc định, và prompt AI trả về được
+   * gửi cho Snapgen NGUYÊN VĂN: không rút gọn 260 ký tự, không nối style prompt.
+   * Dùng để dán các "wrapper" prompt có cấu trúc riêng (vd. khối `### FORMAT /
+   * ### LIGHT / ### ACTION…` cho Veo 3) mà wrapper mặc định sẽ băm nát.
+   */
+  scenePromptInstruction?: string;
   forceRegenerate?: boolean;
   /**
    * Scene ids to create or recreate.

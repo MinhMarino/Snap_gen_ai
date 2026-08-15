@@ -1562,6 +1562,9 @@ export async function runGenerateJob(input: GenerateJobInput): Promise<GenerateJ
               // Ảnh của MV giờ đứng yên (không Ken Burns) → prompt phải yêu cầu
               // bố cục một khung, không mô tả camera move.
               stillFrame: isMusicAnimation && mediaKind === 'image',
+              // Script viết bằng chỉ thị tự đặt → visual_prompt đã là prompt hoàn
+              // chỉnh, không được rút gọn hay nối thêm style.
+              rawVisualPrompt: Boolean(input.scenePromptInstruction?.trim()),
               imagesDir,
               clipsDir,
               workDir,

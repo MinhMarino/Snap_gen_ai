@@ -24,7 +24,6 @@ import {
   findScenesWithShortNarration,
   formatDurationLabel,
   isCjkLanguage,
-  looksLikeLeakedNarration,
   MAX_SCENE_BEAT_SEC,
   mergeUndersizedScenes,
   MIN_NARRATION_COVERAGE,
@@ -440,7 +439,7 @@ function splitNarrationFallback(
     'plain neutral studio background',
     'simple indoor setting',
   ];
-  /** Hành động dự phòng khi narration rỗng — luôn là hành động đơn, dễ vẽ. */
+  /** Hành động chung cho khung tạm — luôn là hành động đơn, dễ vẽ. */
   const fallbackActions = [
     'presented clearly in frame',
     'seen from a slightly different angle',
@@ -449,21 +448,16 @@ function splitNarrationFallback(
   ];
 
   return merged.map((segment, index) => {
-    // Ngắn hơn hẳn bản cũ (220 ký tự) và bỏ ngoặc kép.
-    const excerpt = segment.replace(/\s+/g, ' ').replace(/["“”]/g, '').trim().slice(0, 90);
     const camera = cameraAngles[index % cameraAngles.length];
     const setBase = setBases[index % setBases.length];
-    // Chỉ nhét narration vào prompt khi wrapper sẽ GIỮ nó. Lời thoại tiếng Nhật/
-    // Việt… bị wrapper cắt (nếu không model vẽ luôn chữ lên hình), để lại câu
-    // prompt què "…mascot showing." → thà dùng hành động chung ngay từ đầu.
-    const usableExcerpt = excerpt && !looksLikeLeakedNarration(excerpt) ? excerpt : '';
-    const action = usableExcerpt
-      ? `showing ${usableExcerpt}`
-      : fallbackActions[index % fallbackActions.length];
+    // KHÔNG chép narration vào visual_prompt. Prompt hình phải sinh ra từ «Mô tả
+    // video» + «Visual style» (phase 4 làm việc đó, nó đọc được cả hai); lời bình
+    // chỉ nói scene này rơi vào khoảnh khắc nào. Bản cũ nhét 90 ký tự lời thoại vào
+    // đây: tiếng Việt/Nhật thì wrapper cắt sạch để lại "…showing." què, tiếng Anh
+    // thì lọt nguyên câu thoại xuống Snapgen — cả hai đều không phải tả hình.
+    const action = fallbackActions[index % fallbackActions.length];
 
-    // Mô tả NGẮN: một chủ thể + một hành động + một nền đơn giản.
-    // Bản cũ ~150 chữ với 8 nhãn viết hoa (SUBJECT/PROP/CAMERA…) và narration trong
-    // ngoặc kép — Veo Fast hoặc chặn, hoặc vẽ luôn chữ trong ngoặc lên màn hình.
+    // Khung tạm NGẮN, trung tính: một chủ thể + một hành động + một nền đơn giản.
     const base = `${cast} ${action}. ${setBase}, ${camera}.`;
     return {
       id: `scene-tmp-${index + 1}`,
@@ -496,7 +490,29 @@ function splitNarrationFallback(
 
 
 /**
- * 1 lần gọi AI: viết lại visual_prompt toàn bộ scene thành chuỗi liền mạch (phù hợp video-extend).
+ * Visual prompt được viết TỪ «Mô tả video» + «Visual style» — hai ô người dùng
+ * điền ở bước 1. Cắt ngắn hai thứ này = vứt đúng phần quyết định chủ thể và kiểu
+ * hình, nên hạn mức để rộng; chỉ chặn ở mức đủ để một brief dán cả bài báo không
+ * nuốt hết context của phần scene.
+ */
+const MAX_BRIEF_CHARS_FOR_VISUALS = 1500;
+const MAX_STYLE_CHARS_FOR_VISUALS = 1200;
+
+/** Prompt chi tiết ~55–90 từ ≈ 150 token, cộng id + khung JSON → ~220 token/scene. */
+const VISUAL_PROMPT_TOKENS_PER_SCENE = 220;
+/**
+ * Số scene mỗi lần gọi. Prompt chi tiết × 75 scene vượt xa cap completion (8192),
+ * JSON bị cắt giữa chừng là hỏng CẢ call → mọi scene rơi về khung tạm chung chung.
+ * Chia lô: lô nào lỗi thì chỉ lô đó giữ prompt cũ.
+ */
+const VISUAL_PROMPT_BATCH_SIZE = 10;
+
+/**
+ * Viết lại visual_prompt cho toàn bộ scene từ «Mô tả video» + «Visual style».
+ *
+ * Chia lô nhưng vẫn giữ một thế giới chung: lô đầu chốt `series_cast` (thế giới +
+ * nhân vật/vật thể lặp lại), các lô sau nhận lại nguyên văn cast đó cùng vài prompt
+ * gần nhất để không lặp khung và không đổi kiểu hình giữa chừng.
  */
 async function enrichVisualContinuityWithAi(options: {
   apiKey: string;
@@ -510,18 +526,6 @@ async function enrichVisualContinuityWithAi(options: {
   const { scenes } = options;
   if (scenes.length < 2) return scenes;
 
-  const sceneBlock = scenes
-    .map((s, i) => {
-      return (
-        `Scene ${i + 1} [${s.id}] chapter=${s.chapter || '—'} section=${s.section || 'body'} ` +
-        `duration_hint=${Math.max(2, s.duration_hint || 6)}s ` +
-        `shot_hint=${SHOT_LADDER[i % SHOT_LADDER.length]}\n` +
-        `narration: ${(s.narration_segment || '').trim()}\n` +
-        `visual_now: ${(s.visual_prompt || '').trim().slice(0, 700)}`
-      );
-    })
-    .join('\n\n');
-
   /*
    * Nhất quán là nhất quán về THẾ GIỚI (bối cảnh, kiểu hình, nhân vật khi có
    * người), KHÔNG phải lặp lại một chủ thể trong mọi khung.
@@ -533,62 +537,226 @@ async function enrichVisualContinuityWithAi(options: {
   const castLine =
     'Keep ONE consistent world across scenes — same place, same look, same people/objects when they reappear — and report it in "series_cast". Consistency is about the WORLD, not about filming the same thing every time.';
 
-  try {
-    const parsed = await chatJson<{
-      series_cast?: string;
-      scenes?: Array<{ id?: string; visual_prompt?: string }>;
-    }>({
-      apiKey: options.apiKey,
-      model: options.openaiModel,
-      temperature: 0.4,
-      maxTokens: Math.min(MAX_COMPLETION_TOKENS, Math.max(1200, scenes.length * 110)),
-      system: `You rewrite ONLY visual_prompt fields into SHORT, CONCRETE shot descriptions rendered by Google Veo.
+  const system = `You rewrite ONLY visual_prompt fields into DETAILED, CONCRETE shot descriptions for an AI image/video model.
 Return ONLY JSON:
 {
   "series_cast": string,
   "scenes": [ { "id": string, "visual_prompt": string } ]
 }
-HARD LENGTH LIMIT: each visual_prompt is English, 12–28 words, ONE sentence or two short ones. Longer prompts make Veo fail — brevity matters more than detail.
-Each visual_prompt = ONE subject + ONE action or state that matches THIS scene's narration + ONE background.
+LENGTH: each visual_prompt is English, 55–90 words, written as flowing descriptive phrases separated by commas. Detail is what makes the render match the style — do not write a bare one-liner. Never exceed 90 words.
+Every visual_prompt must describe, in your own words and in roughly this order:
+1. the subject and the ONE action or state it is in during THIS scene,
+2. how that subject concretely looks — materials, textures, colours, clothing or surface, expression or condition,
+3. the setting: where it is, what is behind it, one or two supporting details of the place,
+4. framing and camera position (use the scene's shot_hint),
+5. the light: its source, direction and quality, plus the colour grade of the image,
+6. the medium and rendering style taken from the VISUAL STYLE block — name it explicitly in EVERY prompt so all scenes look like one piece.
 ${castLine}
 VARIETY IS MANDATORY — this is what makes the video watchable:
 - Consecutive scenes must show DIFFERENT things. Never open more than two scenes in a row with the same subject word.
 - Across the video, rotate what is in frame: the whole setting, the object being worked on, a close detail of it, the tool, the hands/person doing the action, the result, the surrounding environment.
 - Each scene has a "shot_hint" — use it as the framing for that scene unless the narration clearly needs another one.
 - A person or their hands should be in frame only when the narration is about doing something. Otherwise show the subject itself.
-The subject and genre come from the brief and the style below — a documentary shows real-world scenes and adults, a product video shows the product, a story video shows its characters. Do NOT turn the video into a cartoon unless the style says so.
-Allowed extras (at most one each, only if useful): one prop, one lighting word.
-NEVER include: continuity notes, OPENING/CONTINUATION labels, quotes of the narration, capitalised labels (SUBJECT:, CAMERA:…), lists of bans, style bibles, locale essays, words about text/logos/watermarks, camera move jargon (parallax, orbit, dolly), or ages / children / babies / named real people.
-Style to imply (do not quote it) — this also tells you the GENRE, and any "AVOID / do not use" list in it is a ban, never a request:
-${options.stylePrompt.slice(0, 700)}
+WHERE EACH PART OF A PROMPT COMES FROM — follow this split strictly:
+- WHAT is in frame (subject, people/objects, place, world) comes from the VIDEO BRIEF. A documentary shows real-world scenes and adults, a product video shows the product, a story video shows its characters. Do NOT turn the video into a cartoon unless the style says so.
+- HOW it looks (medium, genre, lighting, colour, era, level of realism) comes from the VISUAL STYLE. Restate its look in concrete visual words for each scene instead of quoting it back verbatim. Any "AVOID / do not use" list inside it is a ban, never a request — never repeat the banned words in the prompt.
+- The scene's narration only picks WHICH moment of that world this shot shows. Never describe the narration itself and never copy its wording.
+NEVER include: continuity notes, OPENING/CONTINUATION labels, quotes of the narration, capitalised labels (SUBJECT:, CAMERA:…), section headers, bullet points, lists of bans, style bibles, locale essays, words about text/logos/watermarks, camera move jargon (parallax, orbit, dolly, tracking), or ages / children / babies / named real people.
 Do NOT change narration, duration, chapter, or section. Return one visual_prompt per input scene id.
-Good example: "A woman in a lab coat lifts a glass beaker of blue liquid, medium shot, bright lab bench."
-Bad example: a 100-word brief with labels, bans and continuity notes.`,
-      user: `Title: ${options.title}
-Brief: ${options.brief.slice(0, 400)}
+Good example: "A woman in a creased white lab coat lifts a tall glass beaker of luminous blue liquid to eye level, steam curling off the rim, her focused expression lit from the side; behind her a cluttered bench of pipettes, notebooks and a humming centrifuge recedes into soft focus; medium shot at chest height, cool daylight from a tall window mixing with warm overhead lamps, muted teal and amber grade, photorealistic documentary cinematography, shallow depth of field, fine grain."
+Bad example: a bare "A scientist holds a beaker in a lab.", or a paragraph of labels, bans and continuity notes.`;
 
+  const briefBlock = options.brief.slice(0, MAX_BRIEF_CHARS_FOR_VISUALS);
+  const styleBlock = options.stylePrompt.slice(0, MAX_STYLE_CHARS_FOR_VISUALS);
+
+  const batches: SceneDraft[][] = [];
+  for (let i = 0; i < scenes.length; i += VISUAL_PROMPT_BATCH_SIZE) {
+    batches.push(scenes.slice(i, i + VISUAL_PROMPT_BATCH_SIZE));
+  }
+
+  const byId = new Map<string, string>();
+  /** Prompt đã viết, theo thứ tự — dùng làm ngữ cảnh chống lặp cho lô kế tiếp. */
+  const written: string[] = [];
+  let seriesCast = '';
+
+  for (let b = 0; b < batches.length; b++) {
+    const batch = batches[b];
+    if (b > 0) await sleep(INTER_CALL_DELAY_MS);
+    const offset = b * VISUAL_PROMPT_BATCH_SIZE;
+
+    const sceneBlock = batch
+      .map((s, i) => {
+        const index = offset + i;
+        return (
+          `Scene ${index + 1} [${s.id}] chapter=${s.chapter || '—'} section=${s.section || 'body'} ` +
+          `duration_hint=${Math.max(2, s.duration_hint || 6)}s ` +
+          `shot_hint=${SHOT_LADDER[index % SHOT_LADDER.length]}\n` +
+          `narration: ${(s.narration_segment || '').trim()}`
+        );
+      })
+      .join('\n\n');
+
+    // Lô sau phải nối tiếp lô trước: cùng thế giới, khác khung hình.
+    const continuityBlock =
+      b === 0
+        ? ''
+        : `\n=== ALREADY ESTABLISHED (earlier scenes of this same video) ===
+World / recurring cast: ${seriesCast || '(keep the world implied by the prompts below)'}
+Last prompts written — keep their world and rendering style, do NOT repeat their framing or subject:
+${written
+  .slice(-2)
+  .map((p) => `- ${p.slice(0, 320)}`)
+  .join('\n')}\n`;
+
+    try {
+      const parsed = await chatJson<{
+        series_cast?: string;
+        scenes?: Array<{ id?: string; visual_prompt?: string }>;
+      }>({
+        apiKey: options.apiKey,
+        model: options.openaiModel,
+        temperature: 0.4,
+        maxTokens: Math.min(
+          MAX_COMPLETION_TOKENS,
+          Math.max(1200, batch.length * VISUAL_PROMPT_TOKENS_PER_SCENE)
+        ),
+        system,
+        user: `Title: ${options.title}
+
+=== VIDEO BRIEF (decides WHAT is in frame) ===
+${briefBlock}
+
+=== VISUAL STYLE (decides HOW every shot looks — applies to all scenes) ===
+${styleBlock}
+${continuityBlock}
+=== SCENES ${offset + 1}–${offset + batch.length} of ${scenes.length} ===
 ${sceneBlock}
 
-Rewrite one SHORT visual_prompt (12–28 words) per scene. Same world and look throughout, but each shot shows something different — follow each scene's shot_hint and its own narration.`,
-    });
+Write one DETAILED visual_prompt (55–90 words) per scene, built from the brief and the visual style above. Same world and same rendering style throughout the whole video, but each shot shows something different — follow each scene's shot_hint and its own narration.`,
+      });
 
-    const byId = new Map<string, string>();
-    for (const row of parsed.scenes || []) {
-      const id = String(row.id || '').trim();
-      const vp = String(row.visual_prompt || '').trim();
-      if (id && vp) byId.set(id, vp);
+      if (!seriesCast) seriesCast = String(parsed.series_cast || '').trim();
+      for (const row of parsed.scenes || []) {
+        const id = String(row.id || '').trim();
+        const vp = String(row.visual_prompt || '').trim();
+        if (id && vp) byId.set(id, vp);
+      }
+    } catch {
+      /* Lô lỗi → giữ prompt cũ cho lô đó, không hỏng cả script. */
     }
-    if (!byId.size) return scenes;
 
-    return scenes.map((scene, index) => {
-      const next = byId.get(scene.id) || byId.get(`scene-${String(index + 1).padStart(2, '0')}`);
-      // Không gắn thêm "Recurring cast: …" nữa — AI đã lặp cast trong từng câu,
-      // và wrapper sẽ cắt mọi chỉ thị kiểu này trước khi gửi Snapgen.
-      return next ? { ...scene, visual_prompt: next } : scene;
-    });
-  } catch {
-    return scenes;
+    for (const scene of batch) {
+      const vp = byId.get(scene.id);
+      if (vp) written.push(vp);
+    }
   }
+
+  if (!byId.size) return scenes;
+
+  return scenes.map((scene, index) => {
+    const next = byId.get(scene.id) || byId.get(`scene-${String(index + 1).padStart(2, '0')}`);
+    // Không gắn thêm "Recurring cast: …" nữa — AI đã lặp cast trong từng câu,
+    // và wrapper sẽ cắt mọi chỉ thị kiểu này trước khi gửi Snapgen.
+    return next ? { ...scene, visual_prompt: next } : scene;
+  });
+}
+
+/** Số scene mỗi lần gọi khi dùng chỉ thị tự đặt — prompt dạng khối rất dài. */
+const CUSTOM_PROMPT_BATCH_SIZE = 6;
+/** Ước lượng token đầu ra cho MỘT scene dạng khối (`### FORMAT`… ~1500 ký tự). */
+const CUSTOM_PROMPT_TOKENS_PER_SCENE = 700;
+
+/**
+ * Viết visual_prompt bằng CHỈ THỊ TỰ ĐẶT của người dùng (`scenePromptInstruction`).
+ *
+ * Khác `enrichVisualContinuityWithAi` ở ba điểm:
+ *  1. Chỉ thị của người dùng thay hẳn luật viết prompt mặc định.
+ *  2. Kết quả giữ NGUYÊN VĂN — wrapper `buildSceneImagePrompt` bị bỏ qua ở bước gen,
+ *     nên các khối có cấu trúc (`### FORMAT`, `### LIGHT`…) không bị cắt/băm.
+ *  3. Chia lô: một khối ~1500 ký tự × 75 scene vượt xa giới hạn completion, nên
+ *     gọi theo lô nhỏ. Lô nào lỗi thì giữ prompt cũ của lô đó, không hỏng cả script.
+ */
+async function writeScenePromptsWithInstruction(options: {
+  apiKey: string;
+  openaiModel: string;
+  instruction: string;
+  title: string;
+  brief: string;
+  /** «Visual style» của bước 1 — vẫn là nguồn kiểu hình, chỉ thị tự đặt lo phần FORMAT. */
+  stylePrompt: string;
+  scenes: SceneDraft[];
+  onProgress?: (done: number, total: number) => void;
+}): Promise<SceneDraft[]> {
+  const { scenes } = options;
+  if (!scenes.length) return scenes;
+
+  const byId = new Map<string, string>();
+  const batches: SceneDraft[][] = [];
+  for (let i = 0; i < scenes.length; i += CUSTOM_PROMPT_BATCH_SIZE) {
+    batches.push(scenes.slice(i, i + CUSTOM_PROMPT_BATCH_SIZE));
+  }
+
+  for (let b = 0; b < batches.length; b++) {
+    const batch = batches[b];
+    if (b > 0) await sleep(INTER_CALL_DELAY_MS);
+
+    const sceneBlock = batch
+      .map((s, i) => {
+        const index = b * CUSTOM_PROMPT_BATCH_SIZE + i + 1;
+        return (
+          `Scene ${index} [${s.id}] chapter=${s.chapter || '—'} section=${s.section || 'body'} ` +
+          `duration_hint=${Math.max(2, s.duration_hint || 6)}s\n` +
+          `narration: ${(s.narration_segment || '').trim()}`
+        );
+      })
+      .join('\n\n');
+
+    try {
+      const parsed = await chatJson<{ scenes?: Array<{ id?: string; prompt?: string }> }>({
+        apiKey: options.apiKey,
+        model: options.openaiModel,
+        temperature: 0.6,
+        maxTokens: Math.min(
+          MAX_COMPLETION_TOKENS,
+          Math.max(1500, batch.length * CUSTOM_PROMPT_TOKENS_PER_SCENE)
+        ),
+        // Chỉ thị của người dùng đứng NGUYÊN VĂN ở đầu; app chỉ nối thêm hợp đồng
+        // đầu ra JSON để map prompt về đúng scene id.
+        system: `${options.instruction.trim()}
+
+OUTPUT CONTRACT (added by the app — obey it, it does not replace anything above):
+Return ONLY JSON in this exact shape:
+{ "scenes": [ { "id": "<the scene id given to you>", "prompt": "<the complete prompt for that scene, exactly in the format specified above>" } ] }
+Put the whole prompt for a scene into its "prompt" string, keeping every section and line break the instructions above ask for. Do not number scenes inside the prompt text, do not add commentary, and return one entry per scene id you were given.`,
+        user: `Video title: ${options.title}
+
+=== VIDEO BRIEF (decides WHAT is in frame — subject, people/objects, world) ===
+${options.brief.slice(0, 2000)}
+
+=== VISUAL STYLE (decides HOW every shot looks — same look in all scenes) ===
+${options.stylePrompt.slice(0, MAX_STYLE_CHARS_FOR_VISUALS)}
+
+Write a prompt for each of these ${batch.length} scenes, in the format the instructions above specify. The brief and the visual style define the subject and the look; the narration line only tells you which moment of that video this scene is.
+
+${sceneBlock}`,
+      });
+
+      for (const row of parsed.scenes || []) {
+        const id = String(row.id || '').trim();
+        const prompt = String(row.prompt || '').trim();
+        if (id && prompt) byId.set(id, prompt);
+      }
+    } catch {
+      /* Lô lỗi → giữ prompt cũ cho lô đó. */
+    }
+    options.onProgress?.(Math.min((b + 1) * CUSTOM_PROMPT_BATCH_SIZE, scenes.length), scenes.length);
+  }
+
+  if (!byId.size) return scenes;
+  return scenes.map((scene) => {
+    const next = byId.get(scene.id);
+    return next ? { ...scene, visual_prompt: next } : scene;
+  });
 }
 
 /**
@@ -886,15 +1054,26 @@ Return { "continuation": "<new sentences only, ≥ ${deficitBudget.amount} ${def
 
   // —— Phase 4: viết lại visual_prompt toàn video theo brief + style ——
   await sleep(INTER_CALL_DELAY_MS);
-  draft.scenes = await enrichVisualContinuityWithAi({
-    apiKey,
-    openaiModel,
-    title: draft.title,
-    brief: input.brief,
-    language,
-    stylePrompt: resolvedStyle,
-    scenes: draft.scenes,
-  });
+  const customInstruction = input.scenePromptInstruction?.trim();
+  draft.scenes = customInstruction
+    ? await writeScenePromptsWithInstruction({
+        apiKey,
+        openaiModel,
+        instruction: customInstruction,
+        title: draft.title,
+        brief: input.brief,
+        stylePrompt: resolvedStyle,
+        scenes: draft.scenes,
+      })
+    : await enrichVisualContinuityWithAi({
+        apiKey,
+        openaiModel,
+        title: draft.title,
+        brief: input.brief,
+        language,
+        stylePrompt: resolvedStyle,
+        scenes: draft.scenes,
+      });
   draft = finalizeDraft(
     { title: draft.title, narration: '', scenes: draft.scenes },
     targetDurationSec,
@@ -930,7 +1109,7 @@ Rules:
 - Scale spoken length ≈ ${ratio.toFixed(3)}× (${tooShort ? 'EXPAND' : 'COMPRESS'}).
 - Narration: keep the EXISTING tone, audience and vocabulary of the script — only change length (~${WORDS_PER_SECOND} words/sec).
 - One idea / one visual per scene. Continuous voiceover across scenes.
-- visual_prompt: English, SHORT (12–28 words), keep the same recurring subject and look already used in the script, ONE action matching the narration, ONE background. Do not change the genre or art style. No labels, no continuity notes, no quoted narration, no ages/children/real people. Brevity matters — long prompts make Veo fail.`;
+- visual_prompt: keep the EXISTING prompt of each scene word for word whenever that scene survives — it already carries the look of the video. Only write a new one for a scene you actually split or merge, and then match the existing prompts: English, 55–90 words of flowing description (subject and its action, concrete materials and colours, setting, framing, light and colour grade, the same rendering style as the other scenes). No labels, no continuity notes, no quoted narration, no ages/children/real people.`;
 
   const sceneLines = script.scenes
     .map((s, i) => {
