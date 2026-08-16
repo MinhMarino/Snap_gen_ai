@@ -4,7 +4,13 @@ import {
   looksLikeLlmInstruction,
   stripInlineMarkupJunk,
 } from './narration-clean';
-import type { ImageFamily, MediaKind, ModelOption, VideoFamily } from './types';
+import type {
+  ImageFamily,
+  MediaKind,
+  ModelOption,
+  ScriptDraft,
+  VideoFamily,
+} from './types';
 
 export const VIDEO_FAMILIES: { id: VideoFamily; label: string }[] = [
   { id: 'veo', label: 'Veo / Omni' },
@@ -596,6 +602,88 @@ export function planSceneChunks(
   return { mode: 'multi-cut', chunks };
 }
 
+/** Tổng footage `planSceneChunks` THỰC SỰ đặt hàng cho một cảnh dài `desiredSeconds`. */
+export function plannedClipSeconds(
+  modelId: string,
+  family: string,
+  desiredSeconds: number
+): number {
+  return planSceneChunks(modelId, family, desiredSeconds).chunks.reduce((sum, d) => sum + d, 0);
+}
+
+/** Lệch dưới mức này coi như bằng nhau (sai số dấu phẩy động, không phải hụt hình). */
+const SCENE_DURATION_EPSILON = 0.01;
+
+/**
+ * Những độ dài cảnh mà model trả về ĐÚNG BẰNG số đặt hàng.
+ *
+ * Model chỉ nhận vài mốc rời rạc (Veo: 4/6/8s) và `clampDuration` làm tròn về mốc
+ * GẦN NHẤT, nên cảnh 9,05s chỉ nhận được 8s footage. `planSceneChunks` còn một
+ * nhánh tắt nữa: cảnh dài hơn max một ít (9–12s với Veo) chỉ gen 1 shot 8s. Cả hai
+ * chỗ đều âm thầm hụt hình so với lời đọc.
+ *
+ * Danh sách dưới đây là các "điểm bất động": đặt bao nhiêu thì nhận đúng bấy nhiêu.
+ * Kiểm bằng chính `planSceneChunks` nên không bao giờ lệch khỏi luật đặt hàng thật.
+ */
+export function achievableSceneDurations(
+  modelId: string,
+  family: string,
+  maxSeconds: number
+): number[] {
+  const model = getModelById(modelId);
+  const allowed = model?.durations?.length ? [...model.durations] : [maxSingleShotDuration(modelId)];
+  const max = Math.max(1, Math.max(...allowed));
+  const limit = Math.max(max, Math.min(maxSeconds, MAX_SCENE_DURATION_SEC));
+
+  const candidates = new Set<number>();
+  for (let k = 0; k * max <= limit; k++) {
+    if (k > 0) candidates.add(k * max);
+    for (const d of allowed) candidates.add(k * max + d);
+  }
+
+  return [...candidates]
+    .filter((sec) => sec > 0 && sec <= limit + max)
+    .filter(
+      (sec) => Math.abs(plannedClipSeconds(modelId, family, sec) - sec) < SCENE_DURATION_EPSILON
+    )
+    .sort((a, b) => a - b);
+}
+
+/**
+ * Kéo độ dài một cảnh về mốc model làm được — footage khớp lời đọc, không phải
+ * vá bằng frame đứng hình lúc ghép.
+ *
+ * `atLeast` (cảnh cuối): chỉ chọn mốc ĐỦ DÀI, thà dư vài giây rồi cắt còn hơn
+ * cụt mất câu chốt. `tolerance` nới luật đó: hụt trong ngần này giây thì cứ lấy mốc
+ * ngắn hơn, bước ghép vá nốt bằng frame cuối. Không có nó, model bước 25s (Sora Pro)
+ * phải gen thêm nguyên một clip 25s để bù 3s cuối — vừa tốn credit vừa để lại 22s
+ * video không có tiếng.
+ */
+export function snapSceneDurationToModel(
+  modelId: string,
+  family: string,
+  desiredSeconds: number,
+  options?: { atLeast?: boolean; tolerance?: number }
+): number {
+  const desired = Math.max(0.5, Number(desiredSeconds) || 0);
+  const list = achievableSceneDurations(modelId, family, desired * 2 + 8);
+  if (!list.length) return desired;
+
+  if (options?.atLeast) {
+    const tolerance = Math.max(0, options.tolerance ?? 0);
+    const under = [...list].reverse().find((sec) => sec <= desired + SCENE_DURATION_EPSILON);
+    if (under != null && desired - under <= tolerance) return under;
+    const over = list.find((sec) => sec >= desired - SCENE_DURATION_EPSILON);
+    if (over != null) return over;
+  }
+
+  // Hoà thì lấy mốc NGẮN hơn: phần dư dồn sang cảnh sau (bước chia cảnh bám mốc
+  // gốc nên không cộng dồn), và ít tốn thêm một lượt gen.
+  return list.reduce((best, sec) =>
+    Math.abs(sec - desired) < Math.abs(best - desired) ? sec : best
+  );
+}
+
 /*
  * ĐÃ XOÁ: `withStylePrompt` (nối `". Style: <style prompt>"` vào đuôi visual_prompt).
  *
@@ -654,6 +742,63 @@ const PROMPT_DIRECTIVE_PATTERNS: RegExp[] = [
  * mâu thuẫn vẫn là nguyên nhân chính làm Veo Fast render hỏng.
  */
 const MAX_VISUAL_PROMPT_CHARS = 900;
+
+// ---------------------------------------------------------------------------
+// Visual prompt có cấu trúc: khối cảnh riêng + ba khối cố định dùng chung
+// ---------------------------------------------------------------------------
+
+/**
+ * «Style bible» rút ra MỘT LẦN từ «Visual style», rồi ghép nguyên văn vào prompt
+ * của mọi cảnh — đúng cách người ta viết wrapper prompt cho Veo bằng tay.
+ *
+ * Bắt model tự diễn đạt lại phong cách ở từng cảnh (bản cũ) thì mỗi cảnh lệch đi
+ * một ít, xem cả video thấy màu và chất liệu trôi dần. Khối cố định thì không.
+ */
+export interface VisualStyleBible {
+  /** Chất liệu / kiểu render / độ thực / máy quay - ống kính. */
+  style: string;
+  /** Bảng màu, độ bão hoà, tương phản, mức đen, grade. */
+  color: string;
+  /** Cách mọi thứ chuyển động — chỉ dùng cho video. */
+  motion?: string;
+  /** Danh sách cấm, phân tách bằng dấu phẩy. */
+  negative: string;
+  /**
+   * Một dòng tả thế giới + nhân vật/vật thể lặp lại.
+   * KHÔNG ghép vào prompt — chỉ dùng làm ngữ cảnh khi viết phần tả cảnh.
+   */
+  seriesCast?: string;
+}
+
+export function hasVisualStyleBible(bible?: VisualStyleBible | null): boolean {
+  return Boolean(bible?.style?.trim() && bible?.color?.trim() && bible?.negative?.trim());
+}
+
+/**
+ * Prompt hoàn chỉnh của một cảnh: đoạn tả cảnh + STYLE + COLOR + MOTION + NEGATIVE.
+ *
+ * Nhãn viết hoa đầu dòng vừa để model đọc ra từng phần, vừa là dấu nhận biết cho
+ * `isStructuredVisualPrompt` — prompt dạng này đã đầy đủ nên bước gen KHÔNG được
+ * đem đi rút gọn hay nối thêm gì nữa.
+ */
+export function buildStructuredVisualPrompt(
+  sceneText: string,
+  bible: VisualStyleBible
+): string {
+  const scene = String(sceneText || '').trim();
+  if (!scene || !hasVisualStyleBible(bible)) return scene;
+
+  const blocks = [scene, `STYLE: ${bible.style.trim()}`, `COLOR: ${bible.color.trim()}`];
+  if (bible.motion?.trim()) blocks.push(`MOTION: ${bible.motion.trim()}`);
+  blocks.push(`NEGATIVE: ${bible.negative.trim()}`);
+  return blocks.join('\n\n');
+}
+
+/** Prompt đã có đủ khối cố định → dùng nguyên văn, không compact, không nối đuôi. */
+export function isStructuredVisualPrompt(text?: string | null): boolean {
+  const value = String(text || '');
+  return /^STYLE:/m.test(value) && /^NEGATIVE:/m.test(value);
+}
 
 /**
  * Chữ của các hệ không phải Latin — kana/Hán/Hangul, Thái, Cyrillic, Ả Rập,
@@ -949,7 +1094,6 @@ const MUSIC_STILL_FRAME_RULE = 'one still frame, no camera movement, sharp and c
 
 export interface MusicScenePromptOptions {
   visualPrompt: string;
-  stylePrompt?: string;
   /**
    * Cast/style bible ngắn, LẶP NGUYÊN VĂN ở mọi scene — cách rẻ nhất để chống
    * nhân vật "biến hình" giữa các scene (mỗi scene là một lần gen độc lập).
@@ -987,6 +1131,12 @@ const MAX_MUSIC_VISUAL_PROMPT_CHARS = 320;
  *  2. Luân phiên cỡ cảnh khi storyboard không nói rõ → đỡ đơn điệu.
  *  3. Nói rõ "một khung đứng yên" khi ảnh không còn Ken Burns.
  *
+ * KHÔNG nối «Visual style» vào đuôi prompt: bước viết kịch bản MV đã yêu cầu AI
+ * tả kiểu hình vào TỪNG visual_prompt ("Style (same in every visual_prompt)"),
+ * nên nối lại ở đây là dán nguyên văn một khối giống hệt nhau vào mọi scene —
+ * thừa, và style viết dạng đoạn dài thì lấn át phần tả riêng của scene. Prompt
+ * gửi Snapgen giờ chỉ dựng từ visual_prompt (+ cast lock và vài luật ngắn).
+ *
  * Bản cũ ghép 6 khối mệnh lệnh viết hoa (CAST LOCK / Framing / Energy / Style /
  * culture rule / HARD RULES / SAFETY) → prompt ~600 ký tự toàn chỉ thị, phần tả
  * hình chỉ còn là một mẩu ở giữa. Giờ mọi thứ là mệnh đề ngắn nối bằng dấu phẩy,
@@ -1015,12 +1165,7 @@ export function buildMusicSceneImagePrompt(options: MusicScenePromptOptions): st
   const energy = musicEnergyLine(options.section);
   if (energy) parts.push(energy);
 
-  const style = options.stylePrompt?.trim().replace(/\.*$/, '');
-  // Chỉ bỏ style khi nó thực sự đã nằm trong visual_prompt — style quá ngắn
-  // (vài ký tự) rất dễ "trùng" ngẫu nhiên nên không dùng để loại.
-  const styleAlready =
-    !!style && style.length >= 12 && visual.toLowerCase().includes(style.toLowerCase());
-  if (style && !styleAlready) parts.push(style);
+  // KHÔNG nối «Visual style» nữa — xem chú thích ở đầu hàm.
 
   // Không còn mệnh đề bối cảnh văn hoá theo ngôn ngữ — xem chú thích ở
   // `buildSceneImagePrompt`. Với mascot hoạt hình thì câu đó vốn cũng chỉ là nhiễu.
@@ -1514,6 +1659,59 @@ export function resolveSceneDensity(raw?: string | null): SceneDensityId {
   return DEFAULT_SCENE_DENSITY;
 }
 
+/**
+ * Id của scene giữ TOÀN BỘ lời đọc khi kịch bản chưa phân cảnh.
+ *
+ * Bước 1 chỉ viết lời; phân cảnh đợi tới khi đo được độ dài audio thật (bước 3).
+ * Giữ lời trong một scene thay vì mảng rỗng để mọi đường TTS/lưu draft/hiển thị
+ * hiện có chạy nguyên như cũ, không phải rắc null-check khắp nơi.
+ */
+export const NARRATION_ONLY_SCENE_ID = 'narration-01';
+
+/** Kịch bản mới: đã có lời đọc nhưng chưa scene nào có visual_prompt. */
+export function isNarrationOnlyScript(
+  script: { scenes?: Array<{ visual_prompt?: string }> } | null | undefined
+): boolean {
+  const scenes = script?.scenes;
+  if (!scenes?.length) return true;
+  return scenes.every((scene) => !(scene.visual_prompt || '').trim());
+}
+
+/** Toàn bộ lời đọc của kịch bản, dù đã phân cảnh hay chưa. */
+export function narrationTextOfScript(
+  script: { narration?: string; scenes?: Array<{ narration_segment?: string }> } | null | undefined
+): string {
+  const fromScenes = (script?.scenes || [])
+    .map((scene) => (scene.narration_segment || '').trim())
+    .filter(Boolean)
+    .join('\n\n');
+  return fromScenes || (script?.narration || '').trim();
+}
+
+/** Gói lời đọc thành kịch bản CHƯA phân cảnh (một scene duy nhất, chưa có prompt hình). */
+export function buildNarrationOnlyScript(options: {
+  title: string;
+  narration: string;
+  targetDurationSec?: number;
+}): ScriptDraft {
+  const narration = options.narration.trim();
+  return {
+    title: options.title.trim() || 'Untitled Video',
+    narration,
+    scenes: [
+      {
+        id: NARRATION_ONLY_SCENE_ID,
+        visual_prompt: '',
+        narration_segment: narration,
+        duration_hint: Math.max(
+          MIN_SCENE_BEAT_SEC,
+          Math.round(options.targetDurationSec || estimateSpokenSeconds(narration, MIN_SCENE_BEAT_SEC))
+        ),
+      },
+    ],
+  };
+}
+
 /** Giới hạn số media hợp lệ theo thời lượng (mỗi scene ≤ MAX_SCENE_DURATION_SEC). */
 export function clampTargetSceneCount(targetDurationSec: number, count: number): number {
   const target = Math.max(MIN_SCENE_BEAT_SEC * 3, Math.round(targetDurationSec));
@@ -1525,9 +1723,102 @@ export function clampTargetSceneCount(targetDurationSec: number, count: number):
 }
 /** Absolute ceiling for one scene (extend/multi-cut covers model shot limits). */
 export const MAX_SCENE_DURATION_SEC = 180;
-export const WORDS_PER_SECOND = 2.5;
+/**
+ * Nhịp đọc MẶC ĐỊNH — chỉ dùng khi chưa đo được giọng thật.
+ *
+ * Nhịp thật phụ thuộc giọng + ngôn ngữ + tốc độ TTS và lệch rất xa con số này
+ * (tiếng Nhật flash_v2_5 đọc nhanh hơn 5 ký tự/s khá nhiều), mà toàn bộ ngân sách
+ * lời đọc lại tính từ đây → video ra ngắn hơn thời lượng đặt. Vì vậy `speech-rate.ts`
+ * bên main đo lại tỉ lệ (ký tự | từ) / giây từ chính file audio TTS vừa tạo rồi nạp
+ * vào đây bằng `setSpeechRateProfile()`.
+ */
+export const DEFAULT_WORDS_PER_SECOND = 2.5;
 /** Nhịp đọc tiếng Nhật/Trung/Hàn ≈ ký tự/giây (không dựa vào khoảng trắng). */
-export const CJK_CHARS_PER_SECOND = 5;
+export const DEFAULT_CJK_CHARS_PER_SECOND = 5;
+
+/**
+ * Biên an toàn cho nhịp đọc: một lần đo hỏng (audio hụt, text lệch) không được
+ * phép kéo ngân sách lời đi quá xa. Biên rộng để vẫn ôm được giọng đọc nhanh.
+ */
+export const MIN_WORDS_PER_SECOND = 1.2;
+export const MAX_WORDS_PER_SECOND = 6;
+export const MIN_CJK_CHARS_PER_SECOND = 2.5;
+export const MAX_CJK_CHARS_PER_SECOND = 14;
+
+export interface SpeechRateProfile {
+  /** Latin: từ/giây. */
+  wordsPerSec: number;
+  /** CJK: ký tự/giây. */
+  cjkCharsPerSec: number;
+}
+
+/** Nhịp đọc đang áp dụng + xuất xứ của nó, để hiện trong UI. */
+export interface SpeechRateInfo extends SpeechRateProfile {
+  /** Ngôn ngữ đang xét thuộc nhóm nào. */
+  kind: 'cjk' | 'latin';
+  /** Nhịp đọc áp dụng cho nhóm đó (ký tự/s hoặc từ/s). */
+  perSec: number;
+  unitLabel: 'ký tự' | 'từ';
+  /** manual = ô Settings, measured = đo từ audio thật, default = chưa đo lần nào. */
+  source: 'manual' | 'measured' | 'default';
+  /** Số lần đo đã gộp vào con số đang dùng. */
+  samples: number;
+  languageKey: string;
+  lastUnits?: number;
+  lastSeconds?: number;
+  updatedAt?: string;
+  defaultPerSec: number;
+}
+
+export function clampWordsPerSec(value: unknown): number {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n <= 0) return DEFAULT_WORDS_PER_SECOND;
+  return Math.min(MAX_WORDS_PER_SECOND, Math.max(MIN_WORDS_PER_SECOND, n));
+}
+
+export function clampCjkCharsPerSec(value: unknown): number {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n <= 0) return DEFAULT_CJK_CHARS_PER_SECOND;
+  return Math.min(MAX_CJK_CHARS_PER_SECOND, Math.max(MIN_CJK_CHARS_PER_SECOND, n));
+}
+
+/**
+ * Nhịp đọc đang hiệu lực của TIẾN TRÌNH này. Main và renderer chạy hai process
+ * khác nhau nên mỗi bên giữ một bản: main nạp từ số đo thật trước mỗi lần viết
+ * lời / chia cảnh, renderer nạp qua IPC để mấy dòng ước lượng "~X phút" khớp.
+ */
+let activeSpeechRate: SpeechRateProfile = {
+  wordsPerSec: DEFAULT_WORDS_PER_SECOND,
+  cjkCharsPerSec: DEFAULT_CJK_CHARS_PER_SECOND,
+};
+
+export function getSpeechRateProfile(): SpeechRateProfile {
+  return { ...activeSpeechRate };
+}
+
+export function setSpeechRateProfile(
+  next: Partial<SpeechRateProfile> | null | undefined
+): SpeechRateProfile {
+  activeSpeechRate = {
+    wordsPerSec:
+      next?.wordsPerSec == null
+        ? activeSpeechRate.wordsPerSec
+        : clampWordsPerSec(next.wordsPerSec),
+    cjkCharsPerSec:
+      next?.cjkCharsPerSec == null
+        ? activeSpeechRate.cjkCharsPerSec
+        : clampCjkCharsPerSec(next.cjkCharsPerSec),
+  };
+  return { ...activeSpeechRate };
+}
+
+export function resetSpeechRateProfile(): SpeechRateProfile {
+  activeSpeechRate = {
+    wordsPerSec: DEFAULT_WORDS_PER_SECOND,
+    cjkCharsPerSec: DEFAULT_CJK_CHARS_PER_SECOND,
+  };
+  return { ...activeSpeechRate };
+}
 /** Narration phải đạt tối thiểu tỉ lệ này so với target trước TTS. */
 export const MIN_NARRATION_COVERAGE = 0.85;
 /**
@@ -1537,10 +1828,6 @@ export const MIN_NARRATION_COVERAGE = 0.85;
 export const MIN_SCENE_NARRATION_FILL = 0.6;
 /** Bỏ qua lệch nhỏ (giây) — làm tròn / scale hint. */
 export const MIN_SCENE_NARRATION_GAP_SEC = 2;
-/** Sau TTS: nếu |audio − target| / target > ngưỡng này → AI rewrite + TTS lại. */
-export const AUDIO_DURATION_TOLERANCE = 0.03;
-/** Số lần TTS tối đa trong vòng fit duration. */
-export const MAX_TTS_FIT_ATTEMPTS = 4;
 
 export interface SceneDurationPlan {
   targetDurationSec: number;
@@ -1553,7 +1840,7 @@ export interface SceneDurationPlan {
   maxBeatSec: number;
   /** Soft average nếu chia đều — chỉ để hiển thị. */
   secondsPerScene: number;
-  /** Total words needed ≈ target * WORDS_PER_SECOND. */
+  /** Tổng số từ cần đọc ≈ target × nhịp đọc đang hiệu lực. */
   targetWordCount: number;
 }
 
@@ -1613,7 +1900,7 @@ export function planScenesFromDuration(
     typicalBeatSec,
     maxBeatSec,
     secondsPerScene,
-    targetWordCount: Math.round(target * WORDS_PER_SECOND),
+    targetWordCount: Math.round(target * activeSpeechRate.wordsPerSec),
     sceneCount: sceneCountHint,
     durationPerScene: secondsPerScene,
   };
@@ -1689,46 +1976,60 @@ export function countCjkChars(text: string): number {
   return (text.match(CJK_CHAR_RE) || []).length;
 }
 
+/** Token phải có ít nhất một chữ/số mới là "từ" đọc được. */
+const SPOKEN_TOKEN_RE = /[\p{L}\p{N}]/u;
+
+/**
+ * Số từ Latin trong câu, BỎ token chỉ có dấu câu.
+ *
+ * Quan trọng với tiếng Nhật/Trung: bỏ ký tự CJK ra rồi tách khoảng trắng thì mỗi
+ * dấu 。、「」 thành một "từ". Một trang tiếng Nhật có hàng trăm dấu như vậy →
+ * ước lượng thời lượng đọc phồng lên cả phút, và vòng viết bù ở bước 1 dừng sớm
+ * vì tưởng đã đủ dài.
+ */
+function countLatinWords(text: string): number {
+  return text
+    .replace(CJK_CHAR_RE, ' ')
+    .trim()
+    .split(/\s+/)
+    .filter((token) => SPOKEN_TOKEN_RE.test(token)).length;
+}
+
 export function countSpokenWords(text: string): number {
   const trimmed = text.trim();
   if (!trimmed) return 0;
   // Tiếng Nhật/Trung/Hàn thường không cách từ — đếm ký tự CJK.
   const cjk = countCjkChars(trimmed);
-  const latin = trimmed
-    .replace(CJK_CHAR_RE, ' ')
-    .trim()
-    .split(/\s+/)
-    .filter(Boolean).length;
+  const latin = countLatinWords(trimmed);
   if (cjk >= 8 && cjk >= latin * 2) return cjk;
   if (cjk > 0 && latin === 0) return cjk;
   // Hỗn hợp: quy đổi CJK → “từ tương đương” để so sánh ngân sách từ Latin.
   if (cjk > 0) {
-    return latin + Math.round(cjk * (WORDS_PER_SECOND / CJK_CHARS_PER_SECOND));
+    return (
+      latin +
+      Math.round(cjk * (activeSpeechRate.wordsPerSec / activeSpeechRate.cjkCharsPerSec))
+    );
   }
   return latin;
 }
 
-/** Natural speech pacing — Latin ≈ 2.5 từ/s, CJK ≈ 5 ký tự/s. */
+/** Nhịp đọc thật của giọng đang dùng (mặc định Latin 2.5 từ/s, CJK 5 ký tự/s). */
 export function estimateSpokenSeconds(text: string, fallback = 6): number {
   const trimmed = text.trim();
   if (!trimmed) return fallback;
 
   const cjk = countCjkChars(trimmed);
-  const latin = trimmed
-    .replace(CJK_CHAR_RE, ' ')
-    .trim()
-    .split(/\s+/)
-    .filter(Boolean).length;
+  const latin = countLatinWords(trimmed);
 
   let seconds = 0;
-  if (cjk) seconds += cjk / CJK_CHARS_PER_SECOND;
-  if (latin) seconds += latin / WORDS_PER_SECOND;
+  if (cjk) seconds += cjk / activeSpeechRate.cjkCharsPerSec;
+  if (latin) seconds += latin / activeSpeechRate.wordsPerSec;
   if (!seconds) return fallback;
   return Math.max(2, seconds);
 }
 
 export function wordsForDurationSec(seconds: number): number {
-  return Math.max(4, Math.round(Math.max(0, seconds) * WORDS_PER_SECOND));
+  return Math.max(4, Math.round(Math.max(0, seconds) * activeSpeechRate.wordsPerSec));
 }
 
 /** Ngân sách lời thoại theo ngôn ngữ (từ hoặc ký tự CJK). */
@@ -1737,13 +2038,14 @@ export function spokenBudgetForDurationSec(
   language?: string | null
 ): { amount: number; unitLabel: string; perSec: number } {
   if (isCjkLanguage(language)) {
-    const amount = Math.max(8, Math.round(Math.max(0, seconds) * CJK_CHARS_PER_SECOND));
-    return { amount, unitLabel: 'ký tự', perSec: CJK_CHARS_PER_SECOND };
+    const perSec = activeSpeechRate.cjkCharsPerSec;
+    const amount = Math.max(8, Math.round(Math.max(0, seconds) * perSec));
+    return { amount, unitLabel: 'ký tự', perSec };
   }
   return {
     amount: wordsForDurationSec(seconds),
     unitLabel: 'từ',
-    perSec: WORDS_PER_SECOND,
+    perSec: activeSpeechRate.wordsPerSec,
   };
 }
 

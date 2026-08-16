@@ -2,6 +2,7 @@ import type { JobProgress, SceneJobState } from '../../shared/types';
 
 const PHASE_LABEL: Record<string, string> = {
   idle: 'Chờ',
+  script: 'Phân cảnh',
   tts: 'Voiceover',
   whisper: 'Đồng bộ lời',
   video: 'Render video',

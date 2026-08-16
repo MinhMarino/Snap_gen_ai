@@ -255,17 +255,78 @@ export async function convertAudioToMp3(inputPath: string, outputPath: string): 
   return outputPath;
 }
 
-async function makeSilenceMp3(outPath: string, durationSec: number): Promise<string> {
+/**
+ * Đoạn trung gian PHẢI là WAV, không được là MP3.
+ *
+ * Mỗi file MP3 mang sẵn encoder delay ở đầu và padding cho tròn frame 1152 mẫu
+ * ở cuối; muốn bỏ đúng hai phần đó phải đọc header Xing của TỪNG file. Nối bằng
+ * `-c copy` thì chỉ header file đầu còn tác dụng → delay + padding của các file
+ * sau biến thành im lặng THẬT. Đo trên ffmpeg 6.0: hai đoạn 1.000s nối kiểu này
+ * ra 90180 mẫu thay vì 88200 — hở đúng 45ms ở mối nối.
+ *
+ * WAV không có delay/padding nên nối bao nhiêu đoạn cũng khít; encode MP3 một
+ * lần duy nhất ở cuối cũng tránh luôn việc mã hoá lossy chồng lossy.
+ */
+const PCM_OUTPUT_ARGS = ['-c:a', 'pcm_s16le', '-ar', '44100', '-ac', '1'];
+
+/** Ngưỡng coi là im lặng khi cắt rìa đoạn TTS — thấp hơn hẳn mọi phụ âm nhẹ. */
+const EDGE_SILENCE_THRESHOLD = '-45dB';
+/** Giữ lại chút im lặng ở rìa để không cắt cụt đầu/đuôi từ. */
+const EDGE_SILENCE_KEEP_SEC = 0.03;
+/** areverse phải giữ cả đoạn trong RAM — đoạn quá dài thì bỏ cắt đuôi. */
+const EDGE_TRIM_MAX_SEC = 8 * 60;
+
+function trimLeadingSilenceFilter(): string {
+  return `silenceremove=start_periods=1:start_silence=${EDGE_SILENCE_KEEP_SEC}:start_threshold=${EDGE_SILENCE_THRESHOLD}:detection=peak`;
+}
+
+/**
+ * Engine TTS thường trả về mỗi đoạn kèm im lặng đầu/cuối. Cộng với khoảng nghỉ
+ * chủ động khi nối (170ms ở ranh scene) là thành một quãng ngập ngừng dài rõ
+ * rệt — đo thử với 0.3s lặng đầu + 0.4s lặng cuối thì mối nối hở 870ms. Cắt rìa
+ * trước rồi mới chèn khoảng nghỉ đã định thì còn đúng 227ms như thiết kế.
+ */
+function trimEdgeSilenceFilters(trimTail: boolean): string[] {
+  const lead = trimLeadingSilenceFilter();
+  if (!trimTail) return [lead];
+  return [lead, 'areverse', lead, 'areverse'];
+}
+
+async function makeSilenceWav(outPath: string, durationSec: number): Promise<string> {
   const t = Math.max(0.04, durationSec);
   await run(
     ffmpeg()
       .input('anullsrc=r=44100:cl=mono')
       .inputOptions(['-f', 'lavfi'])
-      .outputOptions(['-t', t.toFixed(3), '-c:a', 'libmp3lame', '-q:a', '4'])
+      .outputOptions(['-t', t.toFixed(3), ...PCM_OUTPUT_ARGS])
       .output(outPath),
-    { timeoutMs: 60_000, label: 'silence-mp3' }
+    { timeoutMs: 60_000, label: 'silence-wav' }
   );
   return outPath;
+}
+
+/** Nối các file WAV đã chuẩn hoá rồi encode MP3 đúng một lần. */
+async function concatWavPartsToMp3(
+  parts: string[],
+  outputPath: string,
+  workDir: string,
+  label: string
+): Promise<string> {
+  const listFile = path.join(workDir, `${label}-list.txt`);
+  fs.writeFileSync(
+    listFile,
+    parts.map((p) => `file '${p.replace(/\\/g, '/')}'`).join('\n'),
+    'utf8'
+  );
+  await run(
+    ffmpeg()
+      .input(listFile)
+      .inputOptions(['-f', 'concat', '-safe', '0'])
+      .outputOptions([AUDIO_ONLY, '-c:a', 'libmp3lame', '-q:a', '4', '-ar', '44100', '-ac', '1'])
+      .output(outputPath),
+    { timeoutMs: 10 * 60 * 1000, label }
+  );
+  return outputPath;
 }
 
 /**
@@ -290,37 +351,66 @@ export async function concatAudioFiles(
   }
 
   const pauseAfterMs = options?.pauseAfterMs || [];
-  const sequence: string[] = [];
+  const partsDir = path.join(workDir, `concat-parts-${Date.now()}`);
+  fs.mkdirSync(partsDir, { recursive: true });
+
+  // Mỗi đoạn: cắt im lặng rìa → chèn ĐÚNG khoảng nghỉ đã định → xuất WAV.
+  const parts: string[] = [];
   for (let i = 0; i < inputPaths.length; i++) {
-    sequence.push(inputPaths[i]);
     const pauseMs = i < inputPaths.length - 1 ? Math.max(0, pauseAfterMs[i] || 0) : 0;
-    if (pauseMs >= 40) {
-      const silencePath = path.join(workDir, `pause-${String(i).padStart(3, '0')}.mp3`);
-      await makeSilenceMp3(silencePath, pauseMs / 1000);
-      sequence.push(silencePath);
+    const partPath = path.join(partsDir, `part-${String(i).padStart(3, '0')}.wav`);
+    const label = `concat-audio part ${i + 1}/${inputPaths.length}`;
+    const padFilter = pauseMs >= 20 ? [`apad=pad_dur=${(pauseMs / 1000).toFixed(3)}`] : [];
+    const sourceDur = await getDurationSafe(inputPaths[i], 0);
+
+    const writePart = async (filters: string[]): Promise<void> => {
+      const cmd = ffmpeg(inputPaths[i]).outputOptions([AUDIO_ONLY, ...PCM_OUTPUT_ARGS]);
+      if (filters.length) cmd.audioFilters(filters);
+      await run(cmd.output(partPath), { timeoutMs: 5 * 60 * 1000, label });
+    };
+
+    await writePart([
+      ...trimEdgeSilenceFilters(sourceDur > 0 && sourceDur <= EDGE_TRIM_MAX_SEC),
+      ...padFilter,
+    ]);
+
+    // Đoạn toàn im lặng (TTS trả về rỗng) sẽ bị silenceremove xoá sạch — giữ
+    // nguyên bản còn hơn để lọt một part 0 mẫu làm hỏng cả bước nối.
+    if ((await getDurationSafe(partPath, 0)) < 0.01) {
+      await writePart(padFilter);
     }
+    parts.push(partPath);
   }
 
-  const listFile = path.join(workDir, `audio-concat-${Date.now()}.txt`);
-  fs.writeFileSync(
-    listFile,
-    sequence.map((p) => `file '${p.replace(/\\/g, '/')}'`).join('\n'),
-    'utf8'
-  );
-  await run(
-    ffmpeg()
-      .input(listFile)
-      .inputOptions(['-f', 'concat', '-safe', '0'])
-      .outputOptions([AUDIO_ONLY, '-c:a', 'libmp3lame', '-q:a', '4', '-ar', '44100', '-ac', '1'])
-      .output(outputPath),
-    { timeoutMs: 10 * 60 * 1000, label: 'concat-audio' }
-  );
+  await concatWavPartsToMp3(parts, outputPath, partsDir, 'concat-audio');
   return outputPath;
 }
 
 export type NarrationTrackItem =
   | { kind: 'slice'; start: number; end: number }
   | { kind: 'silence'; duration: number };
+
+/**
+ * Các lát nói liền nhau (hết scene này sang scene kia không chèn im lặng) được
+ * gộp thành MỘT lát — bớt được một điểm cắt, và điểm cắt nào cũng là một chỗ
+ * có thể nghe thấy khựng.
+ */
+function coalesceNarrationItems(items: NarrationTrackItem[]): NarrationTrackItem[] {
+  const merged: NarrationTrackItem[] = [];
+  for (const item of items) {
+    const prev = merged[merged.length - 1];
+    if (item.kind === 'slice' && prev?.kind === 'slice' && Math.abs(prev.end - item.start) < 0.005) {
+      prev.end = Math.max(prev.end, item.end);
+      continue;
+    }
+    if (item.kind === 'silence' && prev?.kind === 'silence') {
+      prev.duration += item.duration;
+      continue;
+    }
+    merged.push({ ...item });
+  }
+  return merged;
+}
 
 /**
  * Dựng narration.mp3 từ bản đọc liền mạch: giữ nguyên các lát nói,
@@ -332,50 +422,29 @@ export async function buildNarrationTrack(options: {
   outputPath: string;
   workDir: string;
 }): Promise<string> {
-  const { sourcePath, items, outputPath, workDir } = options;
-  if (!items.length) throw new Error('No narration items to build.');
+  const { sourcePath, outputPath, workDir } = options;
+  if (!options.items.length) throw new Error('No narration items to build.');
 
   fs.mkdirSync(workDir, { recursive: true });
+  const items = coalesceNarrationItems(options.items);
   const parts: string[] = [];
 
   for (let i = 0; i < items.length; i++) {
     const item = items[i];
-    const out = path.join(workDir, `narr-${i}.mp3`);
+    const out = path.join(workDir, `narr-${i}.wav`);
 
     if (item.kind === 'silence') {
-      await run(
-        ffmpeg()
-          .input('anullsrc=r=44100:cl=mono')
-          .inputOptions(['-f', 'lavfi'])
-          .outputOptions([
-            '-t',
-            Math.max(0.1, item.duration).toFixed(3),
-            '-c:a',
-            'libmp3lame',
-            '-q:a',
-            '4',
-          ])
-          .output(out)
-      );
+      await makeSilenceWav(out, Math.max(0.1, item.duration));
     } else {
       const length = Math.max(0.05, item.end - item.start);
       await run(
         ffmpeg(sourcePath)
+          // -ss trước input + accurate_seek (mặc định): giải mã rồi bỏ tới đúng
+          // mốc, không nhảy theo frame MP3 → lát cắt không lệch, không glitch.
           .inputOptions(['-ss', item.start.toFixed(3)])
-          .outputOptions([
-            AUDIO_ONLY,
-            '-t',
-            length.toFixed(3),
-            '-c:a',
-            'libmp3lame',
-            '-q:a',
-            '4',
-            '-ar',
-            '44100',
-            '-ac',
-            '1',
-          ])
-          .output(out)
+          .outputOptions([AUDIO_ONLY, '-t', length.toFixed(3), ...PCM_OUTPUT_ARGS])
+          .output(out),
+        { timeoutMs: 5 * 60 * 1000, label: `narration slice ${i + 1}/${items.length}` }
       );
     }
     parts.push(out);
@@ -383,24 +452,10 @@ export async function buildNarrationTrack(options: {
 
   fs.mkdirSync(path.dirname(outputPath), { recursive: true });
   if (parts.length === 1) {
-    fs.copyFileSync(parts[0], outputPath);
-    return outputPath;
+    return convertAudioToMp3(parts[0], outputPath);
   }
 
-  const listFile = path.join(workDir, 'narr-concat.txt');
-  fs.writeFileSync(
-    listFile,
-    parts.map((p) => `file '${p.replace(/\\/g, '/')}'`).join('\n'),
-    'utf8'
-  );
-  await run(
-    ffmpeg()
-      .input(listFile)
-      .inputOptions(['-f', 'concat', '-safe', '0'])
-      .outputOptions(['-c', 'copy'])
-      .output(outputPath)
-  );
-  return outputPath;
+  return concatWavPartsToMp3(parts, outputPath, workDir, 'narration-concat');
 }
 
 const TARGET_VIDEO = {
@@ -970,12 +1025,31 @@ export async function assembleFinalVideo(options: {
     encoder: encoder.name,
   });
 
+  // —— Lưới chắn: hình không bao giờ được ngắn hơn tiếng ——
+  // Bên dưới audio bị `-t` cắt theo độ dài video, nên hình hụt là lời đọc CỤT mà
+  // không báo gì. Thiếu bao nhiêu thì cộng hết vào cảnh cuối (cảnh đó tự fade đúng
+  // độ dài mới) — đây chỉ là lưới chắn, chỗ sửa gốc là lúc chia cảnh.
+  const plannedDurations = options.clipDurations ? [...options.clipDurations] : undefined;
+  if (plannedDurations?.length) {
+    const narrationSec = await getDurationSafe(audioPath, 0);
+    const plannedSec = plannedDurations.reduce((sum, value) => sum + value, 0);
+    if (narrationSec > plannedSec + 0.15) {
+      const missing = narrationSec - plannedSec;
+      plannedDurations[plannedDurations.length - 1] += missing;
+      report(onProgress, {
+        stage: 'NORMALIZING',
+        message:
+          `Hình ngắn hơn tiếng ${missing.toFixed(1)}s — kéo dài cảnh cuối để giữ trọn lời đọc.`,
+      });
+    }
+  }
+
   const normalized: string[] = [];
   let reencoded = 0;
   for (let i = 0; i < clipPaths.length; i++) {
     const out = path.join(workDir, `clip-${i}.mp4`);
     const fadeOpts = { fadeIn: true, fadeOut: true };
-    const plannedDur = options.clipDurations?.[i];
+    const plannedDur = plannedDurations?.[i];
 
     // Nguồn là ẢNH: tạo chuyển động (zoom / đứng yên) + fade + đúng số frame
     // ngay ở bước ghép final — một lần encode duy nhất cho mỗi ảnh.
@@ -1114,8 +1188,8 @@ export async function assembleFinalVideo(options: {
 
   // Narration thường ngắn hơn footage — pad silence thay vì -shortest (tránh cắt scene).
   const plannedTotal =
+    plannedDurations?.reduce((sum, value) => sum + value, 0) ??
     options.estimatedTotalSeconds ??
-    options.clipDurations?.reduce((sum, value) => sum + value, 0) ??
     0;
   const videoDuration = await getDurationSafe(mergedVideo, plannedTotal);
 

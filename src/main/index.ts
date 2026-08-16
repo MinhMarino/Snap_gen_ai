@@ -18,6 +18,8 @@ import type {
 import { ensureGenmaxApiKey, getKeys, getProjectsRoot, getSettings, saveKeys, saveSettings } from './store';
 import { testAccount } from './services/snapgen';
 import { generateMusicAnimationScript, generateScript, testOpenAI } from './services/openai';
+import { planScenesFromNarrationAudio } from './services/scene-plan';
+import { getSpeechRateInfo } from './services/speech-rate';
 import {
   clearProjectNarration,
   importExternalNarration,
@@ -122,6 +124,7 @@ function registerIpc(): void {
     saveSettings(settings);
     return true;
   });
+  ipcMain.handle(IPC.getSpeechRate, (_e, language?: string) => getSpeechRateInfo(language));
   ipcMain.handle(IPC.getModels, () => ({
     videoFamilies: VIDEO_FAMILIES,
     imageFamilies: IMAGE_FAMILIES,
@@ -285,6 +288,32 @@ function registerIpc(): void {
       (input.openaiChatModel || '').trim() || settings.openaiModel || 'gpt-4o-mini';
     return generateScript(keys.openaiApiKey, chatModel, input);
   });
+
+  ipcMain.handle(
+    IPC.planScenes,
+    async (event, projectId: string, input?: { sceneCount?: number; openaiChatModel?: string }) => {
+      const keys = getKeys();
+      const settings = getSettings();
+      if (!keys.openaiApiKey) throw new Error('Thiếu OpenAI API key.');
+      const draft = getProject(projectId).draft;
+      const chatModel =
+        (input?.openaiChatModel || draft?.openaiChatModel || '').trim() ||
+        settings.openaiModel ||
+        'gpt-4o-mini';
+      return planScenesFromNarrationAudio({
+        projectId,
+        apiKey: keys.openaiApiKey,
+        openaiModel: chatModel,
+        sceneCount: input?.sceneCount,
+        // Kênh riêng, không dùng jobProgress: bước này không phải job có pause/stop.
+        onProgress: (progress) => {
+          if (!event.sender.isDestroyed()) {
+            event.sender.send(IPC.scenePlanProgress, progress);
+          }
+        },
+      });
+    }
+  );
 
   ipcMain.handle(
     IPC.generateMusicAnimationScript,

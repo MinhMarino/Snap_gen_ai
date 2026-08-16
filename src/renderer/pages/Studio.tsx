@@ -14,6 +14,7 @@ import type {
 } from '../../shared/types';
 import { resolveProjectKind } from '../../shared/types';
 import {
+  buildNarrationOnlyScript,
   clampTargetSceneCount,
   DEFAULT_SCENE_DENSITY,
   DEFAULT_STYLE_PROMPT,
@@ -23,13 +24,19 @@ import {
   normalizeStylePromptForProjectKind,
   estimateGenerationCredits,
   estimateScriptSpokenSeconds,
+  estimateSpokenSeconds,
   formatCreditEstimate,
   formatDurationLabel,
   getModelById,
+  isNarrationOnlyScript,
+  narrationTextOfScript,
   maxSingleShotDuration,
   planSceneChunks,
   planScenesFromDuration,
   resolveModelId,
+  setSpeechRateProfile,
+  spokenBudgetForDurationSec,
+  type SpeechRateInfo,
   resolveSceneDensity,
   SCENE_DENSITY_OPTIONS,
   type SceneDensityId,
@@ -170,9 +177,9 @@ const WORKFLOW_STEPS: Array<{
   label: string;
   short: string;
 }> = [
-  { id: 'script', step: 1, icon: '1', label: 'Tạo script', short: 'Script' },
+  { id: 'script', step: 1, icon: '1', label: 'Viết lời đọc', short: 'Lời đọc' },
   { id: 'voice', step: 2, icon: '2', label: 'Tạo voice', short: 'Voice' },
-  { id: 'media', step: 3, icon: '3', label: 'Tạo ảnh/video', short: 'Media' },
+  { id: 'media', step: 3, icon: '3', label: 'Phân cảnh & tạo ảnh/video', short: 'Media' },
   { id: 'merge', step: 4, icon: '4', label: 'Ghép Final', short: 'Ghép' },
 ];
 
@@ -199,7 +206,7 @@ const AUDIO_WORKFLOW_STEPS: Array<{
   label: string;
   short: string;
 }> = [
-  { id: 'script', step: 1, icon: '1', label: 'Tạo script', short: 'Script' },
+  { id: 'script', step: 1, icon: '1', label: 'Viết lời đọc', short: 'Lời đọc' },
   { id: 'voice', step: 2, icon: '2', label: 'Tạo audio', short: 'Audio' },
 ];
 
@@ -252,6 +259,10 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
   const [resolution, setResolution] = useState('720p');
   const [mode, setMode] = useState('');
   const [script, setScript] = useState<ScriptDraft | null>(null);
+  /** Ô lời đọc ở bước 1 — tách khỏi `script` để gõ không đụng vào phân cảnh. */
+  const [narrationDraft, setNarrationDraft] = useState('');
+  /** Lời đã sửa sau khi tạo voice → file audio hiện có đọc bản CŨ, phải TTS lại. */
+  const [narrationStale, setNarrationStale] = useState(false);
   const [openaiChatModel, setOpenaiChatModel] = useState('gpt-4o-mini');
   const [sceneMedia, setSceneMedia] = useState<SceneMediaAsset[]>([]);
   const [selectedScene, setSelectedScene] = useState(0);
@@ -291,6 +302,12 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
    * Rỗng = để main tự nhận diện từ brief.
    */
   const narrationLanguage = elevenLabsLanguageLabel(voice.narrationLanguage);
+  /**
+   * Nhịp đọc THẬT của giọng đang dùng — main đo từ file audio TTS gần nhất.
+   * Nạp vào `shared/models` của renderer để mọi ước lượng "~X phút" ở đây khớp
+   * với ngân sách lời mà bước 1 dùng bên main (xem `services/speech-rate.ts`).
+   */
+  const [speechRate, setSpeechRate] = useState<SpeechRateInfo | null>(null);
   const railSteps = isMusicAnimation
     ? MUSIC_WORKFLOW_STEPS
     : isAudioOnly
@@ -364,6 +381,13 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
     });
   }, [script, sceneMedia]);
   const canRemux = Boolean(activeProjectId && script?.scenes.length && hasSceneMedia);
+  /** Lời đọc đang có trong kịch bản (dù đã phân cảnh hay chưa). */
+  const narrationText = narrationTextOfScript(script);
+  /**
+   * Đã chia cảnh chưa. Bước 1 chỉ trả về lời đọc; scene + visual prompt do bước 3
+   * tạo ra sau khi đo được độ dài voiceover thật.
+   */
+  const scenesPlanned = Boolean(script && !isNarrationOnlyScript(script));
 
   const models = mediaKind === 'image' ? imageModels : videoModels;
   const families = mediaKind === 'image' ? imageFamilies : videoFamilies;
@@ -412,6 +436,31 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
     if (sceneDensity === 'custom') return;
     setTargetMediaCount(scenePlan.sceneCountHint);
   }, [sceneDensity, scenePlan.sceneCountHint]);
+
+  // Đổi ngôn ngữ lời bình, hoặc vừa tạo xong voice (đo lại được nhịp đọc) → lấy
+  // số mới. `narrationPath` đổi sau mỗi lần bước 2 chạy nên nó là mốc refresh.
+  useEffect(() => {
+    let alive = true;
+    window.studio
+      .getSpeechRate(narrationLanguage || undefined)
+      .then((info) => {
+        if (!alive) return;
+        setSpeechRateProfile(info);
+        setSpeechRate(info);
+      })
+      .catch(() => undefined);
+    return () => {
+      alive = false;
+    };
+  }, [narrationLanguage, narrationPath]);
+
+  /** Số từ / ký tự bước 1 sẽ đặt hàng ChatGPT cho thời lượng đang chọn. */
+  const narrationBudget = useMemo(
+    () => spokenBudgetForDurationSec(scenePlan.targetDurationSec, narrationLanguage),
+    // `speechRate` không được dùng trực tiếp: nó chỉ báo nhịp đọc trong module
+    // shared vừa đổi, phải tính lại ngân sách theo nhịp mới.
+    [scenePlan.targetDurationSec, narrationLanguage, speechRate]
+  );
   const setTargetDurationMin = (minutes: number) => {
     setDurationInput(String(sanitizeDurationMinutes(minutes)));
   };
@@ -437,7 +486,10 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
       setDurationInput(String(DEFAULT_DURATION_MIN));
     }
   }, [durationInput]);
-  const currentScene = script?.scenes[selectedScene] ?? null;
+  // Chưa phân cảnh: `scenes` chỉ có một mục giả giữ toàn bộ lời — không phải cảnh
+  // thật, nên inspector/preview không được coi nó là scene để sửa prompt hay gen.
+  const currentScene =
+    script && !isNarrationOnlyScript(script) ? script.scenes[selectedScene] ?? null : null;
   const currentAsset =
     sceneMedia.find((asset) => asset.sceneId === currentScene?.id) ??
     sceneMedia[selectedScene] ??
@@ -572,6 +624,34 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
     })();
   }, []);
 
+  // Ô lời đọc luôn hiển thị đúng lời của kịch bản hiện tại (mở dự án, tạo lại
+  // script, phân cảnh xong…). Lúc đang gõ thì `script` không đổi nên không bị ghi đè.
+  useEffect(() => {
+    setNarrationDraft(narrationTextOfScript(script));
+  }, [script]);
+
+  // Tiến độ bước phân cảnh — kênh riêng, không phải job có nút pause/stop.
+  useEffect(
+    () =>
+      window.studio.onScenePlanProgress((p) => {
+        setActivity((prev) => {
+          if (!prev || prev.status !== 'running' || prev.stepId !== 'plan') return prev;
+          const msg = (p.message || '').trim();
+          const shouldLog = Boolean(msg) && msg !== lastActivityLogRef.current;
+          if (shouldLog) lastActivityLogRef.current = msg;
+          const ratio = p.total > 0 ? Math.min(1, p.done / p.total) : 0;
+          // Chia cảnh nhanh (10%), viết prompt mới là phần lâu (10→95%).
+          const percent = p.phase === 'split' ? 10 : 10 + Math.round(ratio * 85);
+          return {
+            ...prev,
+            percent: Math.min(100, Math.max(prev.percent, percent)),
+            logs: shouldLog ? [...prev.logs, createLogLine(msg)].slice(-80) : prev.logs,
+          };
+        });
+      }),
+    []
+  );
+
   useEffect(
     () =>
       window.studio.onJobProgress((p) => {
@@ -693,6 +773,7 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
         }
         setActiveProjectId(detail.meta.id);
         setProjectName(detail.meta.name);
+        setNarrationStale(false);
         const draft = detail.draft;
         if (draft) {
           setBrief(draft.brief);
@@ -1244,9 +1325,9 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
     setError(null);
     startActivity({
       stepId: 'script',
-      title: 'Bước — Tạo kịch bản',
-      blurb: 'ChatGPT đang viết narration + chia scene theo thời lượng mục tiêu.',
-      firstLog: 'Bắt đầu tạo kịch bản…',
+      title: 'Bước 1 — Viết lời đọc',
+      blurb: 'ChatGPT viết lời bình liền mạch. Phân cảnh để sau, khi đã đo được voiceover.',
+      firstLog: 'Bắt đầu viết lời đọc…',
     });
     const tick = window.setInterval(() => {
       setActivity((prev) => {
@@ -1265,7 +1346,9 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
         scenePlan.sceneCountHint
       );
       pushActivityLog(
-        `Gọi ChatGPT viết kịch bản (~${formatDurationLabel(scenePlan.targetDurationSec)}, ~${mediaTarget} ${mediaKind === 'image' ? 'ảnh' : 'video'}${narrationLanguage ? `, ${narrationLanguage}` : ''})…`
+        `Gọi ChatGPT viết lời đọc ~${formatDurationLabel(scenePlan.targetDurationSec)}${narrationLanguage ? ` · ${narrationLanguage}` : ''} · ` +
+          `đặt ~${narrationBudget.amount.toLocaleString('vi-VN')} ${narrationBudget.unitLabel} ` +
+          `(${Math.round(narrationBudget.perSec * 100) / 100} ${narrationBudget.unitLabel}/s${speechRate?.source === 'measured' ? ' — đo từ giọng thật' : speechRate?.source === 'manual' ? ' — bạn tự đặt' : ''})…`
       );
       const draft = await window.studio.generateScript({
         brief: brief.trim(),
@@ -1284,22 +1367,21 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
         openaiChatModel,
       });
       setActivityPercent(82);
-      pushActivityLog(
-        `Nhận ${draft.scenes.length} scene (mục tiêu ~${mediaTarget}) — đang lưu draft…`
-      );
+      const text = narrationTextOfScript(draft);
+      pushActivityLog(`Nhận ${text.length.toLocaleString('vi-VN')} ký tự lời — đang lưu draft…`);
       setScript(draft);
       setSelectedScene(0);
+      setNarrationStale(Boolean(hasNarration || resolvedNarrationPath));
       await window.studio.saveProjectDraft(id, draftPayload(draft), {
         name: projectName.trim() || 'Untitled project',
       });
       const spoken = estimateScriptSpokenSeconds(draft.scenes);
-      const chapterCount = new Set(
-        draft.scenes.map((s) => (s.chapter || '').trim()).filter(Boolean)
-      ).size;
-      const summary = `Script sẵn sàng: ${chapterCount ? `${chapterCount} chapter · ` : ''}${draft.scenes.length} scene · lời ~${formatDurationLabel(spoken)} (mục tiêu ${formatDurationLabel(scenePlan.targetDurationSec)}).`;
+      const summary =
+        `Lời đọc sẵn sàng: ~${formatDurationLabel(spoken)} (đặt ${formatDurationLabel(scenePlan.targetDurationSec)}). ` +
+        `Sang bước 2 tạo voice — phân cảnh sẽ chia theo đúng độ dài audio.`;
       setToast({ type: 'ok', text: summary });
       pushActivityLog(summary, 'ok');
-      finishActivity(true, 'Tạo kịch bản xong.');
+      finishActivity(true, 'Viết lời đọc xong.');
       setActiveStep('voice');
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -1307,6 +1389,98 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
       finishActivity(false, message);
     } finally {
       window.clearInterval(tick);
+      setBusy(false);
+    }
+  };
+
+  /**
+   * Ghi lời vừa sửa ở bước 1 vào kịch bản.
+   *
+   * Kịch bản đã phân cảnh mà đổi lời thì mọi mốc cảnh cũ trỏ vào bản đọc cũ —
+   * phải quay về trạng thái "chưa phân cảnh" rồi tạo voice + phân cảnh lại.
+   */
+  const commitNarrationDraft = () => {
+    const text = narrationDraft.trim();
+    if (!text || text === narrationText) return;
+    if (scenesPlanned) {
+      const ok = window.confirm(
+        'Sửa lời đọc sẽ bỏ phân cảnh hiện tại (ảnh/video đã tạo vẫn nằm trong thư mục dự án).\n' +
+          'Bạn sẽ phải tạo lại voice rồi phân cảnh lại. Tiếp tục?'
+      );
+      if (!ok) {
+        setNarrationDraft(narrationText);
+        return;
+      }
+    }
+    setScript(
+      buildNarrationOnlyScript({
+        title: script?.title || projectName.trim() || 'Untitled Video',
+        narration: text,
+        targetDurationSec: scenePlan.targetDurationSec,
+      })
+    );
+    setSelectedScene(0);
+    if (hasNarration || resolvedNarrationPath) {
+      // Audio trên đĩa vẫn là bản đọc lời cũ → phân cảnh theo nó sẽ lệch hẳn.
+      setNarrationStale(true);
+      setToast({
+        type: 'error',
+        text: 'Đã sửa lời đọc — voice hiện có vẫn là bản cũ. Tạo lại voice ở bước 2 trước khi phân cảnh.',
+      });
+    }
+  };
+
+  /** Bước 3a: chia cảnh theo độ dài voiceover thật + viết visual prompt (chưa tốn credit Snapgen). */
+  const planScenes = async () => {
+    if (!script || busy || generateRunning.current) return;
+    if (!narrationText) {
+      setActiveStep('script');
+      setError('Chưa có lời đọc — làm bước 1 trước.');
+      return;
+    }
+    if (!hasNarration && !resolvedNarrationPath) {
+      setActiveStep('voice');
+      setError('Chưa có voiceover — phân cảnh cần đo độ dài audio, làm bước 2 trước.');
+      return;
+    }
+    if (narrationStale) {
+      setActiveStep('voice');
+      setError('Lời đọc đã đổi sau lần tạo voice — tạo lại voice ở bước 2, rồi mới phân cảnh.');
+      return;
+    }
+
+    setBusy(true);
+    setError(null);
+    startActivity({
+      stepId: 'plan',
+      title: 'Bước 3 — Phân cảnh & viết prompt',
+      blurb: 'Chia cảnh theo đúng độ dài voiceover, rồi ChatGPT viết visual prompt từng cảnh.',
+      firstLog: 'Đang đo voiceover…',
+    });
+    try {
+      const id = await ensureProject();
+      // Main đọc lời từ draft trên đĩa → phải lưu bản vừa sửa trước khi gọi.
+      await window.studio.saveProjectDraft(id, draftPayload(script), {
+        name: projectName.trim() || 'Untitled project',
+      });
+      const planned = await window.studio.planScenes(id, { openaiChatModel });
+      setScript(planned.script);
+      setSelectedScene(0);
+      setTargetDurationMin(minutesFromSeconds(planned.audioDurationSec));
+      const refreshed = await window.studio.getProject(id);
+      setSceneMedia(refreshed.sceneMedia);
+      const summary =
+        `Đã chia ${planned.sceneCount} cảnh khớp ${formatDurationLabel(planned.audioDurationSec)} voiceover ` +
+        `(${planned.alignedWithWords ? 'theo mốc từng từ' : 'theo tỉ lệ ký tự'}). Soát prompt rồi tạo ${mediaLabel}.`;
+      setToast({ type: 'ok', text: summary });
+      pushActivityLog(summary, 'ok');
+      finishActivity(true, 'Phân cảnh xong.');
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      setError(message);
+      setToast({ type: 'error', text: message });
+      finishActivity(false, message);
+    } finally {
       setBusy(false);
     }
   };
@@ -1327,7 +1501,7 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
     }
     if (!script) {
       setActiveStep('script');
-      setError('Hãy tạo kịch bản trước.');
+      setError('Hãy viết lời đọc trước (bước 1).');
       return;
     }
     if (step === 'voice') {
@@ -1345,6 +1519,11 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
       return;
     }
     if (step === 'media') {
+      // Chưa phân cảnh thì việc của bước 3 là chia cảnh, không phải gọi Snapgen.
+      if (!scenesPlanned) {
+        await planScenes();
+        return;
+      }
       const allIds = script.scenes.map((scene) => scene.id);
       const missing = script.scenes
         .filter((scene, index) => {
@@ -1408,6 +1587,11 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
       setError('Chưa có voiceover — làm bước 2 trước.');
       return;
     }
+    if (!scenesPlanned) {
+      setActiveStep('media');
+      setError('Chưa phân cảnh — làm bước 3 trước.');
+      return;
+    }
     if (!allScenesHaveMedia) {
       setActiveStep('media');
       setError('Chưa đủ ảnh/video scene — làm bước 3 trước.');
@@ -1429,6 +1613,8 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
       const result = await window.studio.clearNarrationAudio(id);
       setHasNarration(false);
       setNarrationPath(null);
+      // Không còn audio nào để lệch với lời nữa.
+      setNarrationStale(false);
       if (narrationAudioRef.current) {
         narrationAudioRef.current.pause();
         narrationAudioRef.current = null;
@@ -1495,16 +1681,16 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
     const stepMeta =
       step === 'audio'
         ? {
-            title: 'Bước 1 — Tạo audio',
-            blurb: 'TTS voiceover + subtitle. Có thể thu nhỏ popup, theo dõi dock dưới.',
+            title: 'Bước 2 — Tạo audio',
+            blurb: 'TTS đọc lời một mạch. Độ dài audio này quyết định phân cảnh ở bước 3.',
           }
         : step === 'media'
           ? {
-              title: `Bước 2 — Tạo ${mediaKind === 'image' ? 'ảnh' : 'video'}`,
+              title: `Bước 3 — Tạo ${mediaKind === 'image' ? 'ảnh' : 'video'}`,
               blurb: 'Snapgen render từng scene. Theo dõi log + thanh tiến độ ở dock dưới.',
             }
           : {
-              title: 'Bước 3 — Ghép Final',
+              title: 'Bước 4 — Ghép Final',
               blurb: 'FFmpeg ghép clip/ảnh + narration thành final.mp4.',
             };
     startActivity({
@@ -1554,6 +1740,7 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
         ...voice,
       });
       setResult(generated);
+      if (payload.step === 'audio') setNarrationStale(false);
       setHasNarration(Boolean(generated.audioPath));
       setNarrationPath(generated.audioPath || null);
       setProjectDir(generated.projectDir || null);
@@ -1579,13 +1766,13 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
         payload.step === 'audio'
           ? isAudioOnly
             ? 'Đã xong audio. Mở narration.mp3 trong thư mục dự án khi cần.'
-            : 'Đã xong bước voice. Sang bước Media để tạo ảnh/video.'
+            : 'Đã xong voice. Sang bước 3 để phân cảnh theo đúng độ dài audio này.'
           : payload.step === 'remux'
             ? 'Đã ghép lại Final.'
             : payload.step === 'media'
               ? generated.stopped
-                ? `Đã dừng. Xong ${generated.scenesCompleted ?? 0}/${generated.scenesTotal ?? '?'} ${mediaLabel} — tiếp tục bước 2 khi sẵn sàng.`
-                : `Đã xong bước 2 (${payload.regenerateSceneIds.length} ${mediaLabel}). Sang bước 3 để ghép Final.`
+                ? `Đã dừng. Xong ${generated.scenesCompleted ?? 0}/${generated.scenesTotal ?? '?'} ${mediaLabel} — tiếp tục bước 3 khi sẵn sàng.`
+                : `Đã xong bước 3 (${payload.regenerateSceneIds.length} ${mediaLabel}). Sang bước 4 để ghép Final.`
               : null;
       const okText =
         stepToast ||
@@ -1701,11 +1888,16 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
   const musicInputDone = Boolean(
     (hasNarration || resolvedNarrationPath || musicRelativePath) && lyricText.trim()
   );
-  const step1Done = isMusicAnimation ? musicInputDone : Boolean(script?.scenes.length);
+  // Bước 1 xong = đã có LỜI ĐỌC (chưa cần scene — scene là việc của bước 3).
+  const step1Done = isMusicAnimation ? musicInputDone : Boolean(narrationText);
   const step2Done = isMusicAnimation
     ? Boolean(script?.scenes.length)
     : Boolean(hasNarration || resolvedNarrationPath);
-  const step3Done = isAudioOnly ? step2Done : allScenesHaveMedia;
+  const step3Done = isAudioOnly
+    ? step2Done
+    : isMusicAnimation
+      ? allScenesHaveMedia
+      : scenesPlanned && allScenesHaveMedia;
   const step4Done = isAudioOnly
     ? step2Done
     : Boolean(result?.videoPath) && !timelineDirty;
@@ -1931,7 +2123,7 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
           <div className="editor-panel-heading">
             <div>
               <span className="panel-kicker">BƯỚC 1</span>
-              <h2>{isAudioOnly ? 'Viết kịch bản audio' : 'Tạo script'}</h2>
+              <h2>{isAudioOnly ? 'Viết kịch bản audio' : 'Viết lời đọc'}</h2>
             </div>
             <span className={`step-status-badge ${step1Done ? 'done' : ''}`}>
               {step1Done ? 'Đã có' : 'Chưa'}
@@ -2043,14 +2235,14 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
             </div>
           </div>
 
+          {/* Dự án chỉ audio không phân cảnh → không có gì để chọn mật độ. */}
+          {!isAudioOnly ? (
           <div className="field compact-field duration-field scene-density-field">
             <div className="duration-field-head">
-              <label>
-                {isAudioOnly ? 'Cách chia đoạn lời' : `Số ${mediaLabel} / cách chia scene`}
-              </label>
+              <label>{`Số ${mediaLabel} / cách chia scene`}</label>
               <span className="duration-field-live">
-                ~{scenePlan.sceneCountHint} {isAudioOnly ? 'đoạn' : mediaLabel} · ~
-                {formatDurationLabel(scenePlan.typicalBeatSec)}/đoạn
+                ~{scenePlan.sceneCountHint} {mediaLabel} · ~
+                {formatDurationLabel(scenePlan.typicalBeatSec)}/cảnh
               </span>
             </div>
             <div className="duration-presets" role="group" aria-label="Mật độ scene">
@@ -2083,20 +2275,17 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
                     );
                   }}
                 />
-                <span className="duration-unit">{isAudioOnly ? 'đoạn' : mediaLabel}</span>
+                <span className="duration-unit">{mediaLabel}</span>
               </div>
               <p className="hint scene-density-hint">
-                {isAudioOnly
-                  ? 'Chia đoạn chỉ để cấu trúc kịch bản — TTS vẫn đọc liền mạch một file audio.'
-                  : `10 phút + Tiết kiệm ≈ 20 ${mediaLabel} (thay vì ~100). Ảnh dài sẽ loop khi ghép Final.`}
-                {!isAudioOnly &&
-                mediaKind === 'video' &&
-                scenePlan.typicalBeatSec > maxShotSec * 1.5
+                {`Mật độ này áp lên ĐỘ DÀI AUDIO THẬT ở bước 3, không phải thời lượng đặt trước. 10 phút + Tiết kiệm ≈ 20 ${mediaLabel}. Ảnh dài sẽ loop khi ghép Final.`}
+                {mediaKind === 'video' && scenePlan.typicalBeatSec > maxShotSec * 1.5
                   ? ` Video dài hơn ${maxShotSec}s/scene có thể tốn nhiều shot API — cân nhắc Image nếu chỉ cần slideshow.`
                   : ''}
               </p>
             </div>
           </div>
+          ) : null}
 
           {!isAudioOnly ? (
             <ModelPicker
@@ -2158,10 +2347,10 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
             >
               <span>✦</span>
               {busy && activity?.stepId === 'script'
-                ? 'Đang tạo script…'
+                ? 'Đang viết lời…'
                 : step1Done
-                  ? 'Tạo lại script'
-                  : 'Tạo script'}
+                  ? 'Viết lại lời đọc'
+                  : 'Viết lời đọc'}
             </button>
             {step1Done ? (
               <button
@@ -2179,34 +2368,27 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
             <div className="step-scene-summary">
               <div className="editor-panel-heading compact">
                 <div>
-                  <span className="panel-kicker">SCENES</span>
-                  <h3>{script.scenes.length} scene</h3>
+                  <span className="panel-kicker">LỜI ĐỌC</span>
+                  <h3>
+                    ~{formatDurationLabel(estimateSpokenSeconds(narrationDraft, 0))} ·{' '}
+                    {narrationDraft.trim().length.toLocaleString('vi-VN')} ký tự
+                  </h3>
                 </div>
               </div>
-              <div className="scene-list compact">
-                {script.scenes.map((scene, index) => (
-                  <button
-                    key={scene.id}
-                    type="button"
-                    className={`scene-list-item ${selectedScene === index ? 'active' : ''}`}
-                    onClick={() => {
-                      setSelectedScene(index);
-                      setPreviewMode('scene');
-                    }}
-                  >
-                    <span className="scene-thumb">
-                      <span>{String(index + 1).padStart(2, '0')}</span>
-                    </span>
-                    <span className="scene-list-copy">
-                      <strong>
-                        Scene {index + 1}
-                        {scene.chapter ? ` · ${scene.chapter}` : ''}
-                      </strong>
-                      <small>{scene.narration_segment || scene.visual_prompt || '…'}</small>
-                    </span>
-                    <span className="scene-duration">{scene.duration_hint}s</span>
-                  </button>
-                ))}
+              <div className="field compact-field">
+                <textarea
+                  className="narration-editor"
+                  value={narrationDraft}
+                  disabled={busy}
+                  onChange={(event) => setNarrationDraft(event.target.value)}
+                  onBlur={commitNarrationDraft}
+                  placeholder="Lời bình sẽ hiện ở đây sau khi tạo — sửa trực tiếp trước khi tạo voice."
+                />
+                <p className="hint">
+                  {scenesPlanned
+                    ? `Đã phân cảnh ${script.scenes.length} cảnh. Sửa lời ở đây sẽ bỏ phân cảnh và phải tạo lại voice.`
+                    : 'Sửa thoải mái rồi sang bước 2. Phân cảnh chia sau, theo đúng độ dài audio đọc ra.'}
+                </p>
               </div>
             </div>
           ) : null}
@@ -2229,7 +2411,7 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
           {!step1Done ? (
             <div className="empty-panel">
               <span>♫</span>
-              <strong>Chưa có script</strong>
+              <strong>Chưa có lời đọc</strong>
               <p>Hoàn thành bước 1 trước khi tạo voiceover.</p>
               <button type="button" className="editor-secondary" onClick={() => setActiveStep('script')}>
                 ← Về bước 1
@@ -2238,9 +2420,11 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
           ) : (
             <>
               <p className="media-note">
-                {isAudioOnly
-                  ? 'Chọn giọng ElevenLabs (hoặc GenMax) → tạo file narration.mp3. Đây là bước cuối của dự án chỉ audio.'
-                  : 'Chọn giọng → tạo voice. Muốn làm lại: xóa voice rồi tạo lại.'}
+                {narrationStale
+                  ? '⚠ Lời đọc đã đổi sau lần tạo voice — file audio hiện có vẫn đọc bản cũ. Tạo lại voice trước khi phân cảnh.'
+                  : isAudioOnly
+                    ? 'Chọn giọng ElevenLabs (hoặc GenMax) → tạo file narration.mp3. Đây là bước cuối của dự án chỉ audio.'
+                    : 'Chọn giọng → tạo voice. Độ dài audio đọc ra sẽ quyết định phân cảnh ở bước 3.'}
               </p>
               <ProjectVoicePanel
                 value={voice}
@@ -2307,14 +2491,11 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
                   <button
                     type="button"
                     className="btn"
-                    disabled={busy || !script?.scenes.length}
+                    disabled={busy || !narrationText}
                     onClick={() => {
-                      const text = (script?.scenes || [])
-                        .map((s) => (s.narration_segment || '').replace(/\s+/g, ' ').trim())
-                        .filter(Boolean)
-                        .join(' ');
+                      const text = narrationText.replace(/\s+/g, ' ').trim();
                       if (!text) {
-                        setToast({ type: 'error', text: 'Kịch bản chưa có narration.' });
+                        setToast({ type: 'error', text: 'Chưa có lời đọc.' });
                         return;
                       }
                       void navigator.clipboard.writeText(text).then(
@@ -2332,7 +2513,7 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
                   <button
                     type="button"
                     className="btn"
-                    disabled={busy || !script?.scenes.length}
+                    disabled={busy || !narrationText}
                     onClick={() => void importNarrationFromFile()}
                   >
                     Import audio…
@@ -2375,67 +2556,93 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
           <div className="editor-panel-heading">
             <div>
               <span className="panel-kicker">BƯỚC 3</span>
-              <h2>Tạo {mediaLabel}</h2>
+              <h2>Phân cảnh & tạo {mediaLabel}</h2>
             </div>
             <span className={`step-status-badge ${step3Done ? 'done' : ''}`}>
-              {readyCount}/{script?.scenes.length ?? 0}
+              {scenesPlanned ? `${readyCount}/${script?.scenes.length ?? 0}` : 'Chưa chia'}
             </span>
           </div>
           {!step1Done ? (
             <div className="empty-panel">
               <span>▧</span>
-              <strong>Chưa có script</strong>
+              <strong>Chưa có lời đọc</strong>
               <p>Hoàn thành bước 1 trước.</p>
               <button type="button" className="editor-secondary" onClick={() => setActiveStep('script')}>
                 ← Về bước 1
               </button>
             </div>
+          ) : !step2Done ? (
+            <div className="empty-panel">
+              <span>♫</span>
+              <strong>Chưa có voiceover</strong>
+              <p>Phân cảnh chia theo đúng độ dài audio, nên phải tạo voice ở bước 2 trước.</p>
+              <button type="button" className="editor-secondary" onClick={() => setActiveStep('voice')}>
+                ← Về bước 2
+              </button>
+            </div>
           ) : (
             <>
               <p className="media-note">
-                {!step2Done
-                  ? 'Nên có voice (bước 2) để khớp thời lượng. Vẫn có thể tạo media theo duration_hint.'
-                  : `Trước khi gọi Snapgen, app sẽ hỏi xác nhận số ${mediaLabel}. Dùng «Chọn scene nâng cao…» để gen từng phần / giữ ảnh cũ để loop.`}
+                {!scenesPlanned
+                  ? 'Chia cảnh theo đúng độ dài voiceover rồi viết visual prompt từng cảnh. Bước này chỉ gọi ChatGPT — chưa tốn credit Snapgen.'
+                  : `Soát / sửa visual prompt ở panel bên phải trước khi gọi Snapgen. App sẽ hỏi xác nhận số ${mediaLabel}.`}
               </p>
               <div className="step-actions">
                 <button
                   type="button"
-                  className="editor-primary full-width"
+                  className={scenesPlanned ? 'editor-secondary full-width' : 'editor-primary full-width'}
                   disabled={busy}
-                  onClick={() =>
-                    void runStepAction(
-                      'media',
-                      missingMediaIds.length > 0 ? 'missing' : 'recreate'
-                    )
-                  }
+                  onClick={() => void planScenes()}
                 >
-                  <span>▧</span>
-                  {busy && activity?.stepId === 'media'
-                    ? `Đang tạo ${mediaLabel}…`
-                    : missingMediaIds.length > 0
-                      ? `Tạo ${missingMediaIds.length} ${mediaLabel} còn thiếu`
-                      : `Tạo lại toàn bộ ${mediaLabel}`}
+                  <span>⑃</span>
+                  {busy && activity?.stepId === 'plan'
+                    ? 'Đang phân cảnh…'
+                    : scenesPlanned
+                      ? 'Phân cảnh lại (viết prompt mới)'
+                      : 'Phân cảnh & viết prompt'}
                 </button>
-                {readyCount > 0 ? (
-                  <button
-                    type="button"
-                    className="editor-secondary full-width"
-                    disabled={busy}
-                    onClick={() => void runStepAction('media', 'recreate')}
-                  >
-                    Tạo lại tất cả scene
-                  </button>
+                {scenesPlanned ? (
+                  <>
+                    <button
+                      type="button"
+                      className="editor-primary full-width"
+                      disabled={busy}
+                      onClick={() =>
+                        void runStepAction(
+                          'media',
+                          missingMediaIds.length > 0 ? 'missing' : 'recreate'
+                        )
+                      }
+                    >
+                      <span>▧</span>
+                      {busy && activity?.stepId === 'media'
+                        ? `Đang tạo ${mediaLabel}…`
+                        : missingMediaIds.length > 0
+                          ? `Tạo ${missingMediaIds.length} ${mediaLabel} còn thiếu`
+                          : `Tạo lại toàn bộ ${mediaLabel}`}
+                    </button>
+                    {readyCount > 0 ? (
+                      <button
+                        type="button"
+                        className="editor-secondary full-width"
+                        disabled={busy}
+                        onClick={() => void runStepAction('media', 'recreate')}
+                      >
+                        Tạo lại tất cả scene
+                      </button>
+                    ) : null}
+                    <button
+                      type="button"
+                      className="btn ghost full-width"
+                      disabled={busy || !script}
+                      onClick={() => setGenerateOpen(true)}
+                    >
+                      Chọn scene nâng cao…
+                    </button>
+                  </>
                 ) : null}
-                <button
-                  type="button"
-                  className="btn ghost full-width"
-                  disabled={busy || !script}
-                  onClick={() => setGenerateOpen(true)}
-                >
-                  Chọn scene nâng cao…
-                </button>
               </div>
-              {script ? (
+              {script && scenesPlanned ? (
                 <div className="media-grid">
                   {script.scenes.map((scene, index) => {
                     const asset =
@@ -2512,10 +2719,15 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
           Ghép voiceover + {mediaLabel} từng scene thành final.mp4 (FFmpeg, không tốn TTS/Snapgen).
         </p>
         <ul className="merge-checklist">
-          <li className={step1Done ? 'ok' : ''}>1. Script {step1Done ? '✓' : '—'}</li>
+          <li className={step1Done ? 'ok' : ''}>1. Lời đọc {step1Done ? '✓' : '—'}</li>
           <li className={step2Done ? 'ok' : ''}>2. Voice {step2Done ? '✓' : '—'}</li>
           <li className={step3Done ? 'ok' : ''}>
-            3. Media {step3Done ? '✓' : `${sceneMedia.filter((a) => a.exists).length}/${script?.scenes.length ?? 0}`}
+            3. Phân cảnh &amp; media{' '}
+            {step3Done
+              ? '✓'
+              : !scenesPlanned
+                ? 'chưa chia cảnh'
+                : `${sceneMedia.filter((a) => a.exists).length}/${script?.scenes.length ?? 0}`}
           </li>
         </ul>
         <div className="step-actions">
@@ -2558,7 +2770,7 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
         {(!step2Done || !step3Done) && (
           <p className="hint">
             {!step2Done ? 'Thiếu bước 2 (voice). ' : ''}
-            {!step3Done ? 'Thiếu bước 3 (media).' : ''}
+            {!step3Done ? (scenesPlanned ? 'Thiếu bước 3 (media).' : 'Chưa phân cảnh ở bước 3.') : ''}
           </p>
         )}
       </>
@@ -2673,7 +2885,8 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
               : isAudioOnly
                 ? item.id === 'voice' && !step1Done
                 : (item.id === 'voice' && !step1Done) ||
-                  (item.id === 'media' && !step1Done) ||
+                  // Phân cảnh cần đo voiceover → bước 3 mở sau khi có audio.
+                  (item.id === 'media' && !step2Done) ||
                   (item.id === 'merge' && (!step2Done || !step3Done));
             return (
               <button
@@ -2965,7 +3178,7 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
               </span>
             </div>
             <div className="timeline-status">
-              <span>{script?.scenes.length ?? 0} scenes</span>
+              <span>{scenesPlanned ? script?.scenes.length ?? 0 : 0} scenes</span>
               <span>·</span>
               <span>{formatTime(totalDuration)}</span>
               {timelineDirty && (
@@ -2987,7 +3200,7 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
             </div>
           </div>
           <Timeline
-            script={script}
+            script={scenesPlanned ? script : null}
             selectedScene={selectedScene}
             timelineZoom={timelineZoom}
             playheadTime={playheadTime}
@@ -3031,7 +3244,7 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
         onConfirm={(payload) => void confirmExport(payload)}
       />
 
-      {script && (
+      {script && scenesPlanned && (
         <GenerateScenesDialog
           open={generateOpen}
           script={script}

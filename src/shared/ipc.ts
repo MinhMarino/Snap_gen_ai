@@ -1,6 +1,8 @@
 export const IPC = {
   getSettings: 'settings:get',
   saveSettings: 'settings:save',
+  /** Nhịp đọc đo được của giọng đang dùng (quy thời lượng → số từ). */
+  getSpeechRate: 'speech:getRate',
   getKeys: 'keys:get',
   saveKeys: 'keys:save',
   testSnapgen: 'test:snapgen',
@@ -33,6 +35,9 @@ export const IPC = {
   elevenLabsRevealApiKey: 'elevenlabs:revealApiKey',
   generateScript: 'openai:script',
   generateMusicAnimationScript: 'openai:musicAnimationScript',
+  /** Bước 3: chia cảnh theo độ dài voiceover + viết visual prompt. */
+  planScenes: 'openai:planScenes',
+  scenePlanProgress: 'openai:planScenesProgress',
   startGenerate: 'job:start',
   remuxProject: 'job:remux',
   importNarrationAudio: 'narration:import',

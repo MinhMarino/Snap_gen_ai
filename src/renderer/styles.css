@@ -877,6 +877,13 @@ h2 {
   min-height: 66px;
 }
 
+/* Lời đọc cả video nằm trong một ô — cần chỗ để đọc và sửa, không phải ô 2 dòng. */
+.field textarea.narration-editor {
+  min-height: 260px;
+  line-height: 1.55;
+  resize: vertical;
+}
+
 .field input:focus,
 .field select:focus,
 .field textarea:focus {

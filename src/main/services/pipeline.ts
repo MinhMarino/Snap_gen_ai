@@ -5,14 +5,13 @@ import { BrowserWindow } from 'electron';
 import { IPC } from '../../shared/ipc';
 import {
   assertNarrationCoversTarget,
-  AUDIO_DURATION_TOLERANCE,
   DEFAULT_PROJECT_LANGUAGE,
   estimateScriptSpokenSeconds,
   familySupportsExtend,
   findScenesWithShortNarration,
   formatDurationLabel,
   isCjkLanguage,
-  MAX_TTS_FIT_ATTEMPTS,
+  isNarrationOnlyScript,
   normalizeSceneDurations,
 } from '../../shared/models';
 import type {
@@ -36,12 +35,7 @@ import {
   setActiveJobProgress,
   updateActiveJobMeta,
 } from '../job-state';
-import {
-  buildIrodoriInstruct,
-  resolveProjectChatModel,
-  resolveProjectVoice,
-} from '../../shared/voice';
-import { rewriteNarrationToMatchDuration } from './openai';
+import { buildIrodoriInstruct, resolveProjectVoice } from '../../shared/voice';
 import { sanitizeSceneNarration } from '../../shared/narration-clean';
 import { resolveMusicTiming } from './music-timing';
 import { timedLinesToSrt } from '../../shared/music-align';
@@ -88,6 +82,17 @@ import {
   collectSceneMediaPaths,
   resolveSceneMedia,
 } from './scene-media';
+import {
+  NARRATION_FILE,
+  RAW_NARRATION_FILE,
+  readNarrationCache,
+  SUBTITLE_FILE,
+  TIMING_FILE,
+  WORDS_FILE,
+  writeNarrationCache,
+  writeNarrationWords,
+} from './narration-store';
+import { recordNarrationRateSample } from './speech-rate';
 
 const DEFAULT_MAX_CONCURRENT_SCENES = 5;
 
@@ -148,15 +153,6 @@ function writeSceneManifest(
 }
 const MAX_SCENE_GENERATE_ATTEMPTS = 3;
 
-const RAW_NARRATION_FILE = 'narration-raw.mp3';
-const TIMING_FILE = 'narration-timing.json';
-
-type NarrationCache = {
-  hash: string;
-  audioDuration: number;
-  timings: SceneTiming[];
-};
-
 type NarrationBundle = {
   audioPath: string;
   srtPath: string;
@@ -216,17 +212,6 @@ function collectSceneMedia(
 
 function narrationHash(text: string, voice: string, model: string): string {
   return createHash('sha256').update(`${voice}|${model}|${text}`).digest('hex');
-}
-
-function readNarrationCache(projectDir: string): NarrationCache | null {
-  const p = path.join(projectDir, TIMING_FILE);
-  if (!fs.existsSync(p)) return null;
-  try {
-    const raw = JSON.parse(fs.readFileSync(p, 'utf8')) as NarrationCache;
-    return raw?.timings?.length ? raw : null;
-  } catch {
-    return null;
-  }
 }
 
 /**
@@ -315,8 +300,8 @@ async function prepareNarration(options: {
           : `openai:${voice}:${ttsModel}`;
   const hash = narrationHash(text, voiceKey, options.ttsProvider);
   const rawPath = path.join(projectDir, RAW_NARRATION_FILE);
-  const audioPath = path.join(projectDir, 'narration.mp3');
-  const srtPath = path.join(projectDir, 'subs.srt');
+  const audioPath = path.join(projectDir, NARRATION_FILE);
+  const srtPath = path.join(projectDir, SUBTITLE_FILE);
 
   const cache = readNarrationCache(projectDir);
   const hasRaw =
@@ -395,11 +380,9 @@ async function prepareNarration(options: {
     }
     rawAudioDuration = await getDurationSafe(synthesized.audioPath, 0);
     timings = computeSceneTimings({ scenes, words: synthesized.words, audioDuration: rawAudioDuration });
-    fs.writeFileSync(
-      path.join(projectDir, TIMING_FILE),
-      JSON.stringify({ hash, audioDuration: rawAudioDuration, timings } satisfies NarrationCache, null, 2),
-      'utf8'
-    );
+    writeNarrationCache(projectDir, { hash, audioDuration: rawAudioDuration, timings });
+    // Mốc từng từ là trục thời gian để bước 3 cắt cảnh — lưu lại, đo một lần thôi.
+    writeNarrationWords(projectDir, synthesized.words);
   } else if (options.ttsProvider === 'qwen') {
     const runpodKey = options.runpodApiKey?.trim() || options.dashscopeApiKey?.trim();
     if (!runpodKey) {
@@ -425,11 +408,9 @@ async function prepareNarration(options: {
     }
     rawAudioDuration = await getDurationSafe(synthesized.audioPath, 0);
     timings = computeSceneTimings({ scenes, words: synthesized.words, audioDuration: rawAudioDuration });
-    fs.writeFileSync(
-      path.join(projectDir, TIMING_FILE),
-      JSON.stringify({ hash, audioDuration: rawAudioDuration, timings } satisfies NarrationCache, null, 2),
-      'utf8'
-    );
+    writeNarrationCache(projectDir, { hash, audioDuration: rawAudioDuration, timings });
+    // Mốc từng từ là trục thời gian để bước 3 cắt cảnh — lưu lại, đo một lần thôi.
+    writeNarrationWords(projectDir, synthesized.words);
   } else if (options.ttsProvider === 'genmax') {
     const genmaxKey = options.genmaxApiKey?.trim();
     if (!genmaxKey) {
@@ -452,11 +433,9 @@ async function prepareNarration(options: {
     }
     rawAudioDuration = synthesized.rawAudioDuration;
     timings = synthesized.timings;
-    fs.writeFileSync(
-      path.join(projectDir, TIMING_FILE),
-      JSON.stringify({ hash, audioDuration: rawAudioDuration, timings } satisfies NarrationCache, null, 2),
-      'utf8'
-    );
+    writeNarrationCache(projectDir, { hash, audioDuration: rawAudioDuration, timings });
+    // GenMax không trả mốc từ → xoá mốc của bản đọc cũ, bước 3 chia theo tỉ lệ ký tự.
+    writeNarrationWords(projectDir, []);
   } else {
     const synthesized = await synthesizeContinuousNarration({
       apiKey,
@@ -469,11 +448,16 @@ async function prepareNarration(options: {
     });
     rawAudioDuration = await getDurationSafe(synthesized.audioPath, 0);
     timings = computeSceneTimings({ scenes, words: synthesized.words, audioDuration: rawAudioDuration });
-    fs.writeFileSync(
-      path.join(projectDir, TIMING_FILE),
-      JSON.stringify({ hash, audioDuration: rawAudioDuration, timings } satisfies NarrationCache, null, 2),
-      'utf8'
-    );
+    writeNarrationCache(projectDir, { hash, audioDuration: rawAudioDuration, timings });
+    // Mốc từng từ là trục thời gian để bước 3 cắt cảnh — lưu lại, đo một lần thôi.
+    writeNarrationWords(projectDir, synthesized.words);
+  }
+
+  // Vừa TTS xong → đo nhịp đọc thật: đúng đoạn text đã gửi đi so với độ dài audio
+  // THÔ (chưa đệm im lặng). Bước 1 của lần sau quy thời lượng ra số từ bằng con số
+  // này thay vì hằng số, nên lời đọc mới đủ dài cho video đặt bao nhiêu phút.
+  if (!canReuse && rawAudioDuration > 0) {
+    recordNarrationRateSample({ language, text, seconds: rawAudioDuration, voiceKey });
   }
 
   const durations = scenes.map((scene, index) => {
@@ -492,7 +476,6 @@ async function prepareNarration(options: {
     fs.copyFileSync(rawPath, audioPath);
   } else {
     const items: NarrationTrackItem[] = [];
-    let needsRebuild = false;
     for (let index = 0; index < timings.length; index++) {
       const timing = timings[index];
       const planned = durations[index];
@@ -500,18 +483,20 @@ async function prepareNarration(options: {
       if (timing.hasSpeech) {
         items.push({ kind: 'slice', start: timing.start, end: timing.end });
         const pad = planned - spoken;
-        if (pad > 0.12) {
-          items.push({ kind: 'silence', duration: pad });
-          needsRebuild = true;
-        }
+        if (pad > 0.12) items.push({ kind: 'silence', duration: pad });
       } else {
         items.push({ kind: 'silence', duration: planned });
-        needsRebuild = true;
       }
     }
 
+    // Im lặng ở CUỐI thì không cần dựng lại cả bản đọc: bước ghép tự đệm audio cho
+    // bằng hình. Cảnh cuối luôn dài hơn tiếng một chút (độ dài cảnh làm tròn lên mốc
+    // model gen được) — không có luật này thì lần ghép nào cũng encode lại narration.
+    while (items.length && items[items.length - 1].kind === 'silence') items.pop();
+    const needsRebuild = items.some((item) => item.kind === 'silence');
+
     const everySceneSpeaks = timings.every((t) => t.hasSpeech);
-    if (everySceneSpeaks && !needsRebuild) {
+    if (!items.length || (everySceneSpeaks && !needsRebuild)) {
       fs.copyFileSync(rawPath, audioPath);
     } else {
       await buildNarrationTrack({
@@ -533,15 +518,18 @@ async function prepareNarration(options: {
 }
 
 /**
- * GPT estimate → TTS → đo audio → lệch >3% → AI rewrite → TTS lại
- * → chỉ khi đạt mới trả bundle để render video.
+ * Một lần TTS, rồi khớp video theo ĐÚNG đoạn nói thật.
+ *
+ * Bản trước đo audio xong còn nhờ AI viết lại lời để ép về ±3% mục tiêu rồi TTS
+ * lại (tới 4 vòng). Giờ độ dài audio LÀ chuẩn: bước 3 chia cảnh theo chính con số
+ * đo được, nên không còn gì để ép — bỏ vòng đó là bớt một call ChatGPT và vài
+ * lượt TTS mỗi lần tạo voice.
  */
-async function prepareNarrationFittingTarget(options: {
+async function synthesizeNarrationOnce(options: {
   projectDir: string;
   workDir: string;
   script: ScriptDraft;
   apiKey: string;
-  openaiModel: string;
   voice: string;
   ttsModel: string;
   language?: string;
@@ -565,15 +553,13 @@ async function prepareNarrationFittingTarget(options: {
   genmaxVoiceId?: string;
   genmaxModelId?: string;
   genmaxSpeed?: number;
+  /** Chỉ để hiện trong log tiến độ — không còn ép audio về con số này. */
   targetDurationSec: number;
   /** Bước chỉ tạo voice: % TTS dùng thang 0–100, không nhét vào 3–12% của full job. */
   audioOnlyStep?: boolean;
 }): Promise<NarrationBundle> {
   const target = Math.max(1, options.targetDurationSec);
   const audioOnly = Boolean(options.audioOnlyStep);
-  let script = options.script;
-  let lastRaw = 0;
-  let lastErr = 1;
 
   const emitTtsChunkProgress = (info: QwenTtsProgress) => {
     const total = Math.max(1, info.chunksTotal);
@@ -625,7 +611,32 @@ async function prepareNarrationFittingTarget(options: {
     });
   };
 
-  const ttsOpts = {
+  const ttsLabel =
+    options.ttsProvider === 'elevenlabs'
+      ? 'ElevenLabs'
+      : options.ttsProvider === 'qwen'
+        ? 'Irodori TTS'
+        : options.ttsProvider === 'genmax'
+          ? 'GenMax TTS'
+          : 'OpenAI TTS';
+  const est = estimateScriptSpokenSeconds(options.script.scenes);
+
+  emitProgress({
+    phase: 'tts',
+    message: `${ttsLabel}: đọc lời (~${formatDurationLabel(est)}, đặt ${formatDurationLabel(target)})…`,
+    percent: audioOnly ? 5 : 4,
+    detailPercent: 0,
+  });
+
+  const bundle = await prepareNarration({
+    projectDir: options.projectDir,
+    workDir: options.workDir,
+    script: options.script,
+    apiKey: options.apiKey,
+    voice: options.voice,
+    ttsModel: options.ttsModel,
+    language: options.language,
+    refresh: true,
     ttsProvider: options.ttsProvider,
     elevenLabsVoiceId: options.elevenLabsVoiceId,
     elevenLabsModelId: options.elevenLabsModelId,
@@ -646,129 +657,20 @@ async function prepareNarrationFittingTarget(options: {
     genmaxVoiceId: options.genmaxVoiceId,
     genmaxModelId: options.genmaxModelId,
     genmaxSpeed: options.genmaxSpeed,
-  };
+    // Video bám theo đoạn nói thật, không đệm im lặng cho khớp một con số đặt trước.
+    syncToSpeech: true,
+    onTtsProgress: options.ttsProvider === 'qwen' ? emitTtsChunkProgress : undefined,
+    onGenmaxProgress: options.ttsProvider === 'genmax' ? emitGenmaxProgress : undefined,
+  });
 
-  // Irodori/GenMax async chậm — TTS 1 lần rồi sync video theo speech.
-  const maxAttempts =
-    options.ttsProvider === 'qwen' || options.ttsProvider === 'genmax' ? 1 : MAX_TTS_FIT_ATTEMPTS;
+  emitProgress({
+    phase: 'whisper',
+    message: `${ttsLabel} xong: audio ${formatDurationLabel(bundle.rawAudioDuration)} — độ dài này là chuẩn cho phần hình.`,
+    percent: audioOnly ? 96 : 12,
+    detailPercent: 100,
+  });
 
-  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    const est = estimateScriptSpokenSeconds(script.scenes);
-    const ttsLabel =
-      options.ttsProvider === 'elevenlabs'
-        ? 'ElevenLabs'
-        : options.ttsProvider === 'qwen'
-          ? 'Irodori TTS'
-          : options.ttsProvider === 'genmax'
-            ? 'GenMax TTS'
-            : 'OpenAI TTS';
-
-    emitProgress({
-      phase: 'tts',
-      message:
-        options.ttsProvider === 'qwen' || options.ttsProvider === 'genmax'
-          ? `${ttsLabel} (1 lần): ~${formatDurationLabel(est)} → mục tiêu ${formatDurationLabel(target)}...`
-          : `TTS lần ${attempt}/${maxAttempts} (${ttsLabel}): ước lượng ~${formatDurationLabel(est)} → mục tiêu ${formatDurationLabel(target)}...`,
-      percent: audioOnly ? 5 : Math.min(10, 3 + attempt),
-      detailPercent: 0,
-    });
-
-    // Giữ duration_hint mục tiêu trên script khi TTS (đừng syncToSpeech giữa vòng — cần đo raw).
-    const forTts: ScriptDraft = {
-      ...script,
-      scenes: script.scenes.map((s) => ({ ...s })),
-    };
-
-    const bundle = await prepareNarration({
-      projectDir: options.projectDir,
-      workDir: options.workDir,
-      script: forTts,
-      apiKey: options.apiKey,
-      voice: options.voice,
-      ttsModel: options.ttsModel,
-      language: options.language,
-      refresh: true,
-      ...ttsOpts,
-      syncToSpeech: false,
-      onTtsProgress: options.ttsProvider === 'qwen' ? emitTtsChunkProgress : undefined,
-      onGenmaxProgress: options.ttsProvider === 'genmax' ? emitGenmaxProgress : undefined,
-    });
-
-    const raw = bundle.rawAudioDuration;
-    lastRaw = raw;
-    const relErr = Math.abs(raw - target) / target;
-    lastErr = relErr;
-
-    emitProgress({
-      phase: 'tts',
-      message: `Đã đo audio: ${formatDurationLabel(raw)} · mục tiêu ${formatDurationLabel(target)} · lệch ${(relErr * 100).toFixed(1)}%`,
-      percent: audioOnly ? 94 : Math.min(11, 4 + attempt),
-      detailPercent: 100,
-    });
-
-    const acceptNow =
-      relErr <= AUDIO_DURATION_TOLERANCE ||
-      options.ttsProvider === 'qwen' ||
-      options.ttsProvider === 'genmax';
-
-    if (acceptNow) {
-      // Đạt mục tiêu (hoặc Irodori 1-pass) → gắn duration theo speech thật.
-      const fitted = await prepareNarration({
-        projectDir: options.projectDir,
-        workDir: options.workDir,
-        script: {
-          ...script,
-          // Giữ lời vừa TTS; duration_hint sẽ lấy từ speech trong syncToSpeech.
-          scenes: script.scenes.map((s, i) => ({
-            ...s,
-            narration_segment: forTts.scenes[i]?.narration_segment ?? s.narration_segment,
-          })),
-        },
-        apiKey: options.apiKey,
-        voice: options.voice,
-        ttsModel: options.ttsModel,
-        language: options.language,
-        refresh: false, // reuse raw vừa tạo
-        ...ttsOpts,
-        syncToSpeech: true,
-      });
-      emitProgress({
-        phase: 'whisper',
-        message:
-          options.ttsProvider === 'qwen'
-            ? `Irodori TTS xong (${formatDurationLabel(raw)}) — sync video theo speech.`
-            : options.ttsProvider === 'genmax'
-              ? `GenMax TTS xong (${formatDurationLabel(raw)}) — sync video theo speech.`
-              : `Voiceover đạt mục tiêu (±${(AUDIO_DURATION_TOLERANCE * 100).toFixed(0)}%) sau ${attempt} lần TTS — bắt đầu render video.`,
-        percent: audioOnly ? 98 : 12,
-        detailPercent: 100,
-      });
-      return fitted;
-    }
-
-    if (attempt >= maxAttempts) break;
-
-    emitProgress({
-      phase: 'tts',
-      message: `Lệch >${(AUDIO_DURATION_TOLERANCE * 100).toFixed(0)}% — AI đang rewrite narration rồi TTS lại...`,
-      percent: Math.min(11, 5 + attempt),
-    });
-
-    script = await rewriteNarrationToMatchDuration({
-      apiKey: options.apiKey,
-      openaiModel: options.openaiModel,
-      script,
-      language: resolveNarrationLanguage(options.language, script),
-      targetDurationSec: target,
-      actualAudioSec: raw,
-    });
-  }
-
-  throw new Error(
-    `Voiceover chưa khớp mục tiêu sau ${maxAttempts} lần TTS ` +
-      `(audio ~${formatDurationLabel(lastRaw)}, mục tiêu ${formatDurationLabel(target)}, lệch ${(lastErr * 100).toFixed(1)}%). ` +
-      `Hãy Generate script lại hoặc chỉnh brief.`
-  );
+  return bundle;
 }
 
 /**
@@ -946,8 +848,8 @@ export async function remuxProject(projectId: string): Promise<GenerateJobResult
 
   try {
     let script = draft.script;
-    let audioPath = path.join(projectDir, 'narration.mp3');
-    let srtPath = path.join(projectDir, 'subs.srt');
+    let audioPath = path.join(projectDir, NARRATION_FILE);
+    let srtPath = path.join(projectDir, SUBTITLE_FILE);
     let durations = script.scenes.map((s) => Math.max(1, s.duration_hint));
 
     const remuxKind = resolveProjectKind(draft.projectKind ?? detail.meta.projectKind);
@@ -1178,8 +1080,8 @@ export async function runGenerateJob(input: GenerateJobInput): Promise<GenerateJ
 
     if (isMusicAnimation) {
       // Music-animation: nhạc đã import → narration.mp3; không TTS.
-      audioPath = path.join(projectDir, 'narration.mp3');
-      srtPath = path.join(projectDir, 'subs.srt');
+      audioPath = path.join(projectDir, NARRATION_FILE);
+      srtPath = path.join(projectDir, SUBTITLE_FILE);
       if (!fs.existsSync(audioPath) || fs.statSync(audioPath).size < 100) {
         throw new Error('Chưa có file nhạc. Bước 1: tải audio bài hát lên trước.');
       }
@@ -1237,32 +1139,20 @@ export async function runGenerateJob(input: GenerateJobInput): Promise<GenerateJ
         }
       }
 
-      const ttsLabel =
-        voice.ttsProvider === 'elevenlabs'
-          ? 'ElevenLabs'
-          : voice.ttsProvider === 'qwen'
-            ? 'Irodori TTS'
-            : voice.ttsProvider === 'genmax'
-              ? 'GenMax TTS'
-              : 'OpenAI TTS';
       emitProgress({
         phase: 'tts',
         message: refreshNarration
-          ? `Bắt đầu vòng TTS fit duration (${ttsLabel}): ước lượng ~${formatDurationLabel(spokenEst)} → mục tiêu ${formatDurationLabel(targetRuntimeSec)}`
+          ? `Đọc lời một mạch: ước lượng ~${formatDurationLabel(spokenEst)} (đặt ${formatDurationLabel(targetRuntimeSec)})`
           : 'Giữ voiceover hiện có — không gọi TTS lại.',
         percent: audioOnlyStep ? 4 : 3,
       });
 
       const narration = refreshNarration
-        ? await prepareNarrationFittingTarget({
+        ? await synthesizeNarrationOnce({
             projectDir,
             workDir,
             script: input.script,
             apiKey: keys.openaiApiKey,
-            openaiModel: resolveProjectChatModel(
-              getProject(meta.id).draft?.openaiChatModel,
-              settings.openaiModel
-            ),
             voice: voice.openaiTtsVoice,
             ttsModel: voice.openaiTtsModel,
             language: input.language,
@@ -1373,18 +1263,20 @@ export async function runGenerateJob(input: GenerateJobInput): Promise<GenerateJ
       };
     }
 
+    // Kịch bản chưa phân cảnh mà đi tiếp là gen ĐÚNG MỘT media cho cả video —
+    // tốn credit mà chắc chắn sai. Chặn ở đây, đẩy người dùng về bước phân cảnh.
+    if (!isMusicAnimation && isNarrationOnlyScript(script)) {
+      throw new Error(
+        'Kịch bản chưa phân cảnh. Vào bước 3 bấm «Phân cảnh & viết prompt» ' +
+          '(chia cảnh theo đúng độ dài voiceover) rồi mới tạo ảnh/video.'
+      );
+    }
+
     emitProgress({
       phase: 'whisper',
       message: isMusicAnimation
         ? `Nhạc ${formatDurationLabel(rawAudioDuration)} — tạo ${script.scenes.length} scene Snapgen theo beat.`
-        : `Voiceover ${formatDurationLabel(rawAudioDuration)} (mục tiêu ${formatDurationLabel(targetRuntimeSec)}) — ` +
-          (voice.ttsProvider === 'elevenlabs'
-            ? `khớp ${script.scenes.length} scene theo timestamp ElevenLabs.`
-            : voice.ttsProvider === 'qwen'
-              ? `khớp ${script.scenes.length} scene theo timestamp Qwen/Whisper.`
-              : voice.ttsProvider === 'genmax'
-                ? `khớp ${script.scenes.length} scene theo GenMax TTS.`
-                : `khớp ${script.scenes.length} scene theo timestamp Whisper.`),
+        : `Voiceover ${formatDurationLabel(rawAudioDuration)} — ${script.scenes.length} scene đã căn theo giọng đọc.`,
       percent: 12,
     });
 
@@ -1401,9 +1293,11 @@ export async function runGenerateJob(input: GenerateJobInput): Promise<GenerateJ
 
     const phase = mediaKind === 'image' ? 'image' : 'video';
     const label = mediaKind === 'image' ? 'ảnh' : 'video';
-    // Nối cảnh được cho MỌI family video: family có extend thì dùng ref_history,
-    // còn lại nối bằng keyframe last_frame_url của scene trước (Sora/Meta).
-    const chainScenesEnabled = mediaKind === 'video' && input.chainScenes !== false;
+    // Nối cảnh (ref_history / keyframe last_frame_url của scene trước) giờ MẶC
+    // ĐỊNH TẮT: nó buộc scene N phải chờ scene N-1 nên cả video gen tuần tự từng
+    // cái một, mất sạch worker pool. Bật lại trong Settings khi cần liền mạch.
+    const chainScenesEnabled =
+      mediaKind === 'video' && (input.chainScenes ?? settings.chainScenes ?? false);
     const chainViaExtend = chainScenesEnabled && familySupportsExtend(String(input.family));
     const maxConcurrent = chainScenesEnabled
       ? 1
@@ -1555,7 +1449,6 @@ export async function runGenerateJob(input: GenerateJobInput): Promise<GenerateJ
               aspectRatio: input.aspectRatio,
               resolution: input.resolution,
               mode: input.mode,
-              stylePrompt: input.stylePrompt,
               language: input.language,
               projectKind,
               castLock: musicCastLock,
@@ -1874,9 +1767,10 @@ export function clearProjectNarration(projectId: string): {
   const projectDir = detail.projectDir;
   const targets = [
     RAW_NARRATION_FILE,
-    'narration.mp3',
-    'subs.srt',
+    NARRATION_FILE,
+    SUBTITLE_FILE,
     TIMING_FILE,
+    WORDS_FILE,
   ];
   const removed: string[] = [];
   for (const name of targets) {
@@ -1920,8 +1814,8 @@ export async function importExternalNarration(options: {
   fs.mkdirSync(workDir, { recursive: true });
 
   const rawPath = path.join(projectDir, RAW_NARRATION_FILE);
-  const audioPath = path.join(projectDir, 'narration.mp3');
-  const srtPath = path.join(projectDir, 'subs.srt');
+  const audioPath = path.join(projectDir, NARRATION_FILE);
+  const srtPath = path.join(projectDir, SUBTITLE_FILE);
   const tmpMp3 = path.join(workDir, `import-narration-${Date.now()}.mp3`);
 
   const ext = path.extname(sourcePath).toLowerCase();
@@ -1979,11 +1873,16 @@ export async function importExternalNarration(options: {
   });
 
   const hash = narrationHash(text, `external:${path.basename(sourcePath)}`, 'import');
-  fs.writeFileSync(
-    path.join(projectDir, TIMING_FILE),
-    JSON.stringify({ hash, audioDuration: durationSec, timings } satisfies NarrationCache, null, 2),
-    'utf8'
-  );
+  writeNarrationCache(projectDir, { hash, audioDuration: durationSec, timings });
+  // Audio tự thu / tự TTS ngoài app cũng là một lần đo nhịp đọc hợp lệ.
+  recordNarrationRateSample({
+    language: draft?.language || detectScriptLanguage(text),
+    text,
+    seconds: durationSec,
+    voiceKey: `external:${path.basename(sourcePath)}`,
+  });
+  // File tự TTS ngoài app cũng phải có mốc từ thì bước 3 mới chia cảnh đúng nhịp đọc.
+  writeNarrationWords(projectDir, words);
 
   const nextScript: ScriptDraft = {
     ...script,

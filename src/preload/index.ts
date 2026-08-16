@@ -1,5 +1,6 @@
 import { contextBridge, ipcRenderer, type IpcRendererEvent } from 'electron';
 import { IPC } from '../shared/ipc';
+import type { SpeechRateInfo } from '../shared/models';
 import type {
   ApiKeys,
   AppSettings,
@@ -23,6 +24,8 @@ import type {
   ProjectDetail,
   ProjectDraft,
   ProjectMeta,
+  ScenePlanProgress,
+  ScenePlanResult,
   ScriptDraft,
   LoadMoreUsageHistoryRequest,
   LoadMoreUsageHistoryResult,
@@ -38,6 +41,8 @@ const api = {
   getSettings: (): Promise<AppSettings> => ipcRenderer.invoke(IPC.getSettings),
   saveSettings: (settings: AppSettings): Promise<boolean> =>
     ipcRenderer.invoke(IPC.saveSettings, settings),
+  getSpeechRate: (language?: string): Promise<SpeechRateInfo> =>
+    ipcRenderer.invoke(IPC.getSpeechRate, language),
   getModels: (): Promise<{
     videoFamilies: { id: VideoFamily; label: string }[];
     imageFamilies: { id: ImageFamily; label: string }[];
@@ -135,6 +140,16 @@ const api = {
   },
   generateScript: (input: GenerateIdeaInput): Promise<ScriptDraft> =>
     ipcRenderer.invoke(IPC.generateScript, input),
+  /** Bước 3: chia cảnh theo độ dài voiceover + viết visual prompt. */
+  planScenes: (
+    projectId: string,
+    input?: { sceneCount?: number; openaiChatModel?: string }
+  ): Promise<ScenePlanResult> => ipcRenderer.invoke(IPC.planScenes, projectId, input),
+  onScenePlanProgress: (cb: (p: ScenePlanProgress) => void): (() => void) => {
+    const listener = (_e: IpcRendererEvent, p: ScenePlanProgress) => cb(p);
+    ipcRenderer.on(IPC.scenePlanProgress, listener);
+    return () => ipcRenderer.removeListener(IPC.scenePlanProgress, listener);
+  },
   generateMusicAnimationScript: (
     projectId: string,
     input?: Partial<GenerateMusicAnimationScriptInput>

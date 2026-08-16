@@ -88,6 +88,17 @@ export interface AppSettings {
   /** Tốc độ đọc GenMax (ElevenLabs 0.7–1.2; MiniMax/CapCut 0.5–2.0). */
   genmaxSpeed: number;
   burnSubtitles: boolean;
+  /**
+   * Nối các cảnh video liền mạch (scene N mở đầu từ frame cuối của scene N-1).
+   * Mặc định TẮT: bật thì mọi scene phải gen tuần tự, không dùng được worker pool.
+   */
+  chainScenes?: boolean;
+  /**
+   * Ghi đè nhịp đọc dùng để quy ra số từ / ký tự cần viết cho mỗi giây video.
+   * Bỏ trống (hoặc 0) = tự đo từ audio TTS gần nhất.
+   */
+  speechRateWordsPerSec?: number;
+  speechRateCjkCharsPerSec?: number;
   lastExportDir?: string;
   /** Số scene Snapgen generate song song (worker pool). Mặc định 5. */
   maxConcurrentScenes?: number;
@@ -522,6 +533,8 @@ export interface GenerateJobInput {
 
 export type JobPhase =
   | 'idle'
+  /** Chia cảnh theo độ dài voiceover + viết visual prompt (bước 3). */
+  | 'script'
   | 'tts'
   | 'whisper'
   | 'video'
@@ -575,6 +588,23 @@ export interface JobProgress {
   sceneStatuses?: SceneJobProgress[];
   /** Điều khiển từ UI: tạm dừng / dừng. */
   control?: JobControlState;
+}
+
+/** Tiến độ bước 3 (chia cảnh + viết prompt) — kênh riêng, không phải job có pause/stop. */
+export interface ScenePlanProgress {
+  phase: 'split' | 'prompt';
+  done: number;
+  total: number;
+  message: string;
+}
+
+export interface ScenePlanResult {
+  script: ScriptDraft;
+  /** Độ dài voiceover thật — cũng là độ dài video sau khi ghép. */
+  audioDurationSec: number;
+  sceneCount: number;
+  /** true = cắt theo mốc từng từ; false = cắt theo tỉ lệ ký tự. */
+  alignedWithWords: boolean;
 }
 
 export type ActiveJobKind = 'generate' | 'remux';

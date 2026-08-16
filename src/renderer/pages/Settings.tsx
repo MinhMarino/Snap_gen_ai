@@ -28,6 +28,11 @@ import {
   TTS_PROVIDERS_TEMPORARILY_HIDDEN,
   type IrodoriSpeedPreset,
 } from '../../shared/voice';
+import {
+  DEFAULT_CJK_CHARS_PER_SECOND,
+  DEFAULT_WORDS_PER_SECOND,
+  type SpeechRateInfo,
+} from '../../shared/models';
 import UsageQuotaPanel from '../components/UsageQuotaPanel';
 import UsageHistoryPanel from '../components/UsageHistoryPanel';
 import ElevenLabsApiKeysPanel from '../components/ElevenLabsApiKeysPanel';
@@ -39,6 +44,25 @@ function parseTtsProvider(value: string): TtsProvider {
   if (value === 'elevenlabs' || value === 'qwen' || value === 'genmax') return value;
   if (value === 'openai') return 'openai';
   return 'genmax';
+}
+
+/** Một dòng giải thích nhịp đọc đang dùng: ở đâu ra, và ra bao nhiêu chữ/10 phút. */
+function describeSpeechRate(info: SpeechRateInfo | null, unit: 'từ' | 'ký tự'): string {
+  if (!info) return 'Chưa đọc được số đo (main chưa sẵn sàng).';
+  const perSec = Math.round(info.perSec * 100) / 100;
+  const per10Min = Math.round(info.perSec * 600).toLocaleString('vi-VN');
+  const tail = `→ video 10 phút ≈ ${per10Min} ${unit}.`;
+  if (info.source === 'manual') {
+    return `Đang dùng số bạn đặt: ${perSec} ${unit}/giây ${tail}`;
+  }
+  if (info.source === 'measured') {
+    const last =
+      info.lastUnits && info.lastSeconds
+        ? ` (lần gần nhất: ${info.lastUnits.toLocaleString('vi-VN')} ${unit} / ${info.lastSeconds}s)`
+        : '';
+    return `Đo từ ${info.samples} lần tạo voice: ${perSec} ${unit}/giây${last} ${tail}`;
+  }
+  return `Chưa đo lần nào — đang dùng mặc định ${perSec} ${unit}/giây ${tail} Tạo voice một lần là app tự đo lại.`;
 }
 
 export default function Settings() {
@@ -80,6 +104,8 @@ export default function Settings() {
   const [history, setHistory] = useState<UsageHistorySnapshot | null>(null);
   const [historyBusy, setHistoryBusy] = useState(false);
   const [historyError, setHistoryError] = useState<string | null>(null);
+  const [speechRateLatin, setSpeechRateLatin] = useState<SpeechRateInfo | null>(null);
+  const [speechRateCjk, setSpeechRateCjk] = useState<SpeechRateInfo | null>(null);
   const [msg, setMsg] = useState<{ type: 'ok' | 'error'; text: string } | null>(null);
   const [busy, setBusy] = useState(false);
   /** api_key = chỉ dán key ngoài (không cần tài khoản). account = đăng nhập web tuỳ chọn. */
@@ -128,6 +154,23 @@ export default function Settings() {
     }
   };
 
+  /**
+   * Nhịp đọc đo được, hỏi riêng cho hai nhóm: '' → Latin (từ/giây), 'ja' → CJK
+   * (ký tự/giây). Mỗi nhóm có số đo và xuất xứ riêng nên phải lấy cả hai.
+   */
+  const refreshSpeechRates = async () => {
+    try {
+      const [latin, cjk] = await Promise.all([
+        window.studio.getSpeechRate(''),
+        window.studio.getSpeechRate('ja'),
+      ]);
+      setSpeechRateLatin(latin);
+      setSpeechRateCjk(cjk);
+    } catch {
+      /* Main chưa reload xong → giữ số cũ, không chặn cả trang Settings. */
+    }
+  };
+
   const loadVoices = async (force = false) => {
     if (!force && voicesLoaded) return;
     try {
@@ -145,6 +188,7 @@ export default function Settings() {
       setKeys(await window.studio.getKeys());
       const nextSettings = await window.studio.getSettings();
       setSettings(nextSettings);
+      await refreshSpeechRates();
       const session = await window.studio.getElevenLabsSession();
       setElevenLabs(session);
       if (session.loggedIn && session.hasApiCredential) {
@@ -858,6 +902,78 @@ export default function Settings() {
         </div>
       </section>
 
+      <section className="panel">
+        <h3>Nhịp đọc — quy thời lượng ra số chữ</h3>
+        <p className="hint">
+          Bước 1 đặt hàng ChatGPT theo công thức <b>số chữ = thời lượng × nhịp đọc</b>. Sau mỗi lần
+          tạo voice, app đo lại nhịp đọc thật từ chính file audio vừa tạo (số chữ đã gửi ÷ số giây
+          audio) và dùng cho lần viết lời sau — để trống hai ô dưới là chạy theo số đo đó.
+        </p>
+
+        <div className="field">
+          <label htmlFor="speech-rate-words">Latin (Việt, Anh…) — từ/giây</label>
+          <input
+            id="speech-rate-words"
+            type="number"
+            min={1.2}
+            max={6}
+            step={0.1}
+            value={settings.speechRateWordsPerSec ?? ''}
+            placeholder={`Tự đo: ${Math.round((speechRateLatin?.wordsPerSec ?? DEFAULT_WORDS_PER_SECOND) * 100) / 100}`}
+            onChange={(e) =>
+              setSettings({
+                ...settings,
+                speechRateWordsPerSec: e.target.value.trim()
+                  ? Number(e.target.value)
+                  : undefined,
+              })
+            }
+          />
+          <p className="hint">{describeSpeechRate(speechRateLatin, 'từ')}</p>
+        </div>
+
+        <div className="field">
+          <label htmlFor="speech-rate-cjk">Nhật / Trung / Hàn — ký tự/giây</label>
+          <input
+            id="speech-rate-cjk"
+            type="number"
+            min={2.5}
+            max={14}
+            step={0.1}
+            value={settings.speechRateCjkCharsPerSec ?? ''}
+            placeholder={`Tự đo: ${Math.round((speechRateCjk?.cjkCharsPerSec ?? DEFAULT_CJK_CHARS_PER_SECOND) * 100) / 100}`}
+            onChange={(e) =>
+              setSettings({
+                ...settings,
+                speechRateCjkCharsPerSec: e.target.value.trim()
+                  ? Number(e.target.value)
+                  : undefined,
+              })
+            }
+          />
+          <p className="hint">{describeSpeechRate(speechRateCjk, 'ký tự')}</p>
+        </div>
+
+        <div className="row-actions">
+          <button
+            type="button"
+            className="btn"
+            onClick={() =>
+              setSettings({
+                ...settings,
+                speechRateWordsPerSec: undefined,
+                speechRateCjkCharsPerSec: undefined,
+              })
+            }
+          >
+            Bỏ ghi đè (dùng số đo)
+          </button>
+          <button type="button" className="btn" onClick={() => void refreshSpeechRates()}>
+            Làm mới số đo
+          </button>
+        </div>
+      </section>
+
       <label className="check-row">
         <input
           type="checkbox"
@@ -866,6 +982,20 @@ export default function Settings() {
         />
         <span>Burn-in subtitle vào video cuối</span>
       </label>
+
+      <label className="check-row">
+        <input
+          type="checkbox"
+          checked={settings.chainScenes ?? false}
+          onChange={(e) => setSettings({ ...settings, chainScenes: e.target.checked })}
+        />
+        <span>Nối các cảnh video liền mạch (mỗi cảnh tiếp frame cuối của cảnh trước)</span>
+      </label>
+      <p className="hint">
+        Tắt (mặc định): mỗi cảnh gen độc lập, chạy song song theo số worker ở trên — nhanh hơn
+        nhiều. Bật: cảnh sau phải chờ cảnh trước xong để lấy frame cuối, nên toàn bộ video gen
+        tuần tự từng cảnh một. Số credit không đổi, chỉ khác thời gian và độ liền mạch.
+      </p>
 
       <div className="field">
         <label htmlFor="max-concurrent-scenes">Số scene generate song song</label>

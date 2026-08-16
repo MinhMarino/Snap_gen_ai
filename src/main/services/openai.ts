@@ -14,27 +14,28 @@ import {
 } from '../../shared/music-align';
 import {
   assertNarrationCoversTarget,
+  buildNarrationOnlyScript,
   clampTargetSceneCount,
   coalesceScenesToTargetCount,
   countSpokenBudgetUnits,
   DEFAULT_STYLE_PROMPT,
   KIDS_3D_TOY_STYLE,
-  estimateScriptSpokenSeconds,
   estimateSpokenSeconds,
-  findScenesWithShortNarration,
   formatDurationLabel,
   isCjkLanguage,
-  MAX_SCENE_BEAT_SEC,
   mergeUndersizedScenes,
   MIN_NARRATION_COVERAGE,
   MIN_SCENE_BEAT_SEC,
   normalizeSceneDurations,
   planScenesFromDuration,
   spokenBudgetForDurationSec,
-  WORDS_PER_SECOND,
+  buildStructuredVisualPrompt,
+  hasVisualStyleBible,
+  type VisualStyleBible,
 } from '../../shared/models';
 import { sanitizeNarrationText } from '../../shared/narration-clean';
 import { detectScriptLanguage } from '../../shared/detect-language';
+import { applySpeechRateProfile } from './speech-rate';
 
 /** Chunk lớn hơn → ít API call hơn (TPM-friendly). */
 const CHAPTER_CHUNK_SEC = 90;
@@ -155,20 +156,6 @@ function finalizeDraft(
   parsed.narration = parsed.scenes.map((s) => s.narration_segment).join(' ');
   if (!parsed.title) parsed.title = 'Untitled Video';
   return parsed;
-}
-
-function needsNarrationExpansion(scenes: SceneDraft[], targetDurationSec: number): boolean {
-  if (estimateScriptSpokenSeconds(scenes) < targetDurationSec * MIN_NARRATION_COVERAGE) {
-    return true;
-  }
-  return findScenesWithShortNarration(scenes).length > 0;
-}
-
-function needsBeatSplit(scenes: SceneDraft[], maxBeatSec = MAX_SCENE_BEAT_SEC): boolean {
-  const cap = Math.max(MIN_SCENE_BEAT_SEC, maxBeatSec);
-  return scenes.some(
-    (s) => estimateSpokenSeconds(s.narration_segment || '', 0) > cap
-  );
 }
 
 function sleep(ms: number): Promise<void> {
@@ -379,98 +366,30 @@ const SHOT_LADDER = [
   'medium wide shot',
 ];
 
-/** Chia narration thành scene theo câu khi AI cắt mất lời — visual prompt liên kết beat trước/sau. */
-function splitNarrationFallback(
-  narration: string,
-  chapter: ChapterOutline,
-  typicalBeatSec: number,
-  language?: string,
-  maxBeatSec = MAX_SCENE_BEAT_SEC
-): SceneDraft[] {
-  const text = narration.trim();
-  if (!text) return [];
-  const beatCap = Math.max(MIN_SCENE_BEAT_SEC, maxBeatSec);
-
-  const sentences = text
-    .split(/(?<=[.!?…。！？])\s+|(?<=[.!?…。！？])(?=[^\s])/)
-    .map((s) => s.trim())
-    .filter(Boolean);
-
-  const chunks: string[] = [];
-  if (!sentences.length) {
-    chunks.push(text);
-  } else {
-    let buf = '';
-    for (const sentence of sentences) {
-      const next = buf ? `${buf} ${sentence}` : sentence;
-      const nextSec = estimateSpokenSeconds(next, 0);
-      if (buf && nextSec > beatCap) {
-        chunks.push(buf);
-        buf = sentence;
-      } else {
-        buf = next;
-      }
-    }
-    if (buf) chunks.push(buf);
-  }
-
-  // Gộp quá ngắn — với beat dài thì gộp đến ~60% typical để giảm số scene.
-  const minKeepSec = Math.min(typicalBeatSec * 0.55, Math.max(MIN_SCENE_BEAT_SEC, beatCap * 0.35));
-  const merged: string[] = [];
-  for (const chunk of chunks) {
-    const spoken = estimateSpokenSeconds(chunk, 0);
-    if (merged.length && spoken < minKeepSec) {
-      merged[merged.length - 1] = `${merged[merged.length - 1]} ${chunk}`.trim();
-    } else {
-      merged.push(chunk);
-    }
-  }
-
-  // Khung tạm TRUNG TÍNH về thể loại: đây chỉ là scaffold local, phần lớn sẽ được
-  // `enrichVisualContinuityWithAi` viết lại theo brief. Bản cũ cứng "a cute cartoon
-  // animal mascot" + phòng chơi + "soft bounce" nên dự án nào cũng ra hoạt hình thiếu nhi.
-  const cast = 'the main subject of the video';
-
-  // Đổi nhẹ góc máy / bối cảnh cho các beat liền nhau đỡ trùng khung. Giữ NGẮN.
-  const cameraAngles = SHOT_LADDER;
+/**
+ * Khung tạm TRUNG TÍNH về thể loại cho một scene, dùng khi lô viết prompt bị lỗi.
+ *
+ * Chỉ là scaffold: một chủ thể + một hành động + một nền đơn giản, KHÔNG chép lời
+ * thoại vào đây (prompt hình phải sinh từ «Mô tả video» + «Visual style»). Bản cũ
+ * cứng "a cute cartoon animal mascot" nên dự án nào cũng ra hoạt hình thiếu nhi.
+ */
+function scaffoldVisualPrompt(index: number): string {
   const setBases = [
     'simple uncluttered background',
     'natural outdoor setting',
     'plain neutral studio background',
     'simple indoor setting',
   ];
-  /** Hành động chung cho khung tạm — luôn là hành động đơn, dễ vẽ. */
-  const fallbackActions = [
+  const actions = [
     'presented clearly in frame',
     'seen from a slightly different angle',
     'shown in a calm steady pose',
     'framed against a clean background',
   ];
-
-  return merged.map((segment, index) => {
-    const camera = cameraAngles[index % cameraAngles.length];
-    const setBase = setBases[index % setBases.length];
-    // KHÔNG chép narration vào visual_prompt. Prompt hình phải sinh ra từ «Mô tả
-    // video» + «Visual style» (phase 4 làm việc đó, nó đọc được cả hai); lời bình
-    // chỉ nói scene này rơi vào khoảnh khắc nào. Bản cũ nhét 90 ký tự lời thoại vào
-    // đây: tiếng Việt/Nhật thì wrapper cắt sạch để lại "…showing." què, tiếng Anh
-    // thì lọt nguyên câu thoại xuống Snapgen — cả hai đều không phải tả hình.
-    const action = fallbackActions[index % fallbackActions.length];
-
-    // Khung tạm NGẮN, trung tính: một chủ thể + một hành động + một nền đơn giản.
-    const base = `${cast} ${action}. ${setBase}, ${camera}.`;
-    return {
-      id: `scene-tmp-${index + 1}`,
-      visual_prompt: base,
-      narration_segment: segment,
-      duration_hint: Math.max(
-        MIN_SCENE_BEAT_SEC,
-        Math.round(estimateSpokenSeconds(segment, typicalBeatSec) * 10) / 10
-      ),
-      section: chapter.section,
-      chapter: chapter.name,
-    };
-  });
+  const camera = SHOT_LADDER[index % SHOT_LADDER.length];
+  return `the main subject of the video ${actions[index % actions.length]}. ${
+    setBases[index % setBases.length]
+  }, ${camera}.`;
 }
 
 /*
@@ -507,6 +426,73 @@ const VISUAL_PROMPT_TOKENS_PER_SCENE = 220;
  */
 const VISUAL_PROMPT_BATCH_SIZE = 10;
 
+/** Style bible được rút từ «Visual style» — cắt rộng tay vì chỉ gửi đúng MỘT lần. */
+const MAX_STYLE_CHARS_FOR_BIBLE = 6000;
+
+/**
+ * Rút «Visual style» thành bốn khối cố định, gọi đúng một lần cho cả video.
+ *
+ * Ghép nguyên văn bốn khối này vào mọi cảnh rẻ hơn và chắc tay hơn là bắt model
+ * diễn đạt lại phong cách ở từng cảnh: không cảnh nào lệch màu, và phần cấm
+ * (NEGATIVE) không bị mỗi cảnh viết mỗi kiểu.
+ */
+async function deriveVisualStyleBible(options: {
+  apiKey: string;
+  openaiModel: string;
+  brief: string;
+  stylePrompt: string;
+  mediaKind?: string | null;
+}): Promise<VisualStyleBible | null> {
+  const isVideo = options.mediaKind === 'video';
+  const system = `You turn a VISUAL STYLE description into the fixed blocks of a shot-prompt template for an AI image/video model.
+Every shot of this video repeats these blocks word for word, so they must be complete, concrete and self-contained — a render model reads them without any other context.
+Return ONLY JSON: { "style": string, "color": string, "motion": string, "negative": string, "series_cast": string }
+
+"style" — 45–80 words. The medium and how it is rendered (live-action camera footage, 3D render, 2D illustration, anime, stop-motion, mixed), how photoreal or stylised it is, genre and era, camera and lens character, depth of field, texture and level of detail, sharpness, film or digital character. Concrete visual words a render model can act on, never adjectives like "beautiful" or "high quality".
+"color" — 35–70 words. The palette in named colours, saturation level, contrast, black level, white balance and the overall grade. State plainly whether colour is true-to-life or stylised: if the style asks for realistic colour, write it as natural saturation, neutral blacks, accurate white balance, no colour cast — words a model follows.
+"motion" — ${isVideo ? '20–40 words: how things move in an 8-second shot, how the camera moves, how fast, and that one single action is shown once' : 'return an empty string, this video is made of stills'}.
+"negative" — 25–60 SHORT terms separated by commas, no sentences, no "no"/"avoid" prefixes, each one a thing to EXCLUDE from the picture. Merge, in this order: every AVOID / do-not / never / "not X" item stated anywhere in the VISUAL STYLE, then the usual render failures (text, watermark, logo, subtitles, extra fingers, deformed hands, distorted anatomy, blurry, out of focus, low resolution, jpeg artifacts, oversaturated, HDR look, plastic CGI look, stock photo look). If the style is photoreal, ban cartoon, anime, illustration, 3D render; if the style is drawn or animated, ban photorealistic and live-action instead. Never put anything here that the style actually asks for.
+"series_cast" — one short line naming the world and any recurring character or object, so every scene stays in the same place with the same look.
+
+The VISUAL STYLE always wins over the brief on how things look. Write everything in English.`;
+
+  try {
+    const parsed = await chatJson<{
+      style?: string;
+      color?: string;
+      motion?: string;
+      negative?: string;
+      series_cast?: string;
+    }>({
+      apiKey: options.apiKey,
+      model: options.openaiModel,
+      temperature: 0.3,
+      maxTokens: 1200,
+      system,
+      user: `=== VIDEO BRIEF (what the video is about) ===
+${options.brief.slice(0, MAX_BRIEF_CHARS_FOR_VISUALS)}
+
+=== VISUAL STYLE (decides how every shot looks) ===
+${options.stylePrompt.slice(0, MAX_STYLE_CHARS_FOR_BIBLE)}
+
+Media: ${isVideo ? 'video clips' : 'still images'}.`,
+    });
+
+    const bible: VisualStyleBible = {
+      style: String(parsed.style || '').trim(),
+      color: String(parsed.color || '').trim(),
+      motion: isVideo ? String(parsed.motion || '').trim() : '',
+      negative: String(parsed.negative || '').trim(),
+      seriesCast: String(parsed.series_cast || '').trim(),
+    };
+    if (!hasVisualStyleBible(bible)) return null;
+    return bible;
+  } catch {
+    // Rút style hỏng → quay về prompt một đoạn như cũ, không chặn cả bước viết prompt.
+    return null;
+  }
+}
+
 /**
  * Viết lại visual_prompt cho toàn bộ scene từ «Mô tả video» + «Visual style».
  *
@@ -521,10 +507,23 @@ async function enrichVisualContinuityWithAi(options: {
   brief: string;
   language?: string;
   stylePrompt: string;
+  mediaKind?: string | null;
   scenes: SceneDraft[];
+  onProgress?: (done: number, total: number) => void;
 }): Promise<SceneDraft[]> {
   const { scenes } = options;
   if (scenes.length < 2) return scenes;
+
+  // Rút style bible TRƯỚC: có nó thì mỗi lô chỉ còn phải viết phần tả cảnh, phần
+  // phong cách / màu / cấm do app ghép vào nên mọi cảnh giống hệt nhau.
+  const bible = await deriveVisualStyleBible({
+    apiKey: options.apiKey,
+    openaiModel: options.openaiModel,
+    brief: options.brief,
+    stylePrompt: options.stylePrompt,
+    mediaKind: options.mediaKind,
+  });
+  const structured = bible != null;
 
   /*
    * Nhất quán là nhất quán về THẾ GIỚI (bối cảnh, kiểu hình, nhân vật khi có
@@ -543,14 +542,25 @@ Return ONLY JSON:
   "series_cast": string,
   "scenes": [ { "id": string, "visual_prompt": string } ]
 }
-LENGTH: each visual_prompt is English, 55–90 words, written as flowing descriptive phrases separated by commas. Detail is what makes the render match the style — do not write a bare one-liner. Never exceed 90 words.
+${
+  structured
+    ? `LENGTH: each visual_prompt is English, 70–110 words, written as flowing descriptive phrases separated by commas. Detail is what makes the render match the style — do not write a bare one-liner.
+You write ONLY the scene itself. The app appends the fixed STYLE, COLOR${bible?.motion ? ', MOTION' : ''} and NEGATIVE blocks to every prompt afterwards, so never write those sections yourself, never restate the palette or the medium, and never list anything to avoid.
+Every visual_prompt must describe, in your own words and in roughly this order:
+1. the subject and the ONE action or state it is in during THIS scene,
+2. how that subject concretely looks — materials, textures, surfaces, condition, what it is wearing or made of,
+3. the setting: where it is, what is behind it, two or three supporting details of the place,
+4. framing, camera height and distance (use the scene's shot_hint),
+5. the light in THIS shot: its source, direction, quality and where the shadows fall.`
+    : `LENGTH: each visual_prompt is English, 55–90 words, written as flowing descriptive phrases separated by commas. Detail is what makes the render match the style — do not write a bare one-liner. Never exceed 90 words.
 Every visual_prompt must describe, in your own words and in roughly this order:
 1. the subject and the ONE action or state it is in during THIS scene,
 2. how that subject concretely looks — materials, textures, colours, clothing or surface, expression or condition,
 3. the setting: where it is, what is behind it, one or two supporting details of the place,
 4. framing and camera position (use the scene's shot_hint),
 5. the light: its source, direction and quality, plus the colour grade of the image,
-6. the medium and rendering style taken from the VISUAL STYLE block — name it explicitly in EVERY prompt so all scenes look like one piece.
+6. the medium and rendering style taken from the VISUAL STYLE block — name it explicitly in EVERY prompt so all scenes look like one piece.`
+}
 ${castLine}
 VARIETY IS MANDATORY — this is what makes the video watchable:
 - Consecutive scenes must show DIFFERENT things. Never open more than two scenes in a row with the same subject word.
@@ -559,15 +569,27 @@ VARIETY IS MANDATORY — this is what makes the video watchable:
 - A person or their hands should be in frame only when the narration is about doing something. Otherwise show the subject itself.
 WHERE EACH PART OF A PROMPT COMES FROM — follow this split strictly:
 - WHAT is in frame (subject, people/objects, place, world) comes from the VIDEO BRIEF. A documentary shows real-world scenes and adults, a product video shows the product, a story video shows its characters. Do NOT turn the video into a cartoon unless the style says so.
-- HOW it looks (medium, genre, lighting, colour, era, level of realism) comes from the VISUAL STYLE. Restate its look in concrete visual words for each scene instead of quoting it back verbatim. Any "AVOID / do not use" list inside it is a ban, never a request — never repeat the banned words in the prompt.
+- HOW it looks (medium, genre, lighting, colour, era, level of realism) comes from the VISUAL STYLE. ${
+    structured
+      ? 'The fixed blocks already carry it — inside the scene text only mention what THIS shot adds: the light of this moment and the materials in frame.'
+      : 'Restate its look in concrete visual words for each scene instead of quoting it back verbatim. Any "AVOID / do not use" list inside it is a ban, never a request — never repeat the banned words in the prompt.'
+  }
 - The scene's narration only picks WHICH moment of that world this shot shows. Never describe the narration itself and never copy its wording.
 NEVER include: continuity notes, OPENING/CONTINUATION labels, quotes of the narration, capitalised labels (SUBJECT:, CAMERA:…), section headers, bullet points, lists of bans, style bibles, locale essays, words about text/logos/watermarks, camera move jargon (parallax, orbit, dolly, tracking), or ages / children / babies / named real people.
 Do NOT change narration, duration, chapter, or section. Return one visual_prompt per input scene id.
-Good example: "A woman in a creased white lab coat lifts a tall glass beaker of luminous blue liquid to eye level, steam curling off the rim, her focused expression lit from the side; behind her a cluttered bench of pipettes, notebooks and a humming centrifuge recedes into soft focus; medium shot at chest height, cool daylight from a tall window mixing with warm overhead lamps, muted teal and amber grade, photorealistic documentary cinematography, shallow depth of field, fine grain."
+Good example: ${
+    structured
+      ? '"A woman in a creased white lab coat lifts a tall glass beaker of luminous blue liquid to eye level, steam curling off the rim, condensation beading down the glass; behind her a cluttered bench of pipettes, open notebooks and a humming centrifuge recedes into soft focus, a whiteboard of equations half visible on the far wall; medium shot at chest height, tall window on the left throwing hard afternoon light across her sleeve, shadows falling to the right across the bench."'
+      : '"A woman in a creased white lab coat lifts a tall glass beaker of luminous blue liquid to eye level, steam curling off the rim, her focused expression lit from the side; behind her a cluttered bench of pipettes, notebooks and a humming centrifuge recedes into soft focus; medium shot at chest height, cool daylight from a tall window mixing with warm overhead lamps, muted teal and amber grade, photorealistic documentary cinematography, shallow depth of field, fine grain."'
+  }
 Bad example: a bare "A scientist holds a beaker in a lab.", or a paragraph of labels, bans and continuity notes.`;
 
   const briefBlock = options.brief.slice(0, MAX_BRIEF_CHARS_FOR_VISUALS);
-  const styleBlock = options.stylePrompt.slice(0, MAX_STYLE_CHARS_FOR_VISUALS);
+  // Đã rút được style bible thì lô sau chỉ cần bốn khối ngắn đó, không gửi lại cả
+  // «Visual style» — vừa đỡ token vừa hết cảnh mỗi lô hiểu phong cách một kiểu.
+  const styleBlock = structured
+    ? `${bible?.style}\nColour: ${bible?.color}${bible?.motion ? `\nMotion: ${bible.motion}` : ''}`
+    : options.stylePrompt.slice(0, MAX_STYLE_CHARS_FOR_VISUALS);
 
   const batches: SceneDraft[][] = [];
   for (let i = 0; i < scenes.length; i += VISUAL_PROMPT_BATCH_SIZE) {
@@ -575,9 +597,14 @@ Bad example: a bare "A scientist holds a beaker in a lab.", or a paragraph of la
   }
 
   const byId = new Map<string, string>();
-  /** Prompt đã viết, theo thứ tự — dùng làm ngữ cảnh chống lặp cho lô kế tiếp. */
-  const written: string[] = [];
-  let seriesCast = '';
+  /**
+   * Neo thế giới chỉ còn MỘT dòng, giống hệt ở mọi lô.
+   *
+   * Bản cũ nhét thêm 2 prompt gần nhất vào mỗi lô để cảnh nối tiếp nhau — tốn
+   * token, và các lô phải chạy tuần tự vì lô sau cần đầu ra của lô trước. Giờ
+   * phong cách đã do style bible giữ, mỗi cảnh chỉ cần tả đúng cảnh của nó.
+   */
+  let seriesCast = bible?.seriesCast?.trim() || '';
 
   for (let b = 0; b < batches.length; b++) {
     const batch = batches[b];
@@ -596,17 +623,11 @@ Bad example: a bare "A scientist holds a beaker in a lab.", or a paragraph of la
       })
       .join('\n\n');
 
-    // Lô sau phải nối tiếp lô trước: cùng thế giới, khác khung hình.
-    const continuityBlock =
-      b === 0
-        ? ''
-        : `\n=== ALREADY ESTABLISHED (earlier scenes of this same video) ===
-World / recurring cast: ${seriesCast || '(keep the world implied by the prompts below)'}
-Last prompts written — keep their world and rendering style, do NOT repeat their framing or subject:
-${written
-  .slice(-2)
-  .map((p) => `- ${p.slice(0, 320)}`)
-  .join('\n')}\n`;
+    // Không gửi lại prompt của lô trước nữa: mỗi cảnh đứng một mình, chỉ chung
+    // một dòng thế giới + bộ khối phong cách cố định.
+    const continuityBlock = seriesCast
+      ? `\n=== WORLD (same in every scene) ===\n${seriesCast}\n`
+      : '';
 
     try {
       const parsed = await chatJson<{
@@ -632,7 +653,7 @@ ${continuityBlock}
 === SCENES ${offset + 1}–${offset + batch.length} of ${scenes.length} ===
 ${sceneBlock}
 
-Write one DETAILED visual_prompt (55–90 words) per scene, built from the brief and the visual style above. Same world and same rendering style throughout the whole video, but each shot shows something different — follow each scene's shot_hint and its own narration.`,
+Write one DETAILED visual_prompt (${structured ? '70–110 words, the scene only — no style, colour or negative sections' : '55–90 words'}) per scene, built from the brief and the visual style above. Same world and same rendering style throughout the whole video, but each shot shows something different — follow each scene's shot_hint and its own narration.`,
       });
 
       if (!seriesCast) seriesCast = String(parsed.series_cast || '').trim();
@@ -645,19 +666,23 @@ Write one DETAILED visual_prompt (55–90 words) per scene, built from the brief
       /* Lô lỗi → giữ prompt cũ cho lô đó, không hỏng cả script. */
     }
 
-    for (const scene of batch) {
-      const vp = byId.get(scene.id);
-      if (vp) written.push(vp);
-    }
+    options.onProgress?.(
+      Math.min((b + 1) * VISUAL_PROMPT_BATCH_SIZE, scenes.length),
+      scenes.length
+    );
   }
 
   if (!byId.size) return scenes;
 
   return scenes.map((scene, index) => {
     const next = byId.get(scene.id) || byId.get(`scene-${String(index + 1).padStart(2, '0')}`);
+    if (!next) return scene;
     // Không gắn thêm "Recurring cast: …" nữa — AI đã lặp cast trong từng câu,
     // và wrapper sẽ cắt mọi chỉ thị kiểu này trước khi gửi Snapgen.
-    return next ? { ...scene, visual_prompt: next } : scene;
+    // Có style bible thì ghép STYLE / COLOR / MOTION / NEGATIVE vào đây, một lần,
+    // giống hệt nhau ở mọi cảnh.
+    const visual_prompt = bible ? buildStructuredVisualPrompt(next, bible) : next;
+    return { ...scene, visual_prompt };
   });
 }
 
@@ -760,8 +785,68 @@ ${sceneBlock}`,
 }
 
 /**
- * Tạo script theo Chapter → Scene.
- * Tối ưu TPM: ít call hơn (bỏ AI split), chapter lớn hơn, retry 429, delay giữa call.
+ * Bước 3: viết visual_prompt cho các scene VỪA chia theo độ dài audio thật.
+ *
+ * Cùng hai đường viết prompt như trước (chỉ thị tự đặt giữ nguyên văn / luật mặc
+ * định), chỉ khác thời điểm gọi: giờ scene đã có mốc thời gian thật nên
+ * `duration_hint` đưa vào prompt là số giây scene sẽ chạy, không phải số ước lượng.
+ * Lô nào lỗi → scene đó rơi về khung tạm, không để prompt rỗng xuống Snapgen.
+ */
+export async function writeVisualPromptsForScenes(options: {
+  apiKey: string;
+  openaiModel: string;
+  title: string;
+  brief: string;
+  language?: string;
+  stylePrompt?: string;
+  scenePromptInstruction?: string;
+  /** 'video' → style bible có thêm khối MOTION. */
+  mediaKind?: string | null;
+  scenes: SceneDraft[];
+  onProgress?: (done: number, total: number) => void;
+}): Promise<SceneDraft[]> {
+  const { scenes } = options;
+  if (!scenes.length) return scenes;
+
+  const stylePrompt = options.stylePrompt?.trim() || DEFAULT_STYLE_PROMPT;
+  const instruction = options.scenePromptInstruction?.trim();
+
+  const written = instruction
+    ? await writeScenePromptsWithInstruction({
+        apiKey: options.apiKey,
+        openaiModel: options.openaiModel,
+        instruction,
+        title: options.title,
+        brief: options.brief,
+        stylePrompt,
+        scenes,
+        onProgress: options.onProgress,
+      })
+    : await enrichVisualContinuityWithAi({
+        apiKey: options.apiKey,
+        openaiModel: options.openaiModel,
+        title: options.title,
+        brief: options.brief,
+        language: options.language,
+        stylePrompt,
+        mediaKind: options.mediaKind,
+        scenes,
+        onProgress: options.onProgress,
+      });
+
+  return written.map((scene, index) => ({
+    ...scene,
+    visual_prompt: (scene.visual_prompt || '').trim() || scaffoldVisualPrompt(index),
+  }));
+}
+
+/**
+ * Bước 1 của dự án thường: CHỈ viết lời đọc, theo Chapter.
+ *
+ * Không chia scene và không viết visual_prompt ở đây nữa. Chia cảnh cần biết lời
+ * này đọc ra dài bao nhiêu giây THẬT, mà chỉ TTS mới trả lời được — nên việc đó
+ * dời xuống `planScenesFromNarrationAudio` (bước 3, sau khi đã có audio).
+ * Tối ưu TPM: ít call hơn, chapter lớn, retry 429, delay giữa call.
  */
 export async function generateScript(
   apiKey: string,
@@ -773,13 +858,21 @@ export async function generateScript(
     mediaKind: input.mediaKind,
   });
   const targetDurationSec = plan.targetDurationSec;
-  const targetMediaCount = clampTargetSceneCount(targetDurationSec, plan.sceneCountHint);
   // Ngôn ngữ lời bình: người dùng chọn ở panel giọng đọc thì theo đúng lựa chọn đó;
   // để «Tự động» thì đoán từ brief. Phải chốt TRƯỚC khi viết vì ngân sách lời tính
   // bằng ký tự (CJK) hay từ (còn lại) là hai con số khác hẳn nhau.
   const explicitLanguage = input.language?.trim() || '';
   const language = explicitLanguage || detectScriptLanguage(input.brief);
+  // Ngân sách lời = thời lượng × nhịp đọc THẬT của giọng đang dùng (đo từ lần TTS
+  // gần nhất, xem `speech-rate.ts`). Phải nạp trước mọi phép tính bên dưới vì cả
+  // `spokenBudgetForDurationSec` lẫn `estimateSpokenSeconds` đều đọc nhịp này.
+  const rate = applySpeechRateProfile(language);
   const totalBudget = spokenBudgetForDurationSec(targetDurationSec, language);
+  console.log(
+    `[script] ${formatDurationLabel(targetDurationSec)} · ${language} · ` +
+      `${Math.round(rate.perSec * 100) / 100} ${rate.unitLabel}/s (${rate.source}) ` +
+      `→ ngân sách ~${totalBudget.amount} ${totalBudget.unitLabel}`
+  );
   const resolvedStyle = input.stylePrompt?.trim() || DEFAULT_STYLE_PROMPT;
   const styleHint = `Style: ${resolvedStyle}`;
 
@@ -946,42 +1039,18 @@ Do not restart. Do not summarize the previous text.`,
     previousNarrationTail.push(narration);
   }
 
-  let allScenes: SceneDraft[] = [];
-  for (const { chapter, narration } of chapterNarrations) {
-    let chapterScenes = splitNarrationFallback(
-      narration,
-      chapter,
-      plan.typicalBeatSec,
-      language,
-      plan.maxBeatSec
-    );
-    if (needsBeatSplit(chapterScenes, plan.maxBeatSec)) {
-      chapterScenes = splitNarrationFallback(
-        chapterScenes.map((s) => s.narration_segment).join(' ') || narration,
-        chapter,
-        plan.typicalBeatSec,
-        language,
-        plan.maxBeatSec
-      );
-    }
-    allScenes.push(...chapterScenes);
-  }
+  const joinNarration = () =>
+    chapterNarrations
+      .map((c) => c.narration.trim())
+      .filter(Boolean)
+      .join('\n\n');
 
-  // Ép số media ≤ mục tiêu (vd. 10 phút → 20 ảnh thay vì ~100).
-  if (allScenes.length > targetMediaCount) {
-    allScenes = coalesceScenesToTargetCount(allScenes, targetMediaCount);
-  }
+  // —— Phase 3: viết bù khi tổng lời còn ngắn so với mục tiêu (tối đa 2 lần) ——
+  for (let fill = 1; fill <= 2; fill++) {
+    const spoken = estimateSpokenSeconds(joinNarration(), 0);
+    if (spoken >= targetDurationSec * MIN_NARRATION_COVERAGE) break;
 
-  let draft = finalizeDraft({ title, narration: '', scenes: allScenes }, targetDurationSec);
-
-  // —— Phase 3: fill thiếu (tối đa 2 lần, rebuild scene local) ——
-  for (
-    let fill = 1;
-    fill <= 2 && needsNarrationExpansion(draft.scenes, targetDurationSec);
-    fill++
-  ) {
     await sleep(INTER_CALL_DELAY_MS);
-    const spoken = estimateScriptSpokenSeconds(draft.scenes);
     const deficitSec = Math.max(15, targetDurationSec - spoken);
     const deficitBudget = spokenBudgetForDurationSec(deficitSec, language);
     const bodyChapters = chapterNarrations.filter((c) => c.chapter.section === 'body');
@@ -1009,143 +1078,17 @@ Return { "continuation": "<new sentences only, ≥ ${deficitBudget.amount} ${def
     if (!extra) continue;
 
     targetChapter.narration = `${targetChapter.narration} ${extra}`.trim();
-    const rebuilt = splitNarrationFallback(
-      targetChapter.narration,
-      targetChapter.chapter,
-      plan.typicalBeatSec,
-      language,
-      plan.maxBeatSec
-    );
-    const nextScenes: SceneDraft[] = [];
-    let replaced = false;
-    for (const scene of draft.scenes) {
-      if ((scene.chapter || '') === targetChapter.chapter.name) {
-        if (!replaced) {
-          nextScenes.push(...rebuilt);
-          replaced = true;
-        }
-        continue;
-      }
-      nextScenes.push(scene);
-    }
-    if (!replaced) nextScenes.push(...rebuilt);
-    let mergedScenes = nextScenes;
-    if (mergedScenes.length > targetMediaCount) {
-      mergedScenes = coalesceScenesToTargetCount(mergedScenes, targetMediaCount);
-    }
-    draft = finalizeDraft(
-      { title: draft.title, narration: '', scenes: mergedScenes },
-      targetDurationSec
-    );
   }
 
-  if (draft.scenes.length > targetMediaCount) {
-    draft = finalizeDraft(
-      {
-        title: draft.title,
-        narration: '',
-        scenes: coalesceScenesToTargetCount(draft.scenes, targetMediaCount),
-      },
-      targetDurationSec
-    );
-  }
-
-  assertNarrationCoversTarget(draft.scenes, targetDurationSec, MIN_NARRATION_COVERAGE);
-
-  // —— Phase 4: viết lại visual_prompt toàn video theo brief + style ——
-  await sleep(INTER_CALL_DELAY_MS);
-  const customInstruction = input.scenePromptInstruction?.trim();
-  draft.scenes = customInstruction
-    ? await writeScenePromptsWithInstruction({
-        apiKey,
-        openaiModel,
-        instruction: customInstruction,
-        title: draft.title,
-        brief: input.brief,
-        stylePrompt: resolvedStyle,
-        scenes: draft.scenes,
-      })
-    : await enrichVisualContinuityWithAi({
-        apiKey,
-        openaiModel,
-        title: draft.title,
-        brief: input.brief,
-        language,
-        stylePrompt: resolvedStyle,
-        scenes: draft.scenes,
-      });
-  draft = finalizeDraft(
-    { title: draft.title, narration: '', scenes: draft.scenes },
+  const draft = buildNarrationOnlyScript({
+    title,
+    narration: joinNarration(),
     targetDurationSec,
-    { requireStructure: false }
-  );
-
-  return draft;
-}
-
-/**
- * Sau khi đo audio TTS lệch mục tiêu: AI rewrite narration rồi TTS lại.
- */
-export async function rewriteNarrationToMatchDuration(options: {
-  apiKey: string;
-  openaiModel: string;
-  script: ScriptDraft;
-  language: string;
-  targetDurationSec: number;
-  actualAudioSec: number;
-}): Promise<ScriptDraft> {
-  const { apiKey, openaiModel, script, language, targetDurationSec, actualAudioSec } = options;
-  const target = Math.max(1, targetDurationSec);
-  const actual = Math.max(0.1, actualAudioSec);
-  const ratio = target / actual;
-  const tooShort = actual < target;
-
-  const system = `You adjust voiceover length to match a measured TTS runtime.
-Return ONLY valid JSON with scenes including section, chapter, visual_prompt, narration_segment, duration_hint.
-
-Rules:
-- Language: ${language}
-- Prefer keeping the same chapters and scene ideas; you MAY split/merge slightly if needed for ${MIN_SCENE_BEAT_SEC}–${MAX_SCENE_BEAT_SEC}s beats.
-- Scale spoken length ≈ ${ratio.toFixed(3)}× (${tooShort ? 'EXPAND' : 'COMPRESS'}).
-- Narration: keep the EXISTING tone, audience and vocabulary of the script — only change length (~${WORDS_PER_SECOND} words/sec).
-- One idea / one visual per scene. Continuous voiceover across scenes.
-- visual_prompt: keep the EXISTING prompt of each scene word for word whenever that scene survives — it already carries the look of the video. Only write a new one for a scene you actually split or merge, and then match the existing prompts: English, 55–90 words of flowing description (subject and its action, concrete materials and colours, setting, framing, light and colour grade, the same rendering style as the other scenes). No labels, no continuity notes, no quoted narration, no ages/children/real people.`;
-
-  const sceneLines = script.scenes
-    .map((s, i) => {
-      const planned = Math.max(2, s.duration_hint || 6);
-      return `Scene ${i + 1} [${s.id}] chapter=${s.chapter || '—'} section=${s.section || 'body'} duration_hint=${planned}s\nvisual: ${s.visual_prompt}\nnarration: ${s.narration_segment}`;
-    })
-    .join('\n\n');
-
-  const rewritten = await chatJson<ScriptDraft>({
-    apiKey,
-    model: openaiModel,
-    system,
-    maxTokens: Math.min(MAX_COMPLETION_TOKENS, Math.max(2800, Math.round(target * 55))),
-    user: `Target voiceover: ${target}s (${formatDurationLabel(target)})
-Measured TTS audio: ${actual.toFixed(2)}s (${formatDurationLabel(actual)})
-Relative error: ${(((actual - target) / target) * 100).toFixed(1)}%
-Action: ${tooShort ? 'LENGTHEN' : 'SHORTEN'} narration so a new TTS pass lands within ±3% of ${target}s.
-
-Title: ${script.title}
-${sceneLines}
-
-Return the FULL rewritten JSON.`,
-    temperature: 0.55,
   });
-
-  if (rewritten.scenes?.length) {
-    const dropForeignSentences = isCjkLanguage(language);
-    rewritten.scenes = rewritten.scenes.map((scene) => ({
-      ...scene,
-      narration_segment: sanitizeNarrationText(scene.narration_segment || '', {
-        dropForeignSentences,
-      }),
-    }));
-  }
-
-  return finalizeDraft(rewritten, target);
+  // Vẫn chặn ở đây: lời quá ngắn thì TTS ra audio hụt, và mọi thứ phía sau
+  // (phân cảnh, số ảnh, độ dài video) đều tính từ audio đó.
+  assertNarrationCoversTarget(draft.scenes, targetDurationSec, MIN_NARRATION_COVERAGE);
+  return draft;
 }
 
 async function chatJsonWithImages<T>(options: {

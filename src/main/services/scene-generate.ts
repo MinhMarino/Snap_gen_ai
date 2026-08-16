@@ -5,6 +5,7 @@ import {
   buildMusicSceneImagePrompt,
   buildSceneImagePrompt,
   familySupportsExtend,
+  isStructuredVisualPrompt,
   MAX_PROMPT_SAFETY_LEVEL,
   planSceneChunks,
   sanitizeUnsafePrompt,
@@ -47,7 +48,6 @@ export interface SceneGenerateContext {
   aspectRatio: string;
   resolution: string;
   mode?: string;
-  stylePrompt?: string;
   /** Ngôn ngữ kịch bản — gắn locale vào prompt ảnh. */
   language?: string;
   /** 'music-animation' → dùng prompt wrapper riêng cho MV. */
@@ -263,13 +263,20 @@ export async function generateOneSceneMedia(
   onProgress?: (update: SceneProgressUpdate) => void
 ): Promise<SceneGenerateResult> {
   const isMusicAnimation = ctx.projectKind === 'music-animation';
-  const rawPrompt = ctx.rawVisualPrompt ? String(scene.visual_prompt || '').trim() : '';
+  // Prompt đã đủ khối STYLE / COLOR / NEGATIVE (do chỉ thị tự đặt, hoặc do bước
+  // viết prompt ghép style bible vào) thì gửi NGUYÊN VĂN: đem đi compact sẽ cắt
+  // đúng phần cấm (mọi mệnh đề "no / never / avoid") và chặt prompt ở 900 ký tự.
+  const rawPrompt =
+    ctx.rawVisualPrompt || isStructuredVisualPrompt(scene.visual_prompt)
+      ? String(scene.visual_prompt || '').trim()
+      : '';
   const basePrompt = rawPrompt
     ? rawPrompt
     : isMusicAnimation
     ? buildMusicSceneImagePrompt({
+        // Không truyền stylePrompt: style đã nằm trong visual_prompt từ bước viết
+        // kịch bản, nối lại ở đây chỉ lặp một khối y hệt vào mọi scene.
         visualPrompt: scene.visual_prompt,
-        stylePrompt: ctx.stylePrompt,
         castLock: ctx.castLock,
         sceneIndex,
         section: scene.section,
@@ -278,7 +285,7 @@ export async function generateOneSceneMedia(
       })
     : buildSceneImagePrompt({
         // Không truyền stylePrompt: style đã nằm trong visual_prompt từ bước viết
-        // kịch bản. `ctx.stylePrompt` giờ chỉ còn dùng cho wrapper music-animation.
+        // kịch bản.
         visualPrompt: scene.visual_prompt,
         mediaKind: ctx.mediaKind,
       });
