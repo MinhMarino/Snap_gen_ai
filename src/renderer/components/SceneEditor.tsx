@@ -116,8 +116,9 @@ export default function SceneEditor({ script, onChange, modelId, mediaKind }: Pr
             />
             {mediaKind === 'video' && scene.duration_hint > maxShot && (
               <p className="hint">
-                &gt;{maxShot}s → cảnh này sẽ auto-extend / chia đoạn; scene sau (nếu model hỗ trợ)
-                nối liền mạch qua ref_history.
+                &gt;{maxShot}s → cảnh này phải chia thành nhiều shot, tất cả dùng CHUNG visual
+                prompt này nên hình gần như lặp lại, mà vẫn tốn credit từng shot. Muốn hình đổi
+                thì tách thành nhiều cảnh ≤{maxShot}s, mỗi cảnh một prompt riêng.
               </p>
             )}
           </div>

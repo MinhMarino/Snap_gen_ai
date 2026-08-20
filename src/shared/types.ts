@@ -242,6 +242,11 @@ export interface GenerateIdeaInput {
   mediaKind: MediaKind;
   stylePrompt?: string;
   /**
+   * Giọng kể cho bước viết lời — wrapper đính vào prompt ChatGPT.
+   * Rỗng → `DEFAULT_NARRATION_STYLE`. Khác `stylePrompt` (style HÌNH ẢNH).
+   */
+  narrationStyle?: string;
+  /**
    * Chỉ thị hệ thống TỰ ĐẶT cho bước AI viết visual_prompt (nâng cao).
    *
    * Có nội dung → thay hẳn luật viết prompt mặc định, và prompt AI trả về được
@@ -351,6 +356,11 @@ export interface ProjectDraft {
   script: ScriptDraft | null;
   mediaKind: MediaKind;
   stylePrompt: string;
+  /**
+   * Giọng kể cho bước viết lời — wrapper đính vào prompt ChatGPT.
+   * Rỗng → `DEFAULT_NARRATION_STYLE`. Khác `stylePrompt` (style HÌNH ẢNH).
+   */
+  narrationStyle?: string;
   /**
    * Chỉ thị hệ thống TỰ ĐẶT cho bước AI viết visual_prompt (nâng cao).
    *
@@ -592,7 +602,7 @@ export interface JobProgress {
 
 /** Tiến độ bước 3 (chia cảnh + viết prompt) — kênh riêng, không phải job có pause/stop. */
 export interface ScenePlanProgress {
-  phase: 'split' | 'prompt';
+  phase: 'split' | 'prompt' | 'salvage';
   done: number;
   total: number;
   message: string;
@@ -605,6 +615,13 @@ export interface ScenePlanResult {
   sceneCount: number;
   /** true = cắt theo mốc từng từ; false = cắt theo tỉ lệ ký tự. */
   alignedWithWords: boolean;
+  /** Footage cũ giữ lại được khi chia lại phân cảnh (không có gì để giữ thì bỏ trống). */
+  salvagedMedia?: {
+    adopted: number;
+    missing: number;
+    duplicates: number;
+    backupDir: string | null;
+  };
 }
 
 export type ActiveJobKind = 'generate' | 'remux';

@@ -18,11 +18,13 @@ import {
   clampTargetSceneCount,
   coalesceScenesToTargetCount,
   countSpokenBudgetUnits,
+  DEFAULT_NARRATION_STYLE,
   DEFAULT_STYLE_PROMPT,
   KIDS_3D_TOY_STYLE,
   estimateSpokenSeconds,
   formatDurationLabel,
   isCjkLanguage,
+  maxSceneBeatSec,
   mergeUndersizedScenes,
   MIN_NARRATION_COVERAGE,
   MIN_SCENE_BEAT_SEC,
@@ -873,8 +875,19 @@ export async function generateScript(
       `${Math.round(rate.perSec * 100) / 100} ${rate.unitLabel}/s (${rate.source}) ` +
       `→ ngân sách ~${totalBudget.amount} ${totalBudget.unitLabel}`
   );
-  const resolvedStyle = input.stylePrompt?.trim() || DEFAULT_STYLE_PROMPT;
-  const styleHint = `Style: ${resolvedStyle}`;
+  /*
+   * Giọng kể — wrapper người dùng đặt cho dự án, rỗng thì lấy mặc định.
+   *
+   * Chỗ này TRƯỚC ĐÂY nhét `Style: <style hình ảnh>` vào prompt viết lời: người
+   * viết voiceover nhận được "natural lighting, clean background, sharp and well
+   * composed" — vô nghĩa với lời nói, mà vẫn chiếm chỗ của phần tả giọng. Style
+   * hình giờ chỉ đi vào bước viết visual_prompt, đúng chỗ của nó.
+   */
+  const narrationStyle = input.narrationStyle?.trim() || DEFAULT_NARRATION_STYLE;
+  const voiceBlock = `CHANNEL VOICE — this is how this channel talks. Follow it for tone, pacing and word choice; it outranks the generic voice notes above, but never the JSON shape, the language or the word budget.
+"""
+${narrationStyle}
+"""`;
 
   // —— Phase 1: outline (bỏ qua nếu video ngắn — dùng plan local) ——
   let title =
@@ -912,7 +925,8 @@ Rules:
         user: `Brief / topic: ${input.brief}
 
 Plan chapters for a ${targetDurationSec}s (${formatDurationLabel(targetDurationSec)}) video (~${totalBudget.amount} ${totalBudget.unitLabel} of speech).
-${styleHint}`,
+
+${voiceBlock}`,
         temperature: 0.5,
         maxTokens: 900,
       });
@@ -929,7 +943,7 @@ ${styleHint}`,
 Return ONLY JSON: { "narration": string } OR { "continuation": string }
 Language: ${
     explicitLanguage
-      ? `write EVERY narration sentence in ${language}. This is a hard requirement set by the user — the brief itself may be written in a different language, ignore that and write in ${language}.`
+      ? `write EVERY narration sentence in ${language}. This is a hard requirement set by the user — the brief itself may be written in a different language, ignore that and write in ${language}. You are NOT translating: write fresh spoken ${language}, the way someone who thinks in ${language} would say it.`
       : `write the narration in the SAME language the brief is written in (detected: ${language}). If the brief explicitly asks for another language, follow the brief instead.`
   }
 Audience and tone: taken from the brief. Match it — do not default to a children's video.
@@ -937,8 +951,10 @@ Voice: clear and natural for that audience; spoken, not written prose.
 Sentences: short enough to say out loud comfortably.
 Continuity: keep one through-line across chapters so the video feels like one piece, not disconnected clips.
 No stage directions, no bullet points, no markdown, no on-screen text instructions.
+The JSON string holds the SPOKEN WORDS ONLY. It must start with the first word the narrator says. No lead-in sentence about what follows ("Dưới đây là…", "Here is the narration…", "Bản dịch tiếng Việt:"), no title line, no note about the language or the translation, no closing remark — those get read out loud by the voice engine.
 Do NOT summarize. Aim for the exact word budget.
-${styleHint}`;
+
+${voiceBlock}`;
 
   // Model đôi lúc nhả cả đề bài + đoạn lặp vô nghĩa vào chuỗi narration (JSON
   // vẫn hợp lệ nên parse qua được) → lọc ngay khi nhận, đừng để chảy xuống TTS.
@@ -982,7 +998,6 @@ ${styleHint}`;
           system: writeNarrationSystem,
           user: `Video title: ${title}
 Brief: ${input.brief.slice(0, 1200)}
-${styleHint}
 
 Chapter ${i + 1}/${chapters.length}: "${chapter.name}" (${chapter.section})
 Summary: ${chapter.summary}
@@ -1231,6 +1246,9 @@ export async function generateMusicAnimationScript(
   const plan = planScenesFromDuration(musicSec, {
     targetSceneCount: input.sceneCount,
     mediaKind: input.mediaKind,
+    // Một cảnh không dài quá một lần gen: dài hơn thì cùng một visual prompt phải
+    // trải ra nhiều shot, tốn đúng ngần ấy credit mà hình lặp lại.
+    beatCapSec: maxSceneBeatSec(input.model, input.mediaKind),
   });
   const targetMediaCount = clampTargetSceneCount(musicSec, plan.sceneCountHint);
   // Không còn ô Language → lấy đúng ngôn ngữ của lời bài hát đang nhập.

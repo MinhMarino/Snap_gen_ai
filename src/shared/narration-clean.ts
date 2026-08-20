@@ -40,6 +40,51 @@ const META_PATTERNS: RegExp[] = [
   /^\s*(?:narration|continuation|script|output|answer|response)\s*[:：]/i,
 ];
 
+/**
+ * Câu chào hàng model đặt TRƯỚC lời đọc: "Dưới đây là bản dịch tiếng Việt tự
+ * nhiên, phù hợp để dùng làm narration cho video YouTube:", "Here is the script:".
+ *
+ * Không nằm trong `META_PATTERNS` được vì luật ở đây hẹp hơn hẳn: chỉ xét câu ĐẦU
+ * TIÊN, và phải vừa kết thúc bằng dấu hai chấm vừa gọi tên chính thứ sắp viết ra.
+ * Lời đọc thật cũng có câu kết thúc bằng ":" ("Có ba lý do:") — những câu đó không
+ * nhắc tới narration/bản dịch/kịch bản nên vẫn qua được.
+ */
+const PREAMBLE_NOUN =
+  /narration|voiceover|voice-over|transcript|script|kịch bản|bản dịch|bản tiếng|lời bình|lời dẫn|lời đọc|phiên bản|đoạn văn|video|ナレーション|動画|台本|字幕|旁白|视频|脚本|나레이션|영상/i;
+
+function looksLikePreamble(sentence: string): boolean {
+  const s = sentence.trim();
+  return s.length <= 220 && /[:：]$/.test(s) && PREAMBLE_NOUN.test(s);
+}
+
+/**
+ * Preamble thường dính LIỀN vào câu đầu tiên ("…cho video YouTube: Trồng khoai
+ * lang…") vì dấu hai chấm không phải dấu kết câu — tách câu không cắt ở đó, nên
+ * lưới lọc theo câu bên dưới không thấy. Ở đây cắt đúng phần đầu tới dấu hai chấm.
+ *
+ * Đòi có khoảng trắng SAU dấu hai chấm để tỉ lệ khung hình ("16:9") không bị coi
+ * là preamble.
+ */
+const LEADING_COLON_HEAD = /^\s*[^.?!。！？\n]{6,220}?[:：]\s+/;
+
+/**
+ * Câu đệm kiểu trợ lý đứng trước preamble ("Chắc chắn rồi! Đây là lời bình…").
+ * Phải là câu NGẮN và trọn vẹn ngay đầu chuỗi — chương 2 trở đi mở bằng "Dĩ nhiên,
+ * không phải giống nào cũng vậy." là lời thật, dài quá mức này nên không dính.
+ */
+const ASSISTANT_FILLER =
+  /^\s*(?:sure|certainly|of course|absolutely|okay|ok|got it|here you go|chắc chắn rồi|được thôi|của bạn đây)[^.?!\n]{0,12}[.!…]\s+/i;
+
+function stripLeadingPreamble(text: string): string {
+  let out = text;
+  const filler = out.match(ASSISTANT_FILLER)?.[0];
+  if (filler) out = out.slice(filler.length);
+  const head = out.match(LEADING_COLON_HEAD)?.[0];
+  if (head && PREAMBLE_NOUN.test(head)) out = out.slice(head.length);
+  // Chỉ có câu đệm, không có preamble theo sau → vẫn bỏ: giọng đọc sẽ đọc cả nó.
+  return out;
+}
+
 /** Blockquote / heading rác rải giữa câu: "... ? ># ? ># ..." */
 const INLINE_MARKUP_RUN = /(?:^|\s)[?>#*|]{1,}(?:[\s?>#*|]*[?>#*|])?(?=\s|$)/g;
 
@@ -168,14 +213,15 @@ export function sanitizeNarrationText(
   // vậy — narration sạch phải ra ĐÚNG chuỗi cũ, nếu không hash TTS đổi và cả
   // project bị đọc lại dù không có rác nào.
   const spaceAfterCjk = /[。！？…、][ \t]/.test(normalized);
-  let removedAnything = false;
+  const trimmed = stripLeadingPreamble(normalized);
+  let removedAnything = trimmed !== normalized;
 
   // Đơn vị xét là CÂU, không phải dòng: model hay dồn cả narration lẫn rác vào
   // một dòng duy nhất, loại theo dòng là xoá luôn lời thật. Tách câu ngay trong
   // từng dòng để dòng thiếu dấu kết câu ("># Final answer below") vẫn là một
   // đơn vị riêng, không bị dán vào câu thật kế tiếp.
   const pieces: string[] = [];
-  for (const rawLine of normalized.split('\n')) {
+  for (const rawLine of trimmed.split('\n')) {
     const line = stripMarkupEdges(rawLine);
     if (line !== rawLine.trim()) removedAnything = true;
     if (!line || !SPEAKABLE.test(line)) {
@@ -198,8 +244,11 @@ export function sanitizeNarrationText(
       continue;
     }
 
+    // Preamble chỉ tính ở câu đầu: giữa bài, một câu kết thúc bằng ":" là lời thật
+    // đang dẫn vào danh sách, không phải model chào hàng.
     const isMeta =
       looksLikeInstruction(sentence) ||
+      (sentences.length === 0 && looksLikePreamble(sentence)) ||
       (dropForeign && !CJK_CHAR.test(sentence) && latinLetterCount(sentence) >= 12);
     if (isMeta) {
       inJunkRun = true;

@@ -99,6 +99,38 @@ export function normalizeStylePromptForProjectKind(
   return legacyKidsDefaults.includes(value) ? GENERAL_STYLE_PROMPT : value;
 }
 
+/**
+ * Giọng kể mặc định của bước viết lời — «wrapper» đính vào prompt gửi ChatGPT.
+ *
+ * Trước đây chỗ này chỉ có ba dòng chung chung ("clear and natural", "short
+ * sentences") CỘNG với style HÌNH ẢNH của dự án nhét nhầm vào. Kết quả là lời đọc
+ * vồ vập: mở bằng câu giật gân, câu nào cũng nhồi ba ý, hết ý này nhảy sang ý khác
+ * không có cầu nối — nghe như đọc quảng cáo chứ không như một kênh YouTube.
+ *
+ * Viết bằng tiếng Anh cho khớp phần còn lại của system prompt; ví dụ câu cấm để
+ * tiếng Việt vì lời đọc thường là tiếng Việt và model bắt chước ví dụ rất sát.
+ * Người dùng sửa được nguyên khối này trong ô «Giọng kể» ở bước 1.
+ */
+export const DEFAULT_NARRATION_STYLE = `You are the regular narrator of a YouTube channel, talking to one person who already chose to watch. Not an ad, not a news bulletin, not a lecture.
+
+PACE — the video must never feel rushed:
+- Open on the subject itself. No shock hook, no teaser, no "Bạn có biết…", no "Điều sắp thấy sẽ khiến bạn bất ngờ".
+- One idea per sentence. Follow a long sentence with a short one — that is where the listener breathes.
+- Finish a point before moving on: say it, show what it means, then move. Never stack three facts into one sentence.
+- Join ideas out loud instead of cutting between them ("và đó là lý do…", "chỗ này mới lạ…").
+
+VOICE:
+- Address the viewer the same way from the first sentence to the last.
+- Plain words. A term the audience may not know gets explained in half a sentence, the first time it appears.
+- Curiosity, not hype: no piled-up superlatives, no exclamation marks, no two rhetorical questions in a row.
+- Concrete beats abstract — a number, an object, a moment the viewer can picture.
+
+NEVER:
+- Like/subscribe/comment asks, sponsor reads, or "trong video hôm nay".
+- Reading out list scaffolding ("thứ nhất… thứ hai…") unless the brief asks for a list.
+- Starting two sentences in a row the same way.
+- A sentence that only announces what comes next without saying anything itself.`;
+
 export function defaultFamilyForKind(kind: MediaKind): VideoFamily | ImageFamily {
   return kind === 'image' ? DEFAULT_IMAGE_FAMILY : DEFAULT_VIDEO_FAMILY;
 }
@@ -624,11 +656,16 @@ const SCENE_DURATION_EPSILON = 0.01;
  *
  * Danh sách dưới đây là các "điểm bất động": đặt bao nhiêu thì nhận đúng bấy nhiêu.
  * Kiểm bằng chính `planSceneChunks` nên không bao giờ lệch khỏi luật đặt hàng thật.
+ *
+ * `singleShot`: chỉ lấy những mốc gen được TRONG MỘT LẦN (Veo: 4/6/8s), bỏ hết mốc
+ * ghép nhiều shot (16/24/32s). Xem `maxSceneBeatSec` để biết vì sao cảnh dài hơn
+ * một lần gen là một sự đánh đổi tồi.
  */
 export function achievableSceneDurations(
   modelId: string,
   family: string,
-  maxSeconds: number
+  maxSeconds: number,
+  options?: { singleShot?: boolean }
 ): number[] {
   const model = getModelById(modelId);
   const allowed = model?.durations?.length ? [...model.durations] : [maxSingleShotDuration(modelId)];
@@ -636,17 +673,37 @@ export function achievableSceneDurations(
   const limit = Math.max(max, Math.min(maxSeconds, MAX_SCENE_DURATION_SEC));
 
   const candidates = new Set<number>();
-  for (let k = 0; k * max <= limit; k++) {
-    if (k > 0) candidates.add(k * max);
-    for (const d of allowed) candidates.add(k * max + d);
+  if (options?.singleShot) {
+    for (const d of allowed) candidates.add(d);
+  } else {
+    for (let k = 0; k * max <= limit; k++) {
+      if (k > 0) candidates.add(k * max);
+      for (const d of allowed) candidates.add(k * max + d);
+    }
   }
 
+  const ceiling = options?.singleShot ? max : limit + max;
   return [...candidates]
-    .filter((sec) => sec > 0 && sec <= limit + max)
+    .filter((sec) => sec > 0 && sec <= ceiling)
     .filter(
       (sec) => Math.abs(plannedClipSeconds(modelId, family, sec) - sec) < SCENE_DURATION_EPSILON
     )
     .sort((a, b) => a - b);
+}
+
+/**
+ * Trần độ dài của MỘT cảnh.
+ *
+ * Video: đúng bằng một lần gen của model (Veo 8s). Dài hơn thế thì `planSceneChunks`
+ * phải đặt nhiều shot cho CÙNG MỘT visual prompt — Veo tính tiền theo từng clip nên
+ * không rẻ hơn đồng nào, đổi lại 32s gần như lặp đi lặp lại một khuôn hình. Cùng số
+ * credit ấy, chia thành 4 cảnh 8s với 4 visual prompt khác nhau thì hình mới thay đổi.
+ *
+ * Ảnh tĩnh không có ràng buộc đó: một ảnh nằm trên trục bao lâu cũng được.
+ */
+export function maxSceneBeatSec(modelId: string, mediaKind?: MediaKind): number {
+  if (mediaKind === 'image') return MAX_SCENE_DURATION_SEC;
+  return Math.max(MIN_SCENE_BEAT_SEC, maxSingleShotDuration(modelId));
 }
 
 /**
@@ -663,10 +720,12 @@ export function snapSceneDurationToModel(
   modelId: string,
   family: string,
   desiredSeconds: number,
-  options?: { atLeast?: boolean; tolerance?: number }
+  options?: { atLeast?: boolean; tolerance?: number; singleShot?: boolean }
 ): number {
   const desired = Math.max(0.5, Number(desiredSeconds) || 0);
-  const list = achievableSceneDurations(modelId, family, desired * 2 + 8);
+  const list = achievableSceneDurations(modelId, family, desired * 2 + 8, {
+    singleShot: options?.singleShot,
+  });
   if (!list.length) return desired;
 
   if (options?.atLeast) {
@@ -677,10 +736,14 @@ export function snapSceneDurationToModel(
     if (over != null) return over;
   }
 
-  // Hoà thì lấy mốc NGẮN hơn: phần dư dồn sang cảnh sau (bước chia cảnh bám mốc
-  // gốc nên không cộng dồn), và ít tốn thêm một lượt gen.
+  // Hoà thì lấy mốc DÀI hơn (7s → 8s chứ không phải 6s).
+  //
+  // Model video tính tiền mỗi clip, không theo giây: clip 8s và clip 6s cùng giá.
+  // Cảnh ngắn đi nghĩa là cần thêm cảnh nữa mới phủ hết lời đọc — tức là thêm một
+  // lượt gen phải trả tiền. Phần dư dồn sang cảnh sau (bước chia cảnh bám mốc gốc
+  // nên không cộng dồn).
   return list.reduce((best, sec) =>
-    Math.abs(sec - desired) < Math.abs(best - desired) ? sec : best
+    Math.abs(sec - desired) <= Math.abs(best - desired) ? sec : best
   );
 }
 
@@ -1850,6 +1913,11 @@ export type PlanScenesOptions = {
   /** Độ dài beat trung bình khi không chỉ định count. */
   typicalBeatSec?: number;
   mediaKind?: MediaKind;
+  /**
+   * Trần độ dài một cảnh (`maxSceneBeatSec`). Mật độ thưa hơn trần này sẽ bị chia
+   * nhỏ lại: một cảnh dài hơn một lần gen chỉ là cùng một hình lặp lại.
+   */
+  beatCapSec?: number;
 };
 
 /**
@@ -1866,7 +1934,14 @@ export function planScenesFromDuration(
       ? { typicalBeatSec: optionsOrLegacy > 0 ? optionsOrLegacy : IDEAL_SCENE_BEAT_SEC }
       : optionsOrLegacy || {};
 
-  const sceneCountMin = Math.max(3, Math.ceil(target / MAX_SCENE_DURATION_SEC));
+  // Trần một cảnh: mặc định không ràng buộc, người gọi biết model thì truyền
+  // `maxSceneBeatSec` vào — mật độ "Tiết kiệm 30s" trên Veo (8s/lần gen) không
+  // tiết kiệm gì cả, chỉ đổi 4 cảnh khác hình lấy 1 cảnh lặp lại 4 lần.
+  const beatCap = Math.max(
+    MIN_SCENE_BEAT_SEC,
+    Number(options.beatCapSec) > 0 ? Number(options.beatCapSec) : MAX_SCENE_DURATION_SEC
+  );
+  const sceneCountMin = Math.max(3, Math.ceil(target / Math.min(beatCap, MAX_SCENE_DURATION_SEC)));
   const sceneCountMax = Math.max(sceneCountMin, Math.floor(target / MIN_SCENE_BEAT_SEC));
 
   let sceneCountHint: number;
@@ -1874,19 +1949,25 @@ export function planScenesFromDuration(
 
   if (options.targetSceneCount != null && Number(options.targetSceneCount) > 0) {
     sceneCountHint = clampTargetSceneCount(target, options.targetSceneCount);
-    typicalBeatSec = Math.round((target / sceneCountHint) * 10) / 10;
   } else {
-    const beat = Math.max(
-      MIN_SCENE_BEAT_SEC,
-      Number(options.typicalBeatSec) > 0 ? Number(options.typicalBeatSec) : IDEAL_SCENE_BEAT_SEC
+    const beat = Math.min(
+      beatCap,
+      Math.max(
+        MIN_SCENE_BEAT_SEC,
+        Number(options.typicalBeatSec) > 0 ? Number(options.typicalBeatSec) : IDEAL_SCENE_BEAT_SEC
+      )
     );
     sceneCountHint = clampTargetSceneCount(target, Math.round(target / beat));
-    typicalBeatSec = Math.round((target / sceneCountHint) * 10) / 10;
   }
+  // Số cảnh do người dùng nhập cũng phải nằm trong trần: ít hơn thì cảnh dài hơn
+  // một lần gen.
+  sceneCountHint = Math.min(sceneCountMax, Math.max(sceneCountMin, sceneCountHint));
+  typicalBeatSec = Math.round((target / sceneCountHint) * 10) / 10;
 
   // Trước đây nới trần lên 1,35× beat → narration 10,8s nhưng Veo chỉ gen được 8s,
   // clip hụt so với lời đọc. Giữ trần bằng đúng beat để hình và tiếng khớp nhau.
   const maxBeatSec = Math.min(
+    beatCap,
     MAX_SCENE_DURATION_SEC,
     Math.max(MAX_SCENE_BEAT_SEC, Math.round(typicalBeatSec))
   );

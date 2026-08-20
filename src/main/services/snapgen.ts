@@ -592,7 +592,13 @@ export async function findReusableHistoryByPrompt(
   apiKey: string,
   prompt: string,
   kind: ReusableHistoryKind,
-  options?: { maxPages?: number; pageSize?: number; expect?: ReusableExpectation }
+  options?: {
+    maxPages?: number;
+    pageSize?: number;
+    expect?: ReusableExpectation;
+    /** Job đã làm footage cho chunk khác — bỏ qua, không hai chunk chung một clip. */
+    excludeUuids?: Set<string>;
+  }
 ): Promise<SnapgenHistory | null> {
   const maxPages = options?.maxPages ?? 3;
   const pageSize = options?.pageSize ?? 25;
@@ -611,6 +617,7 @@ export async function findReusableHistoryByPrompt(
 
     for (const row of rows) {
       if (!row?.uuid) continue;
+      if (options?.excludeUuids?.has(row.uuid)) continue;
       const input = String(row.input_text || '');
       if (!snapgenPromptsMatch(prompt, input)) continue;
       if (row.status === 3) continue;

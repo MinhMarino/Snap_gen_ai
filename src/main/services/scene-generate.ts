@@ -73,6 +73,17 @@ export interface SceneGenerateContext {
    * còn lại → lấy `last_frame_url` của history đó làm keyframe mở đầu.
    */
   chainFromHistory?: string | null;
+  /**
+   * Những job Snapgen đã có chủ trong lượt này — MỘT job chỉ được làm footage cho
+   * ĐÚNG MỘT chunk.
+   *
+   * Không có sổ này thì `findReusableHistoryByPrompt` (khớp prompt theo tiền tố
+   * ≥90%) trả cùng một job cho nhiều chunk: hai chunk của một cảnh dài chỉ khác
+   * nhau câu nối cuối prompt, và hai scene bất kỳ có thể chung khối style dài
+   * hàng nghìn ký tự. Kết quả là clip 32s = một đoạn 8s lặp 3 lần, hoặc cả loạt
+   * scene tải về đúng một video (đã xảy ra thật).
+   */
+  claimedJobUuids?: Set<string>;
 }
 
 export type SceneProgressUpdate = Partial<
@@ -181,9 +192,16 @@ async function resolveMediaJobUuid(options: {
   shouldAbort?: () => boolean;
   /** Chặn tái dùng history trùng prompt nhưng khác model/tỉ lệ/độ phân giải/thời lượng. */
   expect?: ReusableExpectation;
+  /** Sổ job đã có chủ trong lượt này — xem `SceneGenerateContext.claimedJobUuids`. */
+  claimed?: Set<string>;
 }): Promise<{ uuid: string; reused: boolean; estimatedCredit?: number }> {
+  const claim = (uuid: string) => {
+    options.claimed?.add(uuid);
+    return uuid;
+  };
   const existing = readChunkJob(options.segmentDir, options.chunkIndex);
   if (existing && existing.promptKey === options.key && existing.uuid) {
+    claim(existing.uuid);
     // Checkpoint mode 'reuse' từng được ghi bởi matcher lỏng (khớp theo tiền tố)
     // nên có thể trỏ sang job của scene khác. Đối chiếu prompt thật trên Snapgen
     // rồi mới dùng; không xác thực được thì cứ dùng như trước.
@@ -214,8 +232,12 @@ async function resolveMediaJobUuid(options: {
   try {
     const found = await findReusableHistoryByPrompt(options.apiKey, options.prompt, options.kind, {
       expect: options.expect,
+      // Job đã làm footage cho chunk khác thì không nhận lại — nhận lại là hai
+      // chunk cùng một đoạn phim.
+      excludeUuids: options.claimed,
     });
     if (found?.uuid) {
+      claim(found.uuid);
       writeChunkJob(options.segmentDir, options.chunkIndex, {
         promptKey: options.key,
         prompt: options.prompt.slice(0, 2000),
@@ -236,6 +258,7 @@ async function resolveMediaJobUuid(options: {
 
   const job = await options.create();
   if (!job.uuid) throw new Error('Snapgen không trả uuid');
+  claim(job.uuid);
   const estimatedCredit =
     typeof job.estimated_credit === 'number' && job.estimated_credit >= 0
       ? job.estimated_credit
@@ -346,6 +369,7 @@ export async function generateOneSceneMedia(
           segmentDir,
           chunkIndex: 0,
           shouldAbort: ctx.shouldAbort,
+          claimed: ctx.claimedJobUuids,
           expect: {
             modelId: ctx.model,
             resolution: ctx.resolution,
@@ -485,6 +509,7 @@ export async function generateOneSceneMedia(
           segmentDir,
           chunkIndex: c,
           shouldAbort: ctx.shouldAbort,
+          claimed: ctx.claimedJobUuids,
           expect: {
             modelId: ctx.model,
             resolution: ctx.resolution,

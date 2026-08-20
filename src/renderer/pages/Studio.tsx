@@ -17,6 +17,7 @@ import {
   buildNarrationOnlyScript,
   clampTargetSceneCount,
   DEFAULT_SCENE_DENSITY,
+  DEFAULT_NARRATION_STYLE,
   DEFAULT_STYLE_PROMPT,
   defaultFamilyForKind,
   defaultModelIdForKind,
@@ -30,6 +31,7 @@ import {
   getModelById,
   isNarrationOnlyScript,
   narrationTextOfScript,
+  maxSceneBeatSec,
   maxSingleShotDuration,
   planSceneChunks,
   planScenesFromDuration,
@@ -247,6 +249,7 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
   const [modelId, setModelId] = useState(defaultModelIdForKind('video'));
   const [brief, setBrief] = useState('');
   const [stylePrompt, setStylePrompt] = useState(DEFAULT_STYLE_PROMPT);
+  const [narrationStyle, setNarrationStyle] = useState(DEFAULT_NARRATION_STYLE);
   /** Chỉ thị hệ thống tự đặt cho bước AI viết visual prompt (rỗng = dùng luật mặc định). */
   const [scenePromptInstruction, setScenePromptInstruction] = useState('');
   /** Free-text minutes; may be empty while typing. */
@@ -421,6 +424,8 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
       targetSceneCount: sceneDensity === 'custom' ? targetMediaCount : undefined,
       typicalBeatSec: densityBeatSec ?? undefined,
       mediaKind,
+      // Cảnh không dài hơn một lần gen của model: dài hơn là lặp lại cùng một hình.
+      beatCapSec: maxSceneBeatSec(modelId, mediaKind),
     });
   }, [
     isMusicAnimation,
@@ -430,6 +435,7 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
     targetMediaCount,
     densityBeatSec,
     mediaKind,
+    modelId,
   ]);
 
   useEffect(() => {
@@ -787,12 +793,14 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
               typicalBeatSec:
                 SCENE_DENSITY_OPTIONS.find((d) => d.id === density)?.beatSec ?? undefined,
               mediaKind: draft.mediaKind ?? 'video',
+              beatCapSec: maxSceneBeatSec(
+                resolveModelId(draft.model),
+                draft.mediaKind ?? 'video'
+              ),
             });
-            setTargetMediaCount(
-              draft.targetMediaCount && draft.targetMediaCount > 0
-                ? clampTargetSceneCount(draft.targetDurationSec || 60, draft.targetMediaCount)
-                : planned.sceneCountHint
-            );
+            // Số cảnh lưu trong draft có thể thưa hơn trần một-lần-gen (dự án cũ) →
+            // lấy số đã kẹp theo trần, không lấy lại số cũ.
+            setTargetMediaCount(planned.sceneCountHint);
           }
           setFamily(draft.family);
           setModelId(resolveModelId(draft.model));
@@ -804,6 +812,7 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
           // Chưa lưu style → default theo KIND; đã lưu style thiếu nhi mặc định CŨ
           // trên dự án thường → đổi sang trung tính (xem `normalizeStylePromptForProjectKind`).
           setStylePrompt(normalizeStylePromptForProjectKind(draft.stylePrompt, kind));
+          setNarrationStyle(draft.narrationStyle || DEFAULT_NARRATION_STYLE);
           setScenePromptInstruction(draft.scenePromptInstruction || '');
           setScript(draft.script);
           setVoice(resolveProjectVoice(draft));
@@ -980,6 +989,7 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
     script: nextScript,
     mediaKind,
     stylePrompt,
+    narrationStyle,
     scenePromptInstruction: scenePromptInstruction.trim() || undefined,
     openaiChatModel,
     lyricText,
@@ -1363,6 +1373,7 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
         maxShotSec,
         mediaKind,
         stylePrompt: stylePrompt.trim() || undefined,
+        narrationStyle: narrationStyle.trim() || undefined,
         scenePromptInstruction: scenePromptInstruction.trim() || undefined,
         openaiChatModel,
       });
@@ -2195,6 +2206,42 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
               placeholder="vd: cinematic documentary, natural light — hoặc: flat 2D kids cartoon"
             />
           </div>
+          <details className="style-details">
+            <summary>
+              Giọng kể
+              <span className="style-details-state">
+                {narrationStyle.trim() === DEFAULT_NARRATION_STYLE
+                  ? 'mẫu kênh YouTube'
+                  : narrationStyle.trim()
+                    ? 'đã sửa'
+                    : 'trống'}
+              </span>
+            </summary>
+            <div className="field compact-field">
+              <textarea
+                id="narration-style"
+                className="narration-style-textarea"
+                value={narrationStyle}
+                onChange={(event) => setNarrationStyle(event.target.value)}
+                placeholder="Để trống → dùng mẫu giọng kênh YouTube."
+              />
+              <div className="field-row-between">
+                <p className="hint">
+                  Đính vào prompt ChatGPT ở bước viết lời: quyết định nhịp kể và cách xưng hô, không
+                  đụng tới nội dung (nội dung theo «Mô tả video»). Đây là chỗ chặn lời đọc vồ vập —
+                  mở đầu giật gân, câu nào cũng nhồi ba ý.
+                </p>
+                <button
+                  type="button"
+                  className="chip-btn"
+                  disabled={narrationStyle === DEFAULT_NARRATION_STYLE}
+                  onClick={() => setNarrationStyle(DEFAULT_NARRATION_STYLE)}
+                >
+                  Khôi phục mẫu
+                </button>
+              </div>
+            </div>
+          </details>
           <div className="field compact-field duration-field">
             <div className="duration-field-head">
               <label htmlFor="target-duration">Thời lượng</label>
@@ -2251,7 +2298,13 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
                   key={opt.id}
                   type="button"
                   className={`chip-btn ${sceneDensity === opt.id ? 'active' : ''}`}
-                  title={opt.hint}
+                  // Mật độ thưa hơn một lần gen sẽ bị kẹp lại — nói thẳng ở tooltip
+                  // thay vì để người dùng chọn "30s/scene" rồi nhận 8s.
+                  title={
+                    mediaKind === 'video' && (opt.beatSec ?? 0) > maxShotSec
+                      ? `${opt.hint} → model gen ${maxShotSec}s/lần nên vẫn chia ~${maxShotSec}s/scene`
+                      : opt.hint
+                  }
                   onClick={() => setSceneDensity(opt.id)}
                 >
                   {opt.label}
@@ -2279,8 +2332,8 @@ export default function Studio({ projectId, onProjectReady, onNeedProject }: Pro
               </div>
               <p className="hint scene-density-hint">
                 {`Mật độ này áp lên ĐỘ DÀI AUDIO THẬT ở bước 3, không phải thời lượng đặt trước. 10 phút + Tiết kiệm ≈ 20 ${mediaLabel}. Ảnh dài sẽ loop khi ghép Final.`}
-                {mediaKind === 'video' && scenePlan.typicalBeatSec > maxShotSec * 1.5
-                  ? ` Video dài hơn ${maxShotSec}s/scene có thể tốn nhiều shot API — cân nhắc Image nếu chỉ cần slideshow.`
+                {mediaKind === 'video' && (densityBeatSec ?? 0) > maxShotSec
+                  ? ` Model này gen ${maxShotSec}s/lần nên mỗi cảnh tối đa ${maxShotSec}s: cảnh dài hơn chỉ là một visual prompt lặp lại nhiều shot, tốn đúng ngần ấy credit mà hình không đổi.`
                   : ''}
               </p>
             </div>

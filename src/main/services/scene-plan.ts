@@ -16,7 +16,9 @@ import path from 'node:path';
 import {
   achievableSceneDurations,
   clampTargetSceneCount,
+  IDEAL_SCENE_BEAT_SEC,
   isNarrationOnlyScript,
+  maxSceneBeatSec,
   MIN_SCENE_BEAT_SEC,
   narrationTextOfScript,
   planScenesFromDuration,
@@ -43,10 +45,17 @@ import {
   writeNarrationCache,
 } from './narration-store';
 import { getProject, saveProjectDraft } from './projects';
+import { salvageSceneMediaForNewScenes } from './scene-media-salvage';
 import { writeVisualPromptsForScenes } from './openai';
 
 /** Một cảnh trước khi có visual prompt: khoảng thời gian + lời đọc trong khoảng đó. */
 type SceneSlot = { text: string; start: number; end: number };
+
+/**
+ * Còn trống dưới ngần này giây thì thôi, không cắt giữa câu nữa.
+ * Mẩu 1s đầu câu chẳng đủ để dựng một khuôn hình, mà lại tốn nguyên một lượt gen.
+ */
+const MIN_MIDSENTENCE_FILL_SEC = 1.5;
 
 /**
  * Chọn câu nào là câu CUỐI của mỗi cảnh.
@@ -121,14 +130,162 @@ function mergeShortSlots(slots: SceneSlot[]): SceneSlot[] {
 }
 
 /**
- * Cắt lời đọc thành `count` cảnh trên trục thời gian thật của audio.
+ * Xếp lời đọc thành cảnh ĐẦY TRẦN — cách chia cho model video.
+ *
+ * Trần là một lần gen (Veo 8s) nên số cảnh coi như đã bị định đoạt bởi độ dài lời
+ * đọc; việc còn lại là làm sao ÍT cảnh nhất mà vẫn không cảnh nào vượt trần. Vì
+ * model tính tiền MỖI CLIP chứ không theo giây, một cảnh 4s tốn đúng bằng một cảnh
+ * 8s: cứ để cảnh rơi xuống 4–6s là tự thêm lượt gen phải trả tiền.
+ *
+ * Nên ở đây gom câu cho tới sát trần rồi mới sang cảnh mới, câu cuối không vừa thì
+ * cắt giữa câu cho khít (theo mốc từ nếu có). Cách cũ — chia đều theo số cảnh rồi
+ * vá chỗ quá dài — bám ranh giới câu đẹp hơn nhưng đo trên dự án thật (521s lời,
+ * câu trung bình 5,1s) ra 86 cảnh so với 68 cảnh ở đây, tức đắt hơn 26%.
+ */
+function packSentencesIntoSlots(options: {
+  sentences: string[];
+  sentenceEnds: number[];
+  words: TranscriptWord[];
+  maxSec: number;
+  audioDurationSec: number;
+}): SceneSlot[] {
+  const max = options.maxSec;
+  const sentenceStart = (i: number) => (i === 0 ? 0 : options.sentenceEnds[i - 1]);
+
+  // Đơn vị nhỏ nhất xếp được: từng câu; câu nào một mình đã dài hơn trần thì chẻ tiếp.
+  const units: SceneSlot[] = [];
+  for (let i = 0; i < options.sentences.length; i++) {
+    const start = sentenceStart(i);
+    const end = i === options.sentences.length - 1 ? options.audioDurationSec : options.sentenceEnds[i];
+    if (end - start <= 0.05) continue;
+    const unit = { text: options.sentences[i], start, end };
+    if (end - start > max + 0.25) {
+      units.push(...splitLongUnit(unit, max, options.words));
+    } else {
+      units.push(unit);
+    }
+  }
+  if (!units.length) return [];
+
+  const out: SceneSlot[] = [];
+  let current: SceneSlot | null = null;
+  for (let u = 0; u < units.length; u++) {
+    // Câu cuối không còn câu nào theo sau để gộp cùng, nên đuôi cắt ra phải tự đứng
+    // thành một cảnh: chỉ cắt khi đuôi đủ dài cho một clip thật.
+    const isLastUnit = u === units.length - 1;
+    let rest: SceneSlot | null = units[u];
+    while (rest) {
+      if (!current) {
+        current = { ...rest };
+        rest = null;
+        break;
+      }
+      const room = max + 0.25 - (current.end - current.start);
+      if (rest.end - rest.start <= room) {
+        current.text = `${current.text} ${rest.text}`.trim();
+        current.end = rest.end;
+        rest = null;
+        break;
+      }
+      // Còn chỗ đáng kể → cắt câu, nhét phần đầu cho vừa. Chỗ thừa quá ít thì đóng
+      // cảnh luôn, cắt ra một mẩu 1s chẳng dựng được khuôn hình nào.
+      if (room >= MIN_MIDSENTENCE_FILL_SEC) {
+        const [head, tail] = splitUnitAt(rest, room, options.words);
+        const tailUsable =
+          !isLastUnit || (tail != null && tail.end - tail.start >= MIN_SCENE_BEAT_SEC);
+        if (head && tail && tailUsable) {
+          current.text = `${current.text} ${head.text}`.trim();
+          current.end = head.end;
+          out.push(current);
+          current = null;
+          rest = tail;
+          continue;
+        }
+      }
+      out.push(current);
+      current = null;
+    }
+  }
+  if (current) out.push(current);
+
+  return out;
+}
+
+/**
+ * Cắt một câu làm đôi ở khoảng giây thứ `seconds`.
+ *
+ * Có mốc từ (Whisper/ElevenLabs) thì cắt đúng chỗ một từ vừa đọc xong TRƯỚC điểm
+ * đó — không bao giờ tràn quá chỗ trống còn lại. Không có mốc thì cắt theo tỉ lệ
+ * chữ, sai vài phần mười giây, đủ dùng cho việc chọn hình.
+ */
+function splitUnitAt(
+  unit: SceneSlot,
+  seconds: number,
+  words: TranscriptWord[]
+): [SceneSlot, SceneSlot] | [null, null] {
+  const span = unit.end - unit.start;
+  if (!(span > 0.8)) return [null, null];
+  const at = Math.min(Math.max(seconds, 0.3), span - 0.3);
+
+  // Tiếng có khoảng trắng cắt theo từ; CJK không có khoảng trắng thì cắt theo ký tự.
+  const tokens = unit.text.split(/\s+/).filter(Boolean);
+  const chunks = tokens.length >= 2 ? tokens : [...unit.text.trim()];
+  if (chunks.length < 2) return [null, null];
+  const joiner = chunks === tokens ? ' ' : '';
+
+  const inside = words.filter((w) => w.start >= unit.start - 0.05 && w.end <= unit.end + 0.05);
+  const aligned = inside.length === chunks.length ? inside : [];
+
+  let index = Math.round((chunks.length * at) / span);
+  let cut = unit.start + at;
+  if (aligned.length) {
+    let last = -1;
+    for (let i = 0; i < aligned.length - 1; i++) {
+      if (aligned[i].end > unit.start + at + 0.01) break;
+      last = i;
+    }
+    if (last >= 0) {
+      index = last + 1;
+      cut = aligned[last].end;
+    }
+  }
+  index = Math.min(Math.max(index, 1), chunks.length - 1);
+  cut = Math.min(Math.max(cut, unit.start + 0.3), unit.end - 0.3);
+
+  return [
+    { text: chunks.slice(0, index).join(joiner).trim(), start: unit.start, end: cut },
+    { text: chunks.slice(index).join(joiner).trim(), start: cut, end: unit.end },
+  ];
+}
+
+/** Một câu dài hơn cả trần → chẻ liên tiếp cho tới khi mảnh nào cũng vừa. */
+function splitLongUnit(unit: SceneSlot, maxSec: number, words: TranscriptWord[]): SceneSlot[] {
+  const out: SceneSlot[] = [];
+  let rest: SceneSlot | null = unit;
+  while (rest && rest.end - rest.start > maxSec + 0.25) {
+    const [head, tail] = splitUnitAt(rest, maxSec, words);
+    if (!head || !tail) break;
+    out.push(head);
+    rest = tail;
+  }
+  if (rest) out.push(rest);
+  return out;
+}
+
+/**
+ * Cắt lời đọc thành cảnh trên trục thời gian thật của audio.
  * Trả về slot liền mạch, phủ kín [0, audioDurationSec].
+ *
+ * `maxSlotSec` (video): có trần một-lần-gen thì số cảnh không còn là lựa chọn nữa —
+ * xếp câu cho đầy trần (`packSentencesIntoSlots`) để ít lượt gen nhất.
+ * Không có trần (ảnh tĩnh): chia đúng `sceneCount` cảnh theo ranh giới câu.
  */
 export function splitNarrationByAudio(options: {
   narration: string;
   words: TranscriptWord[];
   audioDurationSec: number;
   sceneCount: number;
+  maxSlotSec?: number;
 }): SceneSlot[] {
   const audio = Math.max(1, options.audioDurationSec);
   const sentences = splitNarrationSentences(options.narration);
@@ -144,6 +301,21 @@ export function splitNarrationByAudio(options: {
     words: options.words,
     audioDuration: audio,
   });
+
+  if (options.maxSlotSec && options.maxSlotSec > 0) {
+    const packed = packSentencesIntoSlots({
+      sentences,
+      sentenceEnds: sentenceTimings.map((t) => t.end),
+      words: options.words,
+      maxSec: options.maxSlotSec,
+      audioDurationSec: audio,
+    });
+    if (packed.length) {
+      packed[0].start = 0;
+      packed[packed.length - 1].end = audio;
+      return packed;
+    }
+  }
 
   const count = Math.max(1, Math.min(options.sceneCount, sentences.length));
   const cuts = chooseSentenceCuts(
@@ -173,7 +345,7 @@ export function splitNarrationByAudio(options: {
 }
 
 /**
- * Nắn mốc cảnh về những độ dài model THỰC SỰ gen được.
+ * Nắn mốc cảnh về những độ dài model THỰC SỰ gen được TRONG MỘT LẦN.
  *
  * Model video chỉ nhận vài mốc rời rạc (Veo: 4/6/8s). Cảnh chia theo giọng đọc thì
  * ra số lẻ (9,05s / 11,42s), đặt hàng xong chỉ nhận 8s → đo trên một dự án 453s có
@@ -183,8 +355,12 @@ export function splitNarrationByAudio(options: {
  * cảnh kế. Mốc mới bám theo MỐC GỐC (không phải độ dài gốc) nên sai lệch giữa hình
  * và lời không cộng dồn — luôn dưới nửa bước lượng tử (~1s), đúng bằng chỗ cắt hình
  * xê dịch một chút so với ranh giới câu.
+ *
+ * Chỉ lấy mốc một-lần-gen (`singleShot`): mốc ghép nhiều shot (16/24/32s với Veo)
+ * dùng lại đúng một visual prompt cho cả cảnh nên xem như một hình đứng lặp lại,
+ * mà vẫn tốn đúng ngần ấy lượt gen — xem `maxSceneBeatSec`.
  */
-function snapSlotsToModelDurations(
+export function snapSlotsToModelDurations(
   slots: SceneSlot[],
   options: { modelId: string; family: string; audioDurationSec: number }
 ): SceneSlot[] {
@@ -204,26 +380,35 @@ function snapSlotsToModelDurations(
     // dài gấp mấy lần lời đọc.
     if (out.length && target < shortest * 0.6) {
       const prev = out[out.length - 1];
-      prev.text = `${prev.text} ${slots[i].text}`.trim();
-      if (isLast) {
-        // Cảnh cuối phải phủ hết lời đọc → nới cảnh trước cho đủ.
-        prev.end =
-          prev.start +
+      // Cảnh cuối phải phủ hết lời đọc → nới cảnh trước cho đủ.
+      const extendedEnd = isLast
+        ? prev.start +
           snapSceneDurationToModel(
             options.modelId,
             options.family,
             options.audioDurationSec - prev.start,
-            { atLeast: true, tolerance }
-          );
-        cursor = prev.end;
+            { atLeast: true, tolerance, singleShot: true }
+          )
+        : prev.end;
+
+      // Cảnh trước đã kịch trần một lần gen thì nới không tới nữa; gộp vào là đuôi
+      // lời đọc không còn hình, bước ghép phải đứng hình bù. Chỗ đó để nguyên thành
+      // cảnh riêng (clip ngắn nhất của model) còn hơn.
+      if (!isLast || options.audioDurationSec - extendedEnd <= tolerance) {
+        prev.text = `${prev.text} ${slots[i].text}`.trim();
+        if (isLast) {
+          prev.end = extendedEnd;
+          cursor = prev.end;
+        }
+        continue;
       }
-      continue;
     }
 
     const seconds = snapSceneDurationToModel(options.modelId, options.family, target, {
       // Cảnh cuối thà dư vài giây rồi cắt còn hơn để lời đọc chạy quá phần hình.
       atLeast: isLast && options.audioDurationSec - cursor > 0.5,
       tolerance,
+      singleShot: true,
     });
     out.push({ text: slots[i].text, start: cursor, end: cursor + seconds });
     cursor += seconds;
@@ -234,7 +419,7 @@ function snapSlotsToModelDurations(
 
 /** Cảnh ngắn nhất model này gen được (Veo 4s, Sora Pro 25s…). 0 = không ràng buộc. */
 function shortestClipSeconds(modelId: string, family: string, audioDurationSec: number): number {
-  return achievableSceneDurations(modelId, family, audioDurationSec)[0] ?? 0;
+  return achievableSceneDurations(modelId, family, audioDurationSec, { singleShot: true })[0] ?? 0;
 }
 
 function sectionForIndex(index: number, total: number): SceneSection {
@@ -244,14 +429,18 @@ function sectionForIndex(index: number, total: number): SceneSection {
   return 'body';
 }
 
-/** Số cảnh mục tiêu: mật độ người dùng chọn, áp lên ĐỘ DÀI AUDIO THẬT. */
+/**
+ * Số cảnh mục tiêu: mật độ người dùng chọn, áp lên ĐỘ DÀI AUDIO THẬT — nhưng không
+ * bao giờ thưa hơn `beatCapSec` (một lần gen của model video).
+ */
 function resolveSceneCount(options: {
   audioDurationSec: number;
   sceneDensity?: string;
   targetMediaCount?: number;
   mediaKind: 'video' | 'image';
+  beatCapSec: number;
   override?: number;
-}): { count: number; typicalBeatSec: number } {
+}): { count: number; typicalBeatSec: number; requested: number } {
   const density = resolveSceneDensity(options.sceneDensity);
   const beatSec = SCENE_DENSITY_OPTIONS.find((d) => d.id === density)?.beatSec ?? null;
   const explicit =
@@ -265,10 +454,15 @@ function resolveSceneCount(options: {
     targetSceneCount: explicit,
     typicalBeatSec: beatSec ?? undefined,
     mediaKind: options.mediaKind,
+    beatCapSec: options.beatCapSec,
   });
   return {
     count: clampTargetSceneCount(options.audioDurationSec, plan.sceneCountHint),
     typicalBeatSec: plan.typicalBeatSec,
+    // Số cảnh mật độ đòi khi chưa có trần — để báo cho người dùng biết vì sao khác.
+    requested:
+      explicit ??
+      Math.max(1, Math.round(options.audioDurationSec / Math.max(1, beatSec ?? IDEAL_SCENE_BEAT_SEC))),
   };
 }
 
@@ -310,11 +504,15 @@ export async function planScenesFromNarrationAudio(options: {
 
   const words = readNarrationWords(projectDir);
   const isImageProject = draft.mediaKind === 'image';
-  const { count: densityCount } = resolveSceneCount({
+  // Trần một cảnh = một lần gen của model (Veo 8s). Cảnh dài hơn phải đặt nhiều shot
+  // cho cùng một visual prompt: tốn đúng ngần ấy credit mà hình thì lặp lại.
+  const beatCapSec = maxSceneBeatSec(draft.model, isImageProject ? 'image' : 'video');
+  const { count: densityCount, requested: requestedCount } = resolveSceneCount({
     audioDurationSec,
     sceneDensity: draft.sceneDensity,
     targetMediaCount: draft.targetMediaCount,
     mediaKind: isImageProject ? 'image' : 'video',
+    beatCapSec,
     override: options.sceneCount,
   });
 
@@ -332,9 +530,13 @@ export async function planScenesFromNarrationAudio(options: {
     done: 0,
     total: count,
     message:
-      `Chia ${count} cảnh trên ${Math.round(audioDurationSec)}s voiceover` +
+      // Video xếp câu cho đầy trần nên số cảnh chốt sau khi cắt — đây là ước lượng.
+      `Chia ${isImageProject ? '' : '~'}${count} cảnh trên ${Math.round(audioDurationSec)}s voiceover` +
       (words.length ? ' (theo mốc từng từ)' : ' (theo tỉ lệ ký tự)') +
       (count < densityCount ? ` — model chỉ gen được clip từ ${shortest}s` : '') +
+      (!isImageProject && count > requestedCount
+        ? ` — mỗi cảnh tối đa ${beatCapSec}s (một lần gen), chia nhỏ để mỗi cảnh một hình riêng`
+        : '') +
       '…',
   });
 
@@ -343,6 +545,9 @@ export async function planScenesFromNarrationAudio(options: {
     words,
     audioDurationSec,
     sceneCount: count,
+    // Video: không cảnh nào dài hơn một lần gen — kịch bản ít câu dài vẫn phải ra
+    // nhiều cảnh, mỗi cảnh một visual prompt, thay vì một prompt lặp lại 4 shot.
+    maxSlotSec: isImageProject ? undefined : beatCapSec,
   });
 
   // Ảnh tĩnh giữ độ dài trên đĩa bao lâu cũng được; video thì phải theo mốc model gen được.
@@ -412,6 +617,29 @@ export async function planScenesFromNarrationAudio(options: {
     scenes,
   };
 
+  // Chia lại phân cảnh của dự án ĐÃ CÓ media: footage cũ nằm trên cùng trục thời
+  // gian nên gán lại được cho cảnh mới — người dùng chỉ phải gen phần còn thiếu.
+  const previousScenes = draft.script?.scenes ?? [];
+  const salvage = previousScenes.length
+    ? await salvageSceneMediaForNewScenes({
+        projectDir,
+        mediaKind: draft.mediaKind === 'image' ? 'image' : 'video',
+        oldScenes: previousScenes,
+        newScenes: scenes,
+      })
+    : null;
+  if (salvage?.adopted) {
+    options.onProgress?.({
+      phase: 'salvage',
+      done: salvage.adopted,
+      total: scenes.length,
+      message:
+        `Giữ lại ${salvage.adopted}/${scenes.length} cảnh có sẵn footage cũ` +
+        (salvage.duplicates ? ` (bỏ ${salvage.duplicates} đoạn trùng lặp)` : '') +
+        ` — còn ${salvage.missing} cảnh cần gen.`,
+    });
+  }
+
   // Cache timing phải khớp số cảnh MỚI, không thì lần ghép sau tưởng cache hỏng
   // và dựng lại track audio (đệm im lặng) dù audio vẫn y nguyên.
   const previousHash = readNarrationCache(projectDir)?.hash || '';
@@ -435,6 +663,7 @@ export async function planScenesFromNarrationAudio(options: {
     audioDurationSec,
     sceneCount: scenes.length,
     alignedWithWords: words.length > 0,
+    salvagedMedia: salvage?.adopted ? salvage : undefined,
   };
 }
 

@@ -1407,6 +1407,9 @@ export async function runGenerateJob(input: GenerateJobInput): Promise<GenerateJ
     if (chainScenesEnabled) {
       workIndexes.sort((a, b) => a - b);
     }
+    // Một job Snapgen chỉ được làm footage cho MỘT chunk trong cả lượt gen này —
+    // xem `SceneGenerateContext.claimedJobUuids`.
+    const claimedJobUuids = new Set<string>();
     emitPoolProgress();
 
     if (workIndexes.length) {
@@ -1464,6 +1467,7 @@ export async function runGenerateJob(input: GenerateJobInput): Promise<GenerateJ
               maxAttempts: MAX_SCENE_GENERATE_ATTEMPTS,
               shouldAbort: () => isJobStopRequested(),
               chainFromHistory,
+              claimedJobUuids,
             },
             scene,
             i,
