@@ -7,7 +7,10 @@ import {
   type NarrationChunkPlan,
 } from '../../shared/narration-chunks';
 import { clampGenmaxSpeed } from '../../shared/voice';
-import { ELEVENLABS_LANGUAGES } from '../../shared/elevenlabs-languages';
+import {
+  ELEVENLABS_LANGUAGES,
+  clampLanguageCodeForElevenModel,
+} from '../../shared/elevenlabs-languages';
 import { concatAudioFiles, convertAudioToMp3, getDurationSafe } from './ffmpeg';
 import {
   buildContinuousNarrationText,
@@ -78,10 +81,13 @@ export function resolveGenmaxBackend(value?: string | null): GenmaxBackend {
  * danh sách đó, và nó có 74 thứ tiếng trong khi mấy dòng dò chuỗi bên dưới chỉ
  * biết 10 — chọn Hindi mà rơi về 'en' thì lời bình một đằng, giọng đọc một nẻo.
  * MiniMax nhận TÊN tiếng Anh thay vì mã ISO, riêng tiếng Trung có tên riêng.
+ *
+ * ElevenLabs Flash/Turbo v2.5 chỉ ~32 mã — clamp theo model (vd. jv → id).
  */
 export function resolveGenmaxLanguageCode(
   backend: GenmaxBackend,
-  projectLanguage?: string | null
+  projectLanguage?: string | null,
+  modelId?: string | null
 ): string {
   const lang = String(projectLanguage || '').toLowerCase();
   const exact = ELEVENLABS_LANGUAGES.find(
@@ -101,20 +107,25 @@ export function resolveGenmaxLanguageCode(
     if (/english|anh|\ben\b/.test(lang)) return 'English';
     return 'English';
   }
-  // ElevenLabs / CapCut — ISO
-  if (exact) return exact.id;
-  if (!lang) return 'en';
-  if (/việt|vietnam|\bvi\b/.test(lang)) return 'vi';
-  if (/中|chinese|mandarin|\bzh\b/.test(lang)) return 'zh';
-  if (/japan|日本語|\bja\b|nhật/.test(lang)) return 'ja';
-  if (/korea|한국어|\bko\b|hàn/.test(lang)) return 'ko';
-  if (/french|pháp|\bfr\b/.test(lang)) return 'fr';
-  if (/german|đức|\bde\b/.test(lang)) return 'de';
-  if (/spanish|tây ban|\bes\b/.test(lang)) return 'es';
-  if (/portug|\bpt\b/.test(lang)) return 'pt';
-  if (/thai|\bth\b|thái/.test(lang)) return 'th';
-  if (/indonesia|\bid\b/.test(lang)) return 'id';
-  return 'en';
+  // ElevenLabs / CapCut — ISO, rồi clamp theo model (tránh 400 language_code)
+  let iso = exact?.id;
+  if (!iso) {
+    if (!lang) iso = 'en';
+    else if (/việt|vietnam|\bvi\b/.test(lang)) iso = 'vi';
+    else if (/中|chinese|mandarin|\bzh\b/.test(lang)) iso = 'zh';
+    else if (/japan|日本語|\bja\b|nhật/.test(lang)) iso = 'ja';
+    else if (/korea|한국어|\bko\b|hàn/.test(lang)) iso = 'ko';
+    else if (/french|pháp|\bfr\b/.test(lang)) iso = 'fr';
+    else if (/german|đức|\bde\b/.test(lang)) iso = 'de';
+    else if (/spanish|tây ban|\bes\b/.test(lang)) iso = 'es';
+    else if (/portug|\bpt\b/.test(lang)) iso = 'pt';
+    else if (/thai|\bth\b|thái/.test(lang)) iso = 'th';
+    else if (/indonesia|\bid\b/.test(lang)) iso = 'id';
+    else if (/java|\bjv\b/.test(lang)) iso = 'jv';
+    else iso = 'en';
+  }
+  const model = modelId || DEFAULT_GENMAX_MODEL_ID;
+  return clampLanguageCodeForElevenModel(model, iso) || 'en';
 }
 
 export function chunkTextForGenmax(text: string, maxChars = MAX_CHARS_PER_REQUEST): string[] {
@@ -456,7 +467,7 @@ export async function synthesizeWithGenmax(options: {
       : backend === 'capcut'
         ? 'capcut'
         : DEFAULT_GENMAX_MODEL_ID);
-  const languageCode = resolveGenmaxLanguageCode(backend, options.language);
+  const languageCode = resolveGenmaxLanguageCode(backend, options.language, modelId);
   const speed = clampGenmaxSpeed(options.speed, backend);
   const chunkPlans: NarrationChunkPlan[] = planNarrationTtsChunks({
     scenes: options.scenes,

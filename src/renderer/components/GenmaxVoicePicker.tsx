@@ -7,6 +7,9 @@ const BACKENDS: Array<{ id: GenmaxBackend; label: string; hint: string }> = [
   { id: 'capcut', label: 'CapCut', hint: 'Giọng CapCut / VI' },
 ];
 
+/** Cache theo backend — đổi tab rồi quay lại không fetch lại. */
+const voicesCache: Partial<Record<GenmaxBackend, GenmaxVoice[]>> = {};
+
 function voiceMeta(v: GenmaxVoice): string {
   return [v.gender, v.language || v.accent, v.age, v.category].filter(Boolean).join(' · ');
 }
@@ -50,7 +53,7 @@ export default function GenmaxVoicePicker({
   onVoiceResolved?: (voice: GenmaxVoice) => void;
   onBackendChange: (backend: GenmaxBackend) => void;
 }) {
-  const [voices, setVoices] = useState<GenmaxVoice[]>([]);
+  const [voices, setVoices] = useState<GenmaxVoice[]>(() => voicesCache[backend] || []);
   const [busy, setBusy] = useState(false);
   const [previewBusy, setPreviewBusy] = useState(false);
   const [playingId, setPlayingId] = useState<string | null>(null);
@@ -59,7 +62,7 @@ export default function GenmaxVoicePicker({
   const [idMsg, setIdMsg] = useState<{ type: 'ok' | 'error'; text: string } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
-  const searchTimer = useRef<number | null>(null);
+  const loadSeq = useRef(0);
 
   const stopPreview = () => {
     audioRef.current?.pause();
@@ -67,54 +70,66 @@ export default function GenmaxVoicePicker({
     setPlayingId(null);
   };
 
-  const load = async (searchOverride?: string) => {
+  const applyLoadedList = (list: GenmaxVoice[]) => {
+    setVoices(list);
+    if (!value?.trim() && list[0]) onChange(list[0]);
+    else {
+      const current = list.find((v) => v.voiceId === value);
+      if (current) onVoiceResolved?.(current);
+    }
+  };
+
+  /**
+   * Chỉ tải list từ GenMax khi đổi provider / bấm Tải lại / Enter tìm remote.
+   * Gõ ô tìm = lọc local — tránh khóa UI + spam API mỗi 420ms (rất lag).
+   */
+  const load = async (opts?: { force?: boolean; remoteSearch?: string }) => {
+    const seq = ++loadSeq.current;
+    const remoteSearch = opts?.remoteSearch?.trim() || undefined;
+    const cached = voicesCache[backend];
+
+    if (!opts?.force && !remoteSearch && cached?.length) {
+      applyLoadedList(cached);
+      return;
+    }
+
     setBusy(true);
     setError(null);
     try {
-      const search = (searchOverride ?? query).trim() || undefined;
       const list = await window.studio.listGenmaxVoices({
         backend,
-        search,
-        pageSize: 80,
+        search: remoteSearch,
+        pageSize: 100,
       });
-      setVoices(list);
-      // Giữ selection hiện tại; chỉ gợi ý mặc định khi chưa có value.
-      if (!value?.trim() && list[0]) onChange(list[0]);
-      // Báo metadata của giọng ĐANG chọn để panel đồng bộ ngôn ngữ lời bình —
-      // dự án tạo trước tính năng này chưa có ngôn ngữ nào được lưu.
-      else {
-        const current = list.find((v) => v.voiceId === value);
-        if (current) onVoiceResolved?.(current);
-      }
+      if (seq !== loadSeq.current) return;
+      if (!remoteSearch) voicesCache[backend] = list;
+      applyLoadedList(list);
     } catch (err) {
+      if (seq !== loadSeq.current) return;
       setError(err instanceof Error ? err.message : String(err));
     } finally {
-      setBusy(false);
+      if (seq === loadSeq.current) setBusy(false);
     }
   };
 
   useEffect(() => {
-    void load('');
     setQuery('');
     setCustomId('');
     setIdMsg(null);
+    setError(null);
     stopPreview();
+    const cached = voicesCache[backend];
+    if (cached?.length) {
+      setVoices(cached);
+      applyLoadedList(cached);
+    } else {
+      setVoices([]);
+    }
+    void load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [backend]);
 
   useEffect(() => () => stopPreview(), []);
-
-  // Debounce tìm trên server khi gõ (kèm filter local tức thì).
-  useEffect(() => {
-    if (searchTimer.current) window.clearTimeout(searchTimer.current);
-    searchTimer.current = window.setTimeout(() => {
-      void load(query);
-    }, 420);
-    return () => {
-      if (searchTimer.current) window.clearTimeout(searchTimer.current);
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [query]);
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -155,6 +170,8 @@ export default function GenmaxVoicePicker({
           voiceId: voice.voiceId,
           backend,
           speed,
+          // Preview luôn English sample — không dùng ngôn ngữ dự án (vd. jv → 400 trên flash).
+          language: 'en',
         });
         src = dataUrl;
       }
@@ -202,13 +219,13 @@ export default function GenmaxVoicePicker({
       <div className="genmax-voice-head">
         <div>
           <strong>Chọn giọng GenMax</strong>
-          <p className="hint">Tìm theo tên, lọc provider, hoặc dán voice ID / URL.</p>
+          <p className="hint">Tìm theo tên (lọc nhanh), hoặc dán voice ID / URL.</p>
         </div>
         <button
           type="button"
           className="btn ghost"
           disabled={disabled || busy}
-          onClick={() => void load(query)}
+          onClick={() => void load({ force: true })}
         >
           {busy ? 'Đang tải…' : 'Tải lại'}
         </button>
@@ -267,11 +284,15 @@ export default function GenmaxVoicePicker({
           <input
             type="search"
             value={query}
-            disabled={disabled || busy}
+            disabled={disabled}
             placeholder="Tên, mô tả, gender, language, hoặc một phần ID…"
             onChange={(e) => setQuery(e.target.value)}
             onKeyDown={(e) => {
-              if (e.key === 'Enter') void load(query);
+              // Enter = tìm thêm trên GenMax (shared library); gõ thường chỉ lọc local.
+              if (e.key === 'Enter') {
+                e.preventDefault();
+                void load({ force: true, remoteSearch: query });
+              }
             }}
             aria-label="Tìm giọng GenMax"
           />
@@ -321,7 +342,16 @@ export default function GenmaxVoicePicker({
           <p className="muted pad">Đang tải danh sách giọng…</p>
         ) : filtered.length === 0 ? (
           <p className="muted pad">
-            Không thấy giọng khớp. Thử xóa ô tìm, đổi provider, hoặc dán voice ID bên trên.
+            Không thấy giọng khớp.
+            {query.trim() ? (
+              <>
+                {' '}
+                <button type="button" className="btn ghost" onClick={() => setQuery('')}>
+                  Xóa ô tìm
+                </button>
+              </>
+            ) : null}{' '}
+            Enter để tìm trên GenMax, hoặc dán voice ID bên trên.
           </p>
         ) : (
           filtered.map((voice) => {
@@ -364,8 +394,9 @@ export default function GenmaxVoicePicker({
       <div className="genmax-voice-footer">
         <span>
           {filtered.length}/{voices.length} giọng · {backend}
+          {busy ? ' · đang tải…' : ''}
         </span>
-        <span className="hint">Enter ở ô tìm = tìm lại trên GenMax</span>
+        <span className="hint">Gõ = lọc nhanh · Enter = tìm trên GenMax</span>
       </div>
       {error ? <p className="msg error">{error}</p> : null}
     </div>

@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import type { ElevenLabsVoice } from '../../shared/types';
-import { ELEVENLABS_LANGUAGES } from '../../shared/elevenlabs-languages';
+import { ELEVENLABS_LANGUAGES, clampLanguageCodeForElevenModel } from '../../shared/elevenlabs-languages';
 import type { TranscriptWord } from './openai-audio';
 import { elevenLabsFetch, getElevenLabsCookieHeader, getElevenLabsSessionStatus, hasElevenLabsApiAccess } from './elevenlabs-auth';
 import { getCapturedElevenLabsAuthorization } from '../store';
@@ -347,8 +347,9 @@ export async function synthesizeWithElevenLabs(options: {
   const selectedVoiceId = options.voiceId.trim() || DEFAULT_VOICE_ID;
   const libraryVoiceId = options.originalVoiceId?.trim() || selectedVoiceId;
 
-  const languageCode = resolveElevenLabsLanguageCode(options.language);
-  const modelId = resolveElevenLabsModelForLanguage(options.modelId, languageCode);
+  const rawLanguageCode = resolveElevenLabsLanguageCode(options.language);
+  const modelId = resolveElevenLabsModelForLanguage(options.modelId, rawLanguageCode);
+  const languageCode = clampLanguageCodeForElevenModel(modelId, rawLanguageCode);
   fs.mkdirSync(options.outDir, { recursive: true });
 
   const body: Record<string, unknown> = {

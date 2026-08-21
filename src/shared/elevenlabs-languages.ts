@@ -156,3 +156,133 @@ export function resolveLanguageIdFromLabel(raw?: string | null): string {
   }
   return '';
 }
+
+/**
+ * 32 ngôn ngữ của Flash/Turbo v2.5 (+ multilingual_v2 trừ hu/no/vi).
+ * UI dùng list ~74 (Eleven v3); gửi sai mã (vd. `jv`) → HTTP 400.
+ * @see https://elevenlabs.io/docs/overview/models
+ */
+export const ELEVENLABS_FLASH_V25_LANGUAGE_IDS = new Set([
+  'ar',
+  'bg',
+  'zh',
+  'hr',
+  'cs',
+  'da',
+  'nl',
+  'en',
+  'fil',
+  'fi',
+  'fr',
+  'de',
+  'el',
+  'hu',
+  'hi',
+  'id',
+  'it',
+  'ja',
+  'ko',
+  'ms',
+  'no',
+  'pl',
+  'pt',
+  'ro',
+  'ru',
+  'sk',
+  'es',
+  'sv',
+  'ta',
+  'tr',
+  'uk',
+  'vi',
+]);
+
+/** multilingual_v2: flash set trừ Hungarian / Norwegian / Vietnamese. */
+export const ELEVENLABS_MULTILINGUAL_V2_LANGUAGE_IDS = new Set(
+  [...ELEVENLABS_FLASH_V25_LANGUAGE_IDS].filter((id) => !['hu', 'no', 'vi'].includes(id))
+);
+
+/**
+ * Khi model không nhận mã từ list v3 — map gần nhất (cùng vùng / họ ngôn ngữ).
+ * Không có trong map → bỏ language_code (để model tự nhận từ text) hoặc fallback caller.
+ */
+const ELEVENLABS_LANGUAGE_FALLBACK_FOR_FLASH: Record<string, string> = {
+  jv: 'id', // Javanese → Indonesian
+  ceb: 'fil', // Cebuano → Filipino
+  tl: 'fil',
+  as: 'hi',
+  bn: 'hi',
+  gu: 'hi',
+  kn: 'hi',
+  ml: 'hi',
+  mr: 'hi',
+  ne: 'hi',
+  pa: 'hi',
+  sd: 'hi',
+  te: 'hi',
+  ur: 'hi',
+  cy: 'en',
+  ga: 'en',
+  af: 'en',
+  lb: 'de',
+  gl: 'es',
+  ca: 'es',
+  bs: 'hr',
+  sr: 'hr',
+  mk: 'bg',
+  sl: 'sk',
+  et: 'fi',
+  lv: 'en',
+  lt: 'en',
+  be: 'ru',
+  he: 'ar',
+  fa: 'ar',
+  ps: 'ar',
+  az: 'tr',
+  kk: 'ru',
+  ky: 'ru',
+  hy: 'ru',
+  ka: 'ru',
+  so: 'en',
+  sw: 'en',
+  ha: 'en',
+  ln: 'en',
+  ny: 'en',
+  is: 'en',
+};
+
+function supportedIdsForElevenModel(modelId?: string | null): Set<string> | null {
+  const model = String(modelId || '').trim().toLowerCase();
+  if (!model) return ELEVENLABS_FLASH_V25_LANGUAGE_IDS;
+  if (model === 'capcut' || model.startsWith('speech-')) return null;
+  if (model.includes('v3')) return null; // Eleven v3 ≈ full list
+  if (model.includes('multilingual_v2')) return ELEVENLABS_MULTILINGUAL_V2_LANGUAGE_IDS;
+  if (model.includes('flash_v2_5') || model.includes('turbo_v2_5')) {
+    return ELEVENLABS_FLASH_V25_LANGUAGE_IDS;
+  }
+  if (model.includes('flash_v2') || model.includes('turbo_v2')) {
+    return new Set(['en']);
+  }
+  // GenMax / mặc định app = flash_v2_5
+  return ELEVENLABS_FLASH_V25_LANGUAGE_IDS;
+}
+
+/**
+ * Chuẩn hóa language_code trước khi gửi TTS — tránh 400 "not supported by model".
+ * Trả về mã hỗ trợ, hoặc undefined nếu nên bỏ field (model tự detect).
+ */
+export function clampLanguageCodeForElevenModel(
+  modelId: string | null | undefined,
+  languageCode: string | null | undefined
+): string | undefined {
+  const code = String(languageCode || '')
+    .trim()
+    .toLowerCase();
+  if (!code) return undefined;
+  const supported = supportedIdsForElevenModel(modelId);
+  if (!supported) return code; // v3 / unknown-full
+  if (supported.has(code)) return code;
+  const mapped = ELEVENLABS_LANGUAGE_FALLBACK_FOR_FLASH[code];
+  if (mapped && supported.has(mapped)) return mapped;
+  return undefined;
+}
