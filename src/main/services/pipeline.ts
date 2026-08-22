@@ -10,8 +10,10 @@ import {
   familySupportsExtend,
   findScenesWithShortNarration,
   formatDurationLabel,
+  HARD_MIN_NARRATION_COVERAGE,
   isCjkLanguage,
   isNarrationOnlyScript,
+  MIN_NARRATION_COVERAGE,
   normalizeSceneDurations,
 } from '../../shared/models';
 import type {
@@ -151,7 +153,7 @@ function writeSceneManifest(
 ): void {
   fs.writeFileSync(sceneManifestPath(projectDir), JSON.stringify(rows, null, 2), 'utf8');
 }
-const MAX_SCENE_GENERATE_ATTEMPTS = 3;
+const MAX_SCENE_GENERATE_ATTEMPTS = 5;
 
 type NarrationBundle = {
   audioPath: string;
@@ -1067,7 +1069,7 @@ export async function runGenerateJob(input: GenerateJobInput): Promise<GenerateJ
       0
     );
     const spokenEst = estimateScriptSpokenSeconds(input.script.scenes);
-    const targetRuntimeSec = Math.max(
+    let targetRuntimeSec = Math.max(
       1,
       Math.round(draftTarget || hintSum || spokenEst)
     );
@@ -1122,9 +1124,25 @@ export async function runGenerateJob(input: GenerateJobInput): Promise<GenerateJ
       });
       persistScript(meta.id, script);
     } else {
-      // Tổng narration đủ target thì cho TTS; lệch nhẹ từng scene (do duration_hint scale) không chặn.
+      // Lời ngắn hơn mục tiêu: TTS theo độ dài lời thật, không chặn job.
+      // Chỉ fail khi script gần như trống (< 50% target).
       if (refreshNarration) {
-        assertNarrationCoversTarget(input.script.scenes, targetRuntimeSec);
+        assertNarrationCoversTarget(
+          input.script.scenes,
+          targetRuntimeSec,
+          HARD_MIN_NARRATION_COVERAGE
+        );
+        if (spokenEst < targetRuntimeSec * MIN_NARRATION_COVERAGE) {
+          const fitted = Math.max(1, Math.round(spokenEst));
+          emitProgress({
+            phase: 'tts',
+            message:
+              `Lời ~${formatDurationLabel(spokenEst)} ngắn hơn mục tiêu ${formatDurationLabel(targetRuntimeSec)} — ` +
+              `căn video theo giọng đọc (~${formatDurationLabel(fitted)}), không pad im lặng.`,
+            percent: audioOnlyStep ? 3 : 2,
+          });
+          targetRuntimeSec = fitted;
+        }
         input.script = {
           ...input.script,
           scenes: normalizeSceneDurations(input.script.scenes, targetRuntimeSec),

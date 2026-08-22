@@ -1882,8 +1882,13 @@ export function resetSpeechRateProfile(): SpeechRateProfile {
   };
   return { ...activeSpeechRate };
 }
-/** Narration phải đạt tối thiểu tỉ lệ này so với target trước TTS. */
+/** Narration nên đạt tỉ lệ này so với target (cảnh báo / viết bù). */
 export const MIN_NARRATION_COVERAGE = 0.85;
+/**
+ * Dưới mức này mới chặn TTS: script gần như trống.
+ * 70–85% thì căn video theo độ dài lời thật (không pad im lặng).
+ */
+export const HARD_MIN_NARRATION_COVERAGE = 0.5;
 /**
  * Per-scene: nới hơn tổng coverage.
  * `duration_hint` thường đã scale theo target (dài hơn lời) → so 85% sẽ false-positive hàng loạt.
@@ -2157,11 +2162,11 @@ export function narrationCoverageRatio(
   return estimateScriptSpokenSeconds(scenes) / target;
 }
 
-/** Chặn TTS/render nếu narration còn thiếu so với mục tiêu. */
+/** Chặn TTS/render chỉ khi lời quá ngắn (script gần như trống). */
 export function assertNarrationCoversTarget(
   scenes: Array<{ narration_segment?: string }>,
   targetDurationSec: number,
-  minRatio = MIN_NARRATION_COVERAGE
+  minRatio = HARD_MIN_NARRATION_COVERAGE
 ): void {
   const spoken = estimateScriptSpokenSeconds(scenes);
   const target = Math.max(1, Math.round(targetDurationSec));

@@ -33,6 +33,7 @@ import {
   getImageUrl,
   getLastFrameUrl,
   isSafetyBlockedError,
+  isTransientSnapgenJobError,
   snapgenPromptsMatch,
   waitForMedia,
   type ReusableExpectation,
@@ -194,30 +195,44 @@ async function resolveMediaJobUuid(options: {
   expect?: ReusableExpectation;
   /** Sổ job đã có chủ trong lượt này — xem `SceneGenerateContext.claimedJobUuids`. */
   claimed?: Set<string>;
+  /** UUID job đã fail — không poll lại, phải create mới. */
+  deadUuids?: Set<string>;
+  /** true = bỏ checkpoint + history lookup, luôn POST generate mới. */
+  forceNew?: boolean;
 }): Promise<{ uuid: string; reused: boolean; estimatedCredit?: number }> {
   const claim = (uuid: string) => {
     options.claimed?.add(uuid);
     return uuid;
   };
-  const existing = readChunkJob(options.segmentDir, options.chunkIndex);
+  const isDead = (uuid: string) => Boolean(options.deadUuids?.has(uuid));
+  const existing = options.forceNew ? null : readChunkJob(options.segmentDir, options.chunkIndex);
   if (existing && existing.promptKey === options.key && existing.uuid) {
-    claim(existing.uuid);
-    // Checkpoint mode 'reuse' từng được ghi bởi matcher lỏng (khớp theo tiền tố)
-    // nên có thể trỏ sang job của scene khác. Đối chiếu prompt thật trên Snapgen
-    // rồi mới dùng; không xác thực được thì cứ dùng như trước.
-    if (existing.mode === 'reuse') {
+    if (isDead(existing.uuid)) {
+      clearChunkJob(options.segmentDir, options.chunkIndex);
+    } else {
+      claim(existing.uuid);
       try {
         const hist = await getHistory(options.apiKey, existing.uuid);
-        if (!snapgenPromptsMatch(options.prompt, String(hist.input_text || ''))) {
+        const checkpointAgeMs = Date.now() - Date.parse(existing.updatedAt || '');
+        const stuckProcessing =
+          (hist.status === 0 || hist.status === 1) &&
+          Number.isFinite(checkpointAgeMs) &&
+          checkpointAgeMs > 22 * 60 * 1000;
+        if (hist.status === 3 || stuckProcessing) {
+          options.deadUuids?.add(existing.uuid);
+          clearChunkJob(options.segmentDir, options.chunkIndex);
+        } else if (
+          existing.mode === 'reuse' &&
+          !snapgenPromptsMatch(options.prompt, String(hist.input_text || ''))
+        ) {
           clearChunkJob(options.segmentDir, options.chunkIndex);
         } else {
           return { uuid: existing.uuid, reused: true };
         }
       } catch {
-        return { uuid: existing.uuid, reused: true };
+        if (isDead(existing.uuid)) clearChunkJob(options.segmentDir, options.chunkIndex);
+        else return { uuid: existing.uuid, reused: true };
       }
-    } else {
-      return { uuid: existing.uuid, reused: true };
     }
   } else if (existing && existing.promptKey !== options.key) {
     // Checkpoint cũ khác prompt → bỏ, tránh gắn nhầm clip.
@@ -228,28 +243,33 @@ async function resolveMediaJobUuid(options: {
     throw new Error('Đã dừng bởi người dùng');
   }
 
+  const exclude = new Set<string>([
+    ...(options.claimed ? [...options.claimed] : []),
+    ...(options.deadUuids ? [...options.deadUuids] : []),
+  ]);
+
   // Tìm trên Snapgen history theo prompt (job đã xong / đang chạy nhưng app chưa tải).
-  try {
-    const found = await findReusableHistoryByPrompt(options.apiKey, options.prompt, options.kind, {
-      expect: options.expect,
-      // Job đã làm footage cho chunk khác thì không nhận lại — nhận lại là hai
-      // chunk cùng một đoạn phim.
-      excludeUuids: options.claimed,
-    });
-    if (found?.uuid) {
-      claim(found.uuid);
-      writeChunkJob(options.segmentDir, options.chunkIndex, {
-        promptKey: options.key,
-        prompt: options.prompt.slice(0, 2000),
-        uuid: found.uuid,
-        kind: options.kind,
-        mode: 'reuse',
-        updatedAt: new Date().toISOString(),
+  if (!options.forceNew) {
+    try {
+      const found = await findReusableHistoryByPrompt(options.apiKey, options.prompt, options.kind, {
+        expect: options.expect,
+        excludeUuids: exclude,
       });
-      return { uuid: found.uuid, reused: true };
+      if (found?.uuid && !isDead(found.uuid) && found.status !== 3) {
+        claim(found.uuid);
+        writeChunkJob(options.segmentDir, options.chunkIndex, {
+          promptKey: options.key,
+          prompt: options.prompt.slice(0, 2000),
+          uuid: found.uuid,
+          kind: options.kind,
+          mode: 'reuse',
+          updatedAt: new Date().toISOString(),
+        });
+        return { uuid: found.uuid, reused: true };
+      }
+    } catch {
+      /* history lookup optional — tiếp tục create */
     }
-  } catch {
-    /* history lookup optional — tiếp tục create */
   }
 
   if (options.shouldAbort?.()) {
@@ -323,6 +343,11 @@ export async function generateOneSceneMedia(
    */
   let safetyLevel = 0;
   let justEscalated = false;
+  /** Chain/keyframe từ scene trước đôi khi làm Snapgen SYSTEM_ERROR — lần sau gen độc lập. */
+  let skipIncomingChain = false;
+  let justDroppedChain = false;
+  const deadUuids = new Set<string>();
+  let forceNewJob = false;
 
   return withRetries(
     label,
@@ -370,6 +395,8 @@ export async function generateOneSceneMedia(
           chunkIndex: 0,
           shouldAbort: ctx.shouldAbort,
           claimed: ctx.claimedJobUuids,
+          deadUuids,
+          forceNew: forceNewJob,
           expect: {
             modelId: ctx.model,
             resolution: ctx.resolution,
@@ -398,22 +425,30 @@ export async function generateOneSceneMedia(
         }
 
         onProgress?.({ state: 'polling', attempt, detailPercent: 0, local01: 0 });
-        const hist = await waitForMedia(
-          ctx.apiKey,
-          uuid,
-          'image',
-          (pct) => {
-            const shot = normalizeSnapgenPercent(pct);
-            onProgress?.({
-              state: 'polling',
-              attempt,
-              detailPercent: shot,
-              local01: shot / 100,
-            });
-          },
-          30 * 60 * 1000,
-          ctx.shouldAbort
-        );
+        let hist: SnapgenHistory;
+        try {
+          hist = await waitForMedia(
+            ctx.apiKey,
+            uuid,
+            'image',
+            (pct) => {
+              const shot = normalizeSnapgenPercent(pct);
+              onProgress?.({
+                state: 'polling',
+                attempt,
+                detailPercent: shot,
+                local01: shot / 100,
+              });
+            },
+            30 * 60 * 1000,
+            ctx.shouldAbort
+          );
+        } catch (waitErr) {
+          deadUuids.add(uuid);
+          ctx.claimedJobUuids?.add(uuid);
+          clearChunkJob(segmentDir, 0);
+          throw waitErr;
+        }
 
         const url = getImageUrl(hist);
         if (!url) throw new Error(`Thiếu image_url cho ${label}`);
@@ -432,7 +467,7 @@ export async function generateOneSceneMedia(
       const desired = Math.max(1, scene.duration_hint);
       const plan = planSceneChunks(ctx.model, String(ctx.family), desired);
       const canExtend = familySupportsExtend(String(ctx.family));
-      const chainFrom = ctx.chainFromHistory?.trim() || null;
+      const chainFrom = skipIncomingChain ? null : ctx.chainFromHistory?.trim() || null;
       const segmentPaths: string[] = [];
       let refHistory: string | null = chainFrom;
       let creditSpent = 0;
@@ -475,7 +510,11 @@ export async function generateOneSceneMedia(
               : useKeyframe
                 ? 'Continues from the given first frame, no hard cut.'
                 : 'Next beat of the same scene.';
-        const chunkPrompt = continuityRule ? `${prompt} ${continuityRule}` : prompt;
+        const retryNudge =
+          attempt > 1
+            ? ` Variation ${attempt}: same subject and style, slightly different camera angle.`
+            : '';
+        const chunkPrompt = `${continuityRule ? `${prompt} ${continuityRule}` : prompt}${retryNudge}`;
 
         const key = promptKey({
           kind: 'video',
@@ -510,6 +549,8 @@ export async function generateOneSceneMedia(
           chunkIndex: c,
           shouldAbort: ctx.shouldAbort,
           claimed: ctx.claimedJobUuids,
+          deadUuids,
+          forceNew: forceNewJob,
           expect: {
             modelId: ctx.model,
             resolution: ctx.resolution,
@@ -599,13 +640,19 @@ export async function generateOneSceneMedia(
                 local01: withinScene,
               });
             },
-            30 * 60 * 1000,
+            50 * 60 * 1000,
             ctx.shouldAbort
           );
         } catch (waitErr) {
           // Job lỗi / UUID chết → xóa checkpoint để lần retry được create mới (không loop UUID hỏng).
           const msg = waitErr instanceof Error ? waitErr.message : String(waitErr);
-          if (/status === 3|thất bại|failed|RECORD_NOT_FOUND|404|không lấy được lịch sử/i.test(msg)) {
+          deadUuids.add(uuid);
+          ctx.claimedJobUuids?.add(uuid);
+          if (
+            /status === 3|thất bại|failed|RECORD_NOT_FOUND|404|không lấy được lịch sử|GENERATION_FAILED|SYSTEM_ERROR|lỗi tạm thời/i.test(
+              msg
+            )
+          ) {
             clearChunkJob(segmentDir, c);
           }
           throw waitErr;
@@ -658,6 +705,7 @@ export async function generateOneSceneMedia(
         estimatedCredit: creditSpent || undefined,
       };
       } catch (err) {
+        justDroppedChain = false;
         // Bị chặn nội dung → nâng mức làm sạch prompt rồi cho phép retry.
         if (isSafetyBlockedError(err) && safetyLevel < MAX_PROMPT_SAFETY_LEVEL) {
           safetyLevel += 1;
@@ -665,14 +713,31 @@ export async function generateOneSceneMedia(
         } else {
           justEscalated = false;
         }
+        if (isTransientSnapgenJobError(err)) {
+          forceNewJob = true;
+          for (let i = 0; i < 8; i += 1) clearChunkJob(segmentDir, i);
+          if (
+            ctx.mediaKind === 'video' &&
+            !skipIncomingChain &&
+            ctx.chainFromHistory
+          ) {
+            skipIncomingChain = true;
+            justDroppedChain = true;
+          }
+        }
         throw err;
       }
     },
     {
       maxAttempts,
+      baseDelayMs: 12_000,
       shouldAbort: ctx.shouldAbort,
       // Lỗi mạng/tạm thời retry như cũ; lỗi bị chặn chỉ retry khi prompt ĐÃ đổi.
-      isRetryable: (err) => isRetryableMediaError(err) || justEscalated,
+      isRetryable: (err) =>
+        isRetryableMediaError(err) ||
+        isTransientSnapgenJobError(err) ||
+        justEscalated ||
+        justDroppedChain,
       onRetry: (attempt, err, delayMs) => {
         const msg = err instanceof Error ? err.message : String(err);
         onProgress?.({
@@ -680,7 +745,9 @@ export async function generateOneSceneMedia(
           attempt,
           error: justEscalated
             ? `${msg} — tự viết lại prompt an toàn hơn (mức ${safetyLevel}/${MAX_PROMPT_SAFETY_LEVEL}) rồi thử lại sau ${Math.round(delayMs / 1000)}s`
-            : `${msg} — thử lại sau ${Math.round(delayMs / 1000)}s (ưu tiên tải job đã có)`,
+            : justDroppedChain
+              ? `${msg} — bỏ nối cảnh (keyframe scene trước), tạo job mới sau ${Math.round(delayMs / 1000)}s`
+              : `${msg} — thử lại sau ${Math.round(delayMs / 1000)}s (ưu tiên tải job đã có)`,
           detailPercent: 0,
           local01: 0,
         });

@@ -101,6 +101,17 @@ export function localizeSnapgenError(
     );
   }
 
+  if (
+    blob.includes('GENERATION_FAILED') ||
+    blob.includes('SYSTEM_ERROR') ||
+    blob.includes('SYSTEM ERROR') ||
+    blob.includes('INTERNAL_ERROR')
+  ) {
+    return withCode(
+      'Snapgen lỗi tạm thời khi render (server). App sẽ tự tạo job mới rồi thử lại.'
+    );
+  }
+
   if (!raw) {
     return withCode(
       kind === 'image'
@@ -422,6 +433,14 @@ export async function getHistory(apiKey: string, uuid: string): Promise<SnapgenH
 export function isSafetyBlockedError(err: unknown): boolean {
   const msg = err instanceof Error ? err.message : String(err);
   return /GEMINI_RAI|RAI_MEDIA_FILTERED|UNSAFE_GENERATION|SAFETY|bị Google chặn|describe children|celebrity|third-party content/i.test(
+    msg
+  );
+}
+
+/** Lỗi Snapgen phía server — retry job mới, không giữ UUID hỏng. */
+export function isTransientSnapgenJobError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  return /GENERATION_FAILED|SYSTEM_ERROR|SYSTEM ERROR|INTERNAL_ERROR|lỗi tạm thời khi render|UNAVAILABLE|overloaded/i.test(
     msg
   );
 }

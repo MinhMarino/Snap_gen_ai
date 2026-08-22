@@ -120,7 +120,7 @@ export async function withRetries<T>(
         ? options.isRetryable(err, attempt)
         : isRetryableMediaError(err);
       if (!retryable || attempt >= maxAttempts) break;
-      const delayMs = Math.min(30_000, baseDelayMs * 2 ** (attempt - 1));
+      const delayMs = Math.min(60_000, baseDelayMs * 2 ** (attempt - 1));
       options?.onRetry?.(attempt, err, delayMs);
       const until = Date.now() + delayMs;
       while (Date.now() < until) {
@@ -133,5 +133,8 @@ export async function withRetries<T>(
   }
 
   const detail = lastError instanceof Error ? lastError.message : String(lastError);
+  if (detail === label || detail.startsWith(`${label}:`)) {
+    throw lastError instanceof Error ? lastError : new Error(detail);
+  }
   throw new Error(`${label}: ${detail}`);
 }
