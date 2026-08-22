@@ -70,7 +70,9 @@ const api = {
     modelId?: string;
     language?: string;
     speed?: number;
-  }): Promise<{ dataUrl: string }> => ipcRenderer.invoke(IPC.genmaxPreviewVoice, input),
+    sampleUrl?: string;
+  }): Promise<{ dataUrl: string; fromSample?: boolean }> =>
+    ipcRenderer.invoke(IPC.genmaxPreviewVoice, input),
   listGenmaxModels: (input?: {
     backend?: GenmaxBackend;
   }): Promise<Array<{ modelId: string; name: string; description?: string; maxChars?: number }>> =>

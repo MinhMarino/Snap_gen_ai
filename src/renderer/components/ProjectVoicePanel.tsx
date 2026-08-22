@@ -435,6 +435,7 @@ export default function ProjectVoicePanel({
           <GenmaxVoicePicker
             backend={value.genmaxBackend || 'elevenlabs'}
             value={value.genmaxVoiceId}
+            language={value.narrationLanguage}
             speed={clampGenmaxSpeed(value.genmaxSpeed, value.genmaxBackend)}
             disabled={disabled || !genmaxReady}
             onBackendChange={(genmaxBackend) =>

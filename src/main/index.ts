@@ -184,6 +184,7 @@ function registerIpc(): void {
         modelId?: string;
         language?: string;
         speed?: number;
+        sampleUrl?: string;
       }
     ) => {
       const key = getKeys().genmaxApiKey;
@@ -194,8 +195,10 @@ function registerIpc(): void {
         voiceId: input.voiceId,
         backend: resolveGenmaxBackend(input.backend || settings.genmaxBackend),
         modelId: input.modelId || settings.genmaxModelId,
-        language: input.language,
+        // Nghe thử: luôn en — tránh language dự án (vd. jv) làm 400 trên flash_v2_5.
+        language: input.language || 'en',
         speed: input.speed ?? settings.genmaxSpeed,
+        sampleUrl: input.sampleUrl,
       });
     }
   );

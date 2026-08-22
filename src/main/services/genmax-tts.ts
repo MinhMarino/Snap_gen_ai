@@ -132,36 +132,119 @@ export function chunkTextForGenmax(text: string, maxChars = MAX_CHARS_PER_REQUES
   return chunkNarrationText(text, maxChars);
 }
 
+/** Cloudflare/HTML gateway errors → thông báo ngắn, không dump cả trang. */
+function formatGenmaxHttpError(status: number, raw: string): string {
+  const text = String(raw || '').trim();
+  const isHtml = /<!DOCTYPE|<html[\s>]/i.test(text);
+  const cloudflare =
+    status === 520 ||
+    status === 521 ||
+    status === 522 ||
+    status === 523 ||
+    status === 524 ||
+    /web server is returning an unknown error|cloudflare|bad gateway|gateway time-out/i.test(
+      text
+    );
+  if (cloudflare || (isHtml && status >= 500)) {
+    return (
+      `GenMax đang lỗi tạm thời (HTTP ${status}). ` +
+      `Thử lại sau vài phút — đây là sự cố phía genmax.io, không phải key của bạn.`
+    );
+  }
+  if (isHtml) {
+    const title = text.match(/<title[^>]*>([^<]+)<\/title>/i)?.[1]?.trim();
+    return `GenMax HTTP ${status}: ${title || 'phản hồi HTML không hợp lệ'}`.slice(0, 220);
+  }
+  return `GenMax HTTP ${status}: ${text.slice(0, 280)}`.trim();
+}
+
+function isTransientGenmaxError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  return /GenMax HTTP (520|521|522|523|524|502|503|504)\b/i.test(msg) || /đang lỗi tạm thời/i.test(msg);
+}
+
 async function genmaxFetchJson<T = unknown>(
   apiKey: string,
   pathOrUrl: string,
   init?: RequestInit
 ): Promise<T> {
   const url = pathOrUrl.startsWith('http') ? pathOrUrl : `${GENMAX_API_BASE}${pathOrUrl}`;
-  const res = await fetch(url, {
-    ...init,
-    headers: {
-      'xi-api-key': apiKey.trim(),
-      'Content-Type': 'application/json',
-      ...(init?.headers || {}),
-    },
-  });
-  const text = await res.text();
-  let body: unknown = {};
-  try {
-    body = text ? JSON.parse(text) : {};
-  } catch {
-    body = { error: text.slice(0, 400) };
-  }
-  if (!res.ok) {
-    const errObj = body as { error?: string; message?: string; detail?: string };
-    const msg = errObj.error || errObj.message || errObj.detail || text.slice(0, 300);
-    if (res.status === 401 || res.status === 403) {
-      throw new Error(`GenMax: API key bị từ chối (${res.status}). Kiểm tra lại key sk_…`);
+  const method = String(init?.method || 'GET').toUpperCase();
+  const maxAttempts = method === 'GET' ? 3 : 1;
+  let lastErr: unknown;
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      const res = await fetch(url, {
+        ...init,
+        headers: {
+          'xi-api-key': apiKey.trim(),
+          'Content-Type': 'application/json',
+          ...(init?.headers || {}),
+        },
+      });
+      const text = await res.text();
+      let body: unknown = {};
+      try {
+        body = text ? JSON.parse(text) : {};
+      } catch {
+        body = { error: text.slice(0, 400) };
+      }
+      if (!res.ok) {
+        const errObj = body as { error?: string; message?: string; detail?: string };
+        const raw = errObj.error || errObj.message || errObj.detail || text;
+        if (res.status === 401 || res.status === 403) {
+          throw new Error(`GenMax: API key bị từ chối (${res.status}). Kiểm tra lại key sk_…`);
+        }
+        throw new Error(formatGenmaxHttpError(res.status, String(raw)));
+      }
+      return body as T;
+    } catch (err) {
+      lastErr = err;
+      if (attempt >= maxAttempts || !isTransientGenmaxError(err)) throw err;
+      await sleep(400 * attempt);
     }
-    throw new Error(`GenMax HTTP ${res.status}: ${msg}`.trim());
   }
-  return body as T;
+  throw lastErr instanceof Error ? lastErr : new Error(String(lastErr));
+}
+
+/**
+ * Map ngôn ngữ UI / lời bình → mã lọc thư viện GenMax.
+ * Gõ "japanese" / "日本語" không phải tên giọng — phải gửi required_languages=ja.
+ */
+export function inferGenmaxLibraryLanguageIso(raw?: string | null): string | undefined {
+  const s = String(raw || '')
+    .trim()
+    .toLowerCase();
+  if (!s) return undefined;
+  const exact = ELEVENLABS_LANGUAGES.find(
+    (l) => l.id.toLowerCase() === s || l.label.toLowerCase() === s
+  );
+  if (exact) return exact.id;
+  if (/japan|日本語|\bja\b|\bjp\b|nhật/.test(s)) return 'ja';
+  if (/việt|vietnam|\bvi\b/.test(s)) return 'vi';
+  if (/中|chinese|mandarin|\bzh\b/.test(s)) return 'zh';
+  if (/korea|한국어|\bko\b|hàn/.test(s)) return 'ko';
+  if (/english|\ben\b/.test(s)) return 'en';
+  if (/french|pháp|\bfr\b/.test(s)) return 'fr';
+  if (/spanish|tây ban|\bes\b/.test(s)) return 'es';
+  if (/thai|\bth\b|thái/.test(s)) return 'th';
+  if (/indonesia|\bid\b/.test(s)) return 'id';
+  return undefined;
+}
+
+/** Query param language / required_languages theo backend. */
+export function genmaxVoiceLanguageQuery(
+  backend: GenmaxBackend,
+  iso?: string | null
+): string | undefined {
+  const code = String(iso || '').trim().toLowerCase();
+  if (!code) return undefined;
+  if (backend === 'minimax') {
+    if (code === 'zh') return 'Chinese (Mandarin)';
+    const row = ELEVENLABS_LANGUAGES.find((l) => l.id === code);
+    return row?.label || undefined;
+  }
+  return code;
 }
 
 export async function testGenmaxApiKey(apiKey: string): Promise<{ ok: boolean; message: string }> {
@@ -230,24 +313,89 @@ export async function listGenmaxModels(
 
 function mapElVoice(
   v: Record<string, unknown>,
-  backend: GenmaxBackend
+  backend: GenmaxBackend,
+  preferLang?: string
 ): GenmaxVoice | null {
   const voiceId = String(v.voice_id || v.uniq_id || '').trim();
   const name = String(v.name || v.voice_name || voiceId).trim();
   if (!voiceId || !name) return null;
+  const verified = Array.isArray(v.verified_languages)
+    ? (v.verified_languages as Array<Record<string, unknown>>)
+    : [];
+  const prefer = String(preferLang || '').toLowerCase();
+  const verifiedHit =
+    (prefer
+      ? verified.find((row) => {
+          const id = String(row.language_id || row.locale || '').toLowerCase();
+          const label = String(row.language || '').toLowerCase();
+          return id === prefer || id.startsWith(`${prefer}-`) || label === prefer;
+        })
+      : undefined) || verified[0];
+  const language =
+    String(
+      verifiedHit?.language_id || v.language || verifiedHit?.language || v.locale || ''
+    ).trim() || undefined;
+  const previewUrl =
+    String(
+      verifiedHit?.preview_url ||
+        v.preview_url ||
+        v.sample_audio ||
+        v.sample_audio_url ||
+        ''
+    ).trim() || undefined;
   return {
     voiceId,
     name,
-    previewUrl: String(v.preview_url || v.sample_audio || v.sample_audio_url || '') || undefined,
+    previewUrl,
     category: String(v.category || backend),
     gender: String(v.gender || ''),
     age: String(v.age || ''),
-    accent: String(v.accent || ''),
-    language: String(v.language || ''),
+    accent: String(verifiedHit?.accent || v.accent || ''),
+    language,
     description: String(v.description || ''),
     backend,
     uniqId: v.uniq_id ? String(v.uniq_id) : undefined,
   };
+}
+
+function dedupeVoices(list: GenmaxVoice[]): GenmaxVoice[] {
+  const seen = new Set<string>();
+  return list.filter((v) => {
+    if (seen.has(v.voiceId)) return false;
+    seen.add(v.voiceId);
+    return true;
+  });
+}
+
+async function fetchSharedVoicePages(options: {
+  apiKey: string;
+  pageSize: number;
+  search?: string;
+  language?: string;
+  gender?: string;
+  startPage: number;
+  maxPages: number;
+}): Promise<Record<string, unknown>[]> {
+  const collected: Record<string, unknown>[] = [];
+  let page = options.startPage;
+  for (let i = 0; i < options.maxPages; i += 1) {
+    const sharedParams = new URLSearchParams();
+    sharedParams.set('page_size', String(options.pageSize));
+    sharedParams.set('sort', 'trending');
+    sharedParams.set('page', String(page));
+    if (options.search) sharedParams.set('search', options.search);
+    if (options.language) sharedParams.set('required_languages', options.language);
+    if (options.gender) sharedParams.set('gender', options.gender);
+    const shared = await genmaxFetchJson<{
+      voices?: Record<string, unknown>[];
+      has_more?: boolean;
+    }>(options.apiKey, `/v1/shared-voices?${sharedParams.toString()}`);
+    const batch = shared.voices || [];
+    collected.push(...batch);
+    if (!shared.has_more || batch.length === 0) break;
+    page += 1;
+  }
+  return collected;
 }
 
 export async function listGenmaxVoices(options: {
@@ -262,62 +410,76 @@ export async function listGenmaxVoices(options: {
   const apiKey = options.apiKey.trim();
   const backend = resolveGenmaxBackend(options.backend);
   const pageSize = Math.max(1, Math.min(100, options.pageSize ?? 40));
-  const page = Math.max(backend === 'elevenlabs' ? 0 : 1, options.page ?? (backend === 'elevenlabs' ? 0 : 1));
+  const page = Math.max(
+    backend === 'elevenlabs' ? 0 : 1,
+    options.page ?? (backend === 'elevenlabs' ? 0 : 1)
+  );
+  const rawSearch = options.search?.trim() || '';
+  const languageIso =
+    inferGenmaxLibraryLanguageIso(options.language) ||
+    inferGenmaxLibraryLanguageIso(rawSearch);
+  const searchIsLanguageOnly = Boolean(
+    languageIso && inferGenmaxLibraryLanguageIso(rawSearch) === languageIso
+  );
+  const search = searchIsLanguageOnly ? '' : rawSearch;
+  const langQuery = genmaxVoiceLanguageQuery(backend, languageIso);
   const params = new URLSearchParams();
   params.set('page_size', String(pageSize));
-  if (options.search?.trim()) params.set('search', options.search.trim());
+  if (search) params.set('search', search);
 
   if (backend === 'elevenlabs') {
-    // Default premade + một trang shared trending.
-    const def = await genmaxFetchJson<{ voices?: Record<string, unknown>[] }>(
-      apiKey,
-      `/v1/default-voices?${params.toString()}`
+    // Lọc ngôn ngữ (vd. Japanese) phải gọi shared-voices + required_languages —
+    // default premade hầu như chỉ English, trending không có ja.
+    const extraPages = languageIso && languageIso !== 'en' ? 3 : 1;
+    const [def, sharedRaw] = await Promise.all([
+      languageIso
+        ? Promise.resolve({ voices: [] as Record<string, unknown>[] })
+        : genmaxFetchJson<{ voices?: Record<string, unknown>[] }>(
+            apiKey,
+            `/v1/default-voices?${params.toString()}`
+          ),
+      fetchSharedVoicePages({
+        apiKey,
+        pageSize,
+        search: search || undefined,
+        language: langQuery,
+        gender: options.gender?.trim() || undefined,
+        startPage: page,
+        maxPages: extraPages,
+      }).catch(() => [] as Record<string, unknown>[]),
+    ]);
+    return dedupeVoices(
+      [...(def.voices || []), ...sharedRaw]
+        .map((v) => mapElVoice(v, 'elevenlabs', languageIso))
+        .filter((v): v is GenmaxVoice => Boolean(v))
     );
-    const sharedParams = new URLSearchParams(params);
-    sharedParams.set('sort', 'trending');
-    sharedParams.set('page', String(page));
-    if (options.language?.trim()) sharedParams.set('required_languages', options.language.trim());
-    if (options.gender?.trim()) sharedParams.set('gender', options.gender.trim());
-    let shared: { voices?: Record<string, unknown>[] } = { voices: [] };
-    try {
-      shared = await genmaxFetchJson(apiKey, `/v1/shared-voices?${sharedParams.toString()}`);
-    } catch {
-      /* shared optional */
-    }
-    const mapped = [...(def.voices || []), ...(shared.voices || [])]
-      .map((v) => mapElVoice(v, 'elevenlabs'))
-      .filter((v): v is GenmaxVoice => Boolean(v));
-    const seen = new Set<string>();
-    return mapped.filter((v) => {
-      if (seen.has(v.voiceId)) return false;
-      seen.add(v.voiceId);
-      return true;
-    });
   }
 
   if (backend === 'minimax') {
     params.set('page', String(Math.max(1, page || 1)));
-    if (options.language?.trim()) params.set('language', options.language.trim());
+    if (langQuery) params.set('language', langQuery);
     if (options.gender?.trim()) params.set('gender', options.gender.trim());
     const data = await genmaxFetchJson<{ voice_list?: Record<string, unknown>[] }>(
       apiKey,
       `/v1/minimax/system-voices?${params.toString()}`
     );
     return (data.voice_list || [])
-      .map((v) => mapElVoice(v, 'minimax'))
+      .map((v) => mapElVoice(v, 'minimax', languageIso))
       .filter((v): v is GenmaxVoice => Boolean(v));
   }
 
-  // CapCut
+  // CapCut — language = ISO (ja, vi, …)
   params.set('page', String(Math.max(1, page || 1)));
-  if (options.language?.trim()) params.set('language', options.language.trim());
+  if (langQuery) params.set('language', langQuery);
   if (options.gender?.trim()) params.set('gender', options.gender.trim());
   const data = await genmaxFetchJson<{
     voice_list?: Record<string, unknown>[];
     voices?: Record<string, unknown>[];
   }>(apiKey, `/v1/capcut/system-voices?${params.toString()}`);
   const list = data.voice_list || data.voices || [];
-  return list.map((v) => mapElVoice(v, 'capcut')).filter((v): v is GenmaxVoice => Boolean(v));
+  return list
+    .map((v) => mapElVoice(v, 'capcut', languageIso))
+    .filter((v): v is GenmaxVoice => Boolean(v));
 }
 
 async function waitForGenmaxTask(options: {
@@ -620,22 +782,62 @@ export async function previewGenmaxVoice(options: {
   modelId?: string;
   language?: string;
   speed?: number;
-}): Promise<{ dataUrl: string }> {
+  /** Sample CDN của giọng — ưu tiên tải về (nhanh, không tốn TTS). */
+  sampleUrl?: string;
+}): Promise<{ dataUrl: string; fromSample: boolean }> {
+  const toDataUrl = (buf: Buffer, mime = 'audio/mpeg') =>
+    `data:${mime};base64,${buf.toString('base64')}`;
+
+  const sampleUrl = options.sampleUrl?.trim();
+  if (sampleUrl) {
+    try {
+      const headers: Record<string, string> = {};
+      if (sampleUrl.includes('api.genmax.io')) {
+        headers['xi-api-key'] = options.apiKey.trim();
+      }
+      const res = await fetch(sampleUrl, { headers });
+      if (res.ok) {
+        const buf = Buffer.from(await res.arrayBuffer());
+        if (buf.length >= 100) {
+          const ct = (res.headers.get('content-type') || 'audio/mpeg').split(';')[0].trim();
+          return {
+            dataUrl: toDataUrl(buf, ct.startsWith('audio/') ? ct : 'audio/mpeg'),
+            fromSample: true,
+          };
+        }
+      }
+    } catch {
+      /* sample hỏng → TTS bên dưới */
+    }
+  }
+
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'snapgen-genmax-'));
   try {
-    const { audioPath } = await synthesizeWithGenmax({
-      apiKey: options.apiKey,
-      text: 'Hello. This is a GenMax voice preview.',
-      voiceId: options.voiceId,
-      backend: options.backend,
-      modelId: options.modelId,
-      language: options.language || 'en',
-      speed: options.speed,
-      outDir: tmpDir,
-      fileName: 'preview.mp3',
-    });
-    const buf = fs.readFileSync(audioPath);
-    return { dataUrl: `data:audio/mpeg;base64,${buf.toString('base64')}` };
+    let lastErr: unknown;
+    // GenMax hay 520 (Cloudflare) — retry ngắn trước khi báo lỗi.
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
+      try {
+        const { audioPath } = await synthesizeWithGenmax({
+          apiKey: options.apiKey,
+          text: 'Hello. This is a quick voice preview.',
+          voiceId: options.voiceId,
+          backend: options.backend,
+          modelId: options.modelId,
+          language: options.language || 'en',
+          speed: options.speed,
+          outDir: tmpDir,
+          fileName: `preview-${attempt}.mp3`,
+        });
+        const buf = fs.readFileSync(audioPath);
+        if (buf.length < 100) throw new Error('GenMax preview: file audio trống hoặc quá nhỏ.');
+        return { dataUrl: toDataUrl(buf), fromSample: false };
+      } catch (err) {
+        lastErr = err;
+        if (!isTransientGenmaxError(err) || attempt === 3) break;
+        await sleep(1200 * attempt);
+      }
+    }
+    throw lastErr instanceof Error ? lastErr : new Error(String(lastErr));
   } finally {
     try {
       fs.rmSync(tmpDir, { recursive: true, force: true });
